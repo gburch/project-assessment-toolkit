@@ -51,12 +51,15 @@ Follow the [local workflow](docs/PROJECT_ASSESS.md#local-workflow) to fill a `re
 
 ## PAT's own assessment
 
-[![PAT assessment snapshot](docs/badges/summary.svg)](docs/badges/README.md)
-[![PAT testing snapshot](docs/badges/testing.svg)](docs/badges/README.md)
-[![PAT maintainability snapshot](docs/badges/maintainability.svg)](docs/badges/README.md)
-[![PAT extensibility snapshot](docs/badges/extensibility.svg)](docs/badges/README.md)
+<p>
+  <a href="docs/badges/README.md"><img src="docs/badges/summary.svg?v=2" alt="PAT assessment snapshot"></a>
+  <a href="docs/badges/README.md"><img src="docs/badges/testing.svg?v=2" alt="PAT testing snapshot"></a>
+  <br>
+  <a href="docs/badges/README.md"><img src="docs/badges/maintainability.svg?v=2" alt="PAT maintainability snapshot"></a>
+  <a href="docs/badges/README.md"><img src="docs/badges/extensibility.svg?v=2" alt="PAT extensibility snapshot"></a>
+</p>
 
-These are saved snapshots, not live status or a security certification. [Read the self-assessment](docs/badges/README.md). Capability (`C`) and burden (`B`) stay separate; `?` means unknown.
+These are saved snapshots, not live status or a security certification. [Read the self-assessment](docs/badges/README.md). Capability and upkeep burden stay separate; `?` means unknown.
 
 Export saved assessments as badges for your own README. See the [badge guide](docs/PROJECT_ASSESS.md#github-badges) for SVG, JSON, regeneration and the metadata made public by an export.
 

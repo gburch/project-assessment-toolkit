@@ -152,30 +152,105 @@ def badge(report, dimension="summary"):
         f"Both rating axes known for {meta['known_dimensions']}/{meta['total_dimensions']} dimensions. "
         f"Collection complete: {str(meta['complete']).lower()}; collection gaps: {meta['gap_count']}. "
         "Finding counts are reported records, not proof of absent risks or a security certification. "
+        "Higher capability means more demonstrated support; lower burden means less upkeep. "
+        "Axis colors distinguish capability and burden, not rating quality. "
         "Static snapshot; current repository or deployed behavior may differ."
     )
-    left = 14 + len(data["label"]) * 7
-    message, footers = data["message"], []
-    right = 14 + len(message) * 7
-    if left + right > 288 and " | " in message:
-        message, *footers = message.split(" | ")
-        right = 14 + len(message) * 7
-    width = max([left + right, *(14 + len(part) * 7 for part in footers)])
-    height = 24 + 18 * len(footers)
+
+    def text(x, y, value, *, color="#cbd5e1", size=10, weight=400, anchor="start"):
+        return (
+            f'<text x="{x}" y="{y}" fill="{color}" font-size="{size}" '
+            f'font-weight="{weight}" text-anchor="{anchor}">{escape(str(value))}</text>'
+        )
+
+    counts = meta["findings"]
+    has_findings = bool(counts["critical"] or counts["high"])
+    footers = []
+    if has_findings:
+        warning = f"Reported: {counts['critical']} critical / {counts['high']} high"
+        footers.extend(
+            [warning]
+            if len(warning) <= 29
+            else [f"Reported: {counts['critical']} critical", f"{counts['high']} high"]
+        )
+    if meta["review_status"] == "unreviewed" and dimension != "summary":
+        footers.append("Unreviewed")
+    if not meta["complete"]:
+        footers.append("Partial scan")
+    card_height = 52 + 18 * len(footers)
+    height = card_height + 8  # Keep wrapped cards apart in GitHub's inline image layout.
+    visible = [
+        text(
+            12,
+            20,
+            "Assessment" if dimension == "summary" else dimension.capitalize(),
+            color="#f1f5f9",
+            size=12,
+            weight=600,
+        ),
+        text(188, 19, "PAT", color="#94a3b8", size=9, weight=600, anchor="end"),
+    ]
+    if dimension == "summary":
+        if meta["review_status"] == "unreviewed":
+            visible.append(text(12, 44, "Unreviewed", color="#f1f5f9", size=12, weight=600))
+        else:
+            visible.extend(
+                [
+                    text(
+                        12,
+                        45,
+                        f"{meta['known_dimensions']}/{meta['total_dimensions']}",
+                        color="#f1f5f9",
+                        size=14,
+                        weight=700,
+                    ),
+                    text(42, 44, "known"),
+                ]
+            )
+        visible.append(
+            text(
+                188,
+                44,
+                "Reported findings" if has_findings else "0 critical / 0 high",
+                color="#fbbf24" if has_findings else "#94a3b8",
+                anchor="end",
+            )
+        )
+    else:
+        for label, key, x, color in (
+            ("Capability", "capability", 12, "#67e8f9"),
+            ("Burden", "burden", 112, "#fbbf24"),
+        ):
+            score = "?" if meta[key] is None else meta[key]
+            visible.extend(
+                [
+                    text(x, 43, label, color=color),
+                    text(
+                        91 if key == "capability" else 188,
+                        45,
+                        f"{score}/5",
+                        color=color,
+                        size=14,
+                        weight=700,
+                        anchor="end",
+                    ),
+                ]
+            )
+        visible.append('<path d="M100 31v16" stroke="#334155"/>')
+    if footers:
+        visible.append('<path d="M12 52h176" stroke="#334155"/>')
+        visible.extend(
+            text(100, 65 + row * 18, value, color="#fbbf24", anchor="middle")
+            for row, value in enumerate(footers)
+        )
     identity = "pat-badge-" + dimension
     return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}" role="img" aria-labelledby="{identity}-title {identity}-desc">'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="200" height="{height}" '
+        f'viewBox="0 0 200 {height}" role="img" aria-labelledby="{identity}-title {identity}-desc">'
         f'<title id="{identity}-title">{escape(title)}</title>'
         f'<desc id="{identity}-desc">{escape(description)}</desc>'
-        f'<rect width="{width}" height="{height}" rx="3" fill="#4b5563"/>'
-        f'<path d="M{left} 0h{width - left}v24H{left}z" fill="#{data["color"]}"/>'
-        '<g fill="#fff" text-anchor="middle" font-family="DejaVu Sans Mono,monospace" font-size="11">'
-        f'<text x="{left / 2:g}" y="16">{escape(data["label"])}</text>'
-        f'<text x="{left + (width - left) / 2:g}" y="16">{escape(message)}</text>'
-        + "".join(
-            f'<text x="{width / 2:g}" y="{37 + row * 18}">{escape(part)}</text>'
-            for row, part in enumerate(footers)
-        )
+        f'<rect x="0.5" y="0.5" width="199" height="{card_height - 1}" rx="8" fill="#111b2b" stroke="#334155"/>'
+        '<g font-family="system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif">'
+        + "".join(visible)
         + "</g></svg>"
     )

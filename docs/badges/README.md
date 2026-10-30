@@ -2,7 +2,7 @@
 
 Self-assessed snapshot captured 2026-10-30, using rubric 4 and [source e098398](https://github.com/gburch/project-assessment-toolkit/tree/e0983985f8f87d50654c5134df8e2996814940b5). Badges describe this saved assessment, not a live certification.
 
-![PAT summary](summary.svg)
+![PAT summary](summary.svg?v=2)
 
 | Dimension | Capability / 5 | Burden / 5 |
 |---|---:|---:|

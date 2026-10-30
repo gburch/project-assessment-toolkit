@@ -64,7 +64,7 @@ uv run --locked pat --state-dir /path/outside/repos/pat-state badge ASSESSMENT_I
   --dimension testing > docs/badges/testing.svg
 ```
 
-Use `--dimension summary` or any of the seven dimension names. Dimension badges show capability `Cx/5` (higher) and burden `Bx/5` (lower); unknown values display `?`. The summary counts a dimension as known only when both scores are numeric. Reported critical/high finding counts include records in the selected snapshot and saved review; they are not an aggregate quality score or proof of absent risks. Unreviewed assessments and partial scans are labeled.
+Use `--dimension summary` or any of the seven dimension names. SVG cards label capability and burden separately on their 0–5 scales; cyan and gold distinguish the axes, not good/bad grades. JSON badges retain `Cx/5` and `Bx/5`. Unknown values display `?`. The summary counts a dimension as known only when both scores are numeric. Reported critical/high finding counts include records in the selected snapshot and saved review; they are not an aggregate quality score or proof of absent risks. Unreviewed assessments and partial scans are labeled.
 
 Commit the SVGs and reference them relative to the README on GitHub:
 
