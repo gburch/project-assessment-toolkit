@@ -1,0 +1,7 @@
+interface:
+  display_name: "Test value"
+  short_description: "Reduce test cost while protecting critical behavior"
+  default_prompt: "Use $test-value to reduce this suite's maintenance and execution cost, using 70% as a soft ordinary-code target and retaining important failure protection."
+
+policy:
+  allow_implicit_invocation: true

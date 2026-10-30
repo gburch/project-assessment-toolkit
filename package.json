@@ -1,0 +1,18 @@
+{
+  "name": "pat-assess",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test:browser": "node scripts/test-project-assess-browser.mjs",
+    "browser:install": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.57.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

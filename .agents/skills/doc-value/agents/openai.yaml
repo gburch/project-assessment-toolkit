@@ -1,0 +1,6 @@
+interface:
+  display_name: "Documentation value"
+  short_description: "Prune stale docs and improve agent navigation"
+  default_prompt: "Use $doc-value to audit this repository and remove or correct low-value documentation using current source and caller evidence."
+policy:
+  allow_implicit_invocation: true

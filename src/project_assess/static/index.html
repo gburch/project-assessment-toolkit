@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>PAT — Project Assessment Toolkit</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead"><div><p class="eyebrow">Project Assessment Toolkit</p><h1>PAT</h1></div><p class="offline">Local assessment workspace</p></header>
+  <main>
+    <div class="toolbar"><label for="project">Project<select id="project"><option value="">Choose a project</option></select></label><button id="rescan" type="button" disabled>Scan again</button></div>
+    <p id="status" role="status" aria-live="polite">Loading assessments…</p>
+    <p id="error" role="alert" hidden></p>
+    <section id="empty" hidden><h2>Start with evidence</h2><p>Scan a repository with the CLI or MCP tool, then reload this page. Scanning inspects files without running project code.</p><code>pat --state-dir /path/to/state scan /path/to/project</code></section>
+    <div id="report" hidden>
+      <section class="project-heading"><h2 id="project-name"></h2><p id="source" class="secondary"></p><p>Capability describes what works. Burden describes the cost of keeping it working. Missing evidence stays unknown.</p></section>
+      <section aria-labelledby="ratings-heading"><h2 id="ratings-heading">Current assessment</h2><div id="ratings" class="ratings"></div></section>
+      <section aria-labelledby="goals-heading" class="goals-section"><div class="section-heading"><div><h2 id="goals-heading">Choose your targets</h2><p>Capability is a minimum. Burden is a ceiling. Extra useful capability is welcome.</p></div></div>
+        <form id="goal-form"><label for="profile">Starting profile<select id="profile"><option value="">Custom targets</option></select></label><div id="goal-controls" class="goal-controls"></div><div class="save-row"><button type="submit" id="save" class="primary">Save goals</button><span id="goal-state" class="secondary">No goals saved</span></div></form>
+      </section>
+      <section aria-labelledby="progress-heading"><h2 id="progress-heading">Progress toward your goals</h2><p id="progress-summary"></p><div id="progress" class="progress-list"></div></section>
+      <section aria-labelledby="findings-heading"><h2 id="findings-heading">Findings and next steps</h2><div id="findings"></div><ul id="recommendations"></ul><p id="findings-empty" class="secondary"></p></section>
+      <section aria-labelledby="evidence-heading"><h2 id="evidence-heading">Facts and evidence</h2><p id="coverage" class="secondary"></p><div id="gaps"></div><details><summary>Collected facts</summary><pre id="facts" tabindex="0"></pre></details><details><summary id="evidence-summary">Captured evidence</summary><div id="evidence"></div></details></section>
+      <section aria-labelledby="history-heading"><h2 id="history-heading">Assessment and goal history</h2><p class="secondary">Goal changes establish a new baseline. Reassessing unchanged source is an evidence update.</p><div id="history"></div></section>
+    </div>
+  </main>
+  <footer>Repository evidence does not establish deployed security, production reliability, or runtime test effectiveness.</footer>
+</body>
+</html>
