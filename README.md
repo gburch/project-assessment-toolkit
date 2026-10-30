@@ -1,17 +1,37 @@
-# PAT — Project Assessment Toolkit
+<p align="center">
+  <img src=".github/assets/pat-logo.png" width="160" alt="PAT spirit level logo">
+</p>
+<h1 align="center">PAT</h1>
+<p align="center"><strong>Project Assessment Toolkit</strong><br>Find the right balance.</p>
+<p align="center">
+  <a href="LICENSE"><img src=".github/assets/license-mit.svg" alt="MIT license"></a>
+  <a href="pyproject.toml"><img src=".github/assets/python-311.svg" alt="Python 3.11+"></a>
+</p>
+<p align="center">
+  <a href="docs/PROJECT_ASSESS.md">Guide</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a> ·
+  <a href="https://github.com/gburch/project-assessment-toolkit/issues">Issues</a> ·
+  <a href="SECURITY.md">Security</a>
+</p>
 
-[![PAT assessment snapshot](docs/badges/summary.svg)](docs/badges/README.md)
-[![PAT testing snapshot](docs/badges/testing.svg)](docs/badges/README.md)
-[![PAT maintainability snapshot](docs/badges/maintainability.svg)](docs/badges/README.md)
-[![PAT extensibility snapshot](docs/badges/extensibility.svg)](docs/badges/README.md)
+PAT helps you see what works, what costs too much to maintain, and what to improve next. Choose goals that fit your project and track progress toward them.
 
-Understand a project's engineering capability and upkeep burden, choose goals that fit, and see progress toward them.
+Assess **security, testing, documentation, maintainability, delivery, operability and extensibility** on two independent 0–5 scales: **capability** and **upkeep burden**. A project can need stronger tests, fewer brittle fixtures, or both. Useful capability has no penalty. Missing evidence stays **unknown**; counts never assign scores.
 
-PAT assesses **security, testing, documentation, maintainability, delivery, operability and extensibility**. Each has independent 0–5 capability and burden ratings: adding missing protection and removing needless upkeep can both improve a project. Missing evidence stays unknown. Counts never assign scores.
+PAT runs locally without an AI service. Scans collect facts; a person or optional agent supplies cited judgment.
 
-PAT runs without an AI service. Local scans collect facts; a person or optional agent supplies cited judgment. `doctor` surfaces review candidates, and `evolve` derives a small next-step plan from saved reviews and user-selected goals. Neither automatically rates, changes goals or repairs source.
+## From evidence to a next step
 
-## Start from source
+| Step | What you get |
+| --- | --- |
+| **Scan** | Capture source facts and supplied reports without executing the project or changing its files. |
+| **Review** | Add capability and burden ratings supported by the captured evidence. |
+| **Goals** | Choose capability minimums and burden ceilings, then compare later assessments. |
+| **Doctor / Evolve** | Inspect reuse, quality and efficiency candidates; plan a bounded next step against selected goals. |
+
+Doctor and Evolve provide advice. They do not assign ratings, save goals or repair source automatically. A target edit changes the goal, not the observed project.
+
+## Get started from source
 
 Requires macOS or Linux, Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
@@ -22,54 +42,37 @@ uv sync --locked
 uv run --locked pat --state-dir /path/outside/repos/pat-state scan /path/to/project
 uv run --locked pat --state-dir /path/outside/repos/pat-state list
 uv run --locked pat --state-dir /path/outside/repos/pat-state report ASSESSMENT_ID --format markdown
-uv run --locked pat --state-dir /path/outside/repos/pat-state doctor ASSESSMENT_ID
-uv run --locked pat --state-dir /path/outside/repos/pat-state evolve ASSESSMENT_ID
 uv run --locked pat --state-dir /path/outside/repos/pat-state serve --open
 ```
 
-The local app displays evidence, ratings, editable goals and progress. Keep state outside assessed repositories: it contains captured source excerpts, reviews and goals. A scan reads source and supplied reports without executing the project, loading its plugins or changing its files.
+The local app displays evidence, ratings, editable goals and progress. **Keep state outside assessed repositories:** it contains captured source excerpts, reviews and goals.
 
-To add ratings, use `review-template`, inspect `evidence` and `rubric`, then submit the completed JSON with `review --input FILE`. The optional [project-assess skill](.agents/skills/project-assess/SKILL.md) guides that review. Confirm the goals you want before saving them; a profile is a suggestion, and changing a target is not engineering progress.
+Follow the [local workflow](docs/PROJECT_ASSESS.md#local-workflow) to fill a `review-template`, inspect `evidence` and `rubric`, and submit the review. The optional [assessment skill](.agents/skills/project-assess/SKILL.md) guides the same process. Choose goals explicitly; profiles are starting suggestions.
 
-## Right-size the work
+## PAT's own assessment
 
-`doctor ASSESSMENT_ID` groups captured hints into reuse, quality and efficiency candidates. Inspect source and actual callers before treating a hint as a problem. `evolve ASSESSMENT_ID` can recommend strengthening, simplifying, rebalancing or maintaining a dimension. Without selected goals it asks for their selection and saves nothing.
+[![PAT assessment snapshot](docs/badges/summary.svg)](docs/badges/README.md)
+[![PAT testing snapshot](docs/badges/testing.svg)](docs/badges/README.md)
+[![PAT maintainability snapshot](docs/badges/maintainability.svg)](docs/badges/README.md)
+[![PAT extensibility snapshot](docs/badges/extensibility.svg)](docs/badges/README.md)
 
-Challenge architecture and rules against demonstrated requirements. Earlier AI decisions are revisable; security, durable-data and integration guarantees still matter. Extensibility may mean a small function or configuration seam rather than a plugin system. A high-capability, low-burden practice can stay as it is.
+These are saved snapshots, not live status or a security certification. [Read the self-assessment](docs/badges/README.md). Capability (`C`) and burden (`B`) stay separate; `?` means unknown.
 
-The [user guide](docs/PROJECT_ASSESS.md) covers reviews, goal profiles, progress, local state and MCP. The [simplification](.agents/skills/project-assess/references/simplify-review.md) and [Evolve](.agents/skills/project-assess/references/evolve-review.md) references guide bounded changes within authorized implementation work.
+Export saved assessments as badges for your own README. See the [badge guide](docs/PROJECT_ASSESS.md#github-badges) for SVG, JSON, regeneration and the metadata made public by an export.
 
-## Optional evidence tools and agents
+## Optional tools and agents
 
-- `doc-value` and `doc-value-nav` inspect documentation and record bounded audit/navigation evidence.
-- `test-value inventory` collects static test leads. `test-value` and `test-value-js` runtime collection execute explicitly selected tests in the project's environment **only when the owner requests that operation**. Scan never runs them automatically.
-- The optional `mcp` extra exposes the same local assessment service over stdio with explicit allowed roots. No cloud credentials or AI API key are required.
+- [Documentation tools](docs/PROJECT_ASSESS.md#documentation-evidence-and-navigation): `doc-value` and `doc-value-nav` inspect documentation and navigation evidence.
+- [Test-value tools](docs/PROJECT_ASSESS.md#test-value-evidence): static inventory and explicitly requested runtime test evidence. Scanning never runs tests automatically.
+- [MCP and bundled skills](docs/PROJECT_ASSESS.md#agent-connection-and-limits): connect an agent to the same local service with explicit allowed roots. No cloud credentials or AI API key are required.
 
-Run `uv run --locked pat skills` to locate the bundled assessment, documentation and test-value skills. Import supported reports with `pat scan --report FILE`; supplied claims remain distinct from verified source identity. AST, lexical and overlap hints do not establish correctness, safe deletion or deployed security. See the guide's [limits](docs/PROJECT_ASSESS.md#agent-connection-and-limits).
+The CLI is `pat`, the Python distribution is `pat-assess`, and the package is `project_assess`. The `project-assess` command alias and skill name remain available for compatibility. Read the [guide](docs/PROJECT_ASSESS.md) for evidence limits, source identity and local state.
 
-The Python distribution is `pat-assess`, the canonical CLI is `pat`, and the Python package is `project_assess`. The `project-assess` CLI alias and skill name remain available for compatibility. The core dependency is `jsonschema`; MCP is optional.
+## Contribute
 
-## GitHub badges
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup and focused checks. Use [issues](https://github.com/gburch/project-assessment-toolkit/issues) for bugs and suggestions, and follow [SECURITY.md](SECURITY.md) for private vulnerability reporting. Share synthetic examples rather than private source, assessment exports or credentials.
 
-Export a saved assessment to SVG, then commit the file with a relative image link in your README:
-
-```bash
-mkdir -p docs/badges
-uv run --locked pat --state-dir /path/outside/repos/pat-state badge ASSESSMENT_ID \
-  --dimension testing > docs/badges/testing.svg
-```
-
-```markdown
-![PAT testing capability and burden](docs/badges/testing.svg)
-```
-
-Badges show separate capability (`C`, higher) and burden (`B`, lower) ratings, with `?` for unknowns. They are static snapshots: regenerate after saving a new review. Exported metrics and metadata are public when committed; private evidence, rationale and paths are excluded. See the [badge guide](docs/PROJECT_ASSESS.md#github-badges) for summary badges, JSON and publication details.
-
-## Contribute and report problems
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and focused checks, and [SECURITY.md](SECURITY.md) for private vulnerability reporting. Public issues and pull requests should use synthetic examples, without private source, assessment exports or credentials.
-
-Licensed under [MIT](LICENSE).
+[Code of conduct](CODE_OF_CONDUCT.md) · [Support](.github/SUPPORT.md) · [MIT license](LICENSE)
 
 ## Dedication
 

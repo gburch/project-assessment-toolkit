@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest a useful, proportional improvement.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe a real use case with synthetic examples. Keep private source, assessment exports and credentials out of public issues.
+        Report vulnerabilities through [private security reporting](https://github.com/gburch/project-assessment-toolkit/security/advisories/new).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and where does PAT get in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed improvement
+      description: If you have an idea, describe the smallest useful change and any alternatives.
+    validations:
+      required: false

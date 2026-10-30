@@ -1,0 +1,29 @@
+name: Bug report
+description: Report unexpected PAT behavior.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use a small synthetic example. Keep private source, assessment exports and credentials out of public issues.
+        Report vulnerabilities through [private security reporting](https://github.com/gburch/project-assessment-toolkit/security/advisories/new).
+  - type: input
+    id: version
+    attributes:
+      label: Version and environment
+      description: PAT version or commit, OS and installation method, if known.
+    validations:
+      required: false
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Commands or steps using synthetic inputs. Include a minimal example if available.
+    validations:
+      required: false
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: What did you expect, and what happened instead? Include only safe, relevant error output.
+    validations:
+      required: true
