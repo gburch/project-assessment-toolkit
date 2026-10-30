@@ -1,45 +1,11 @@
 version = 1
-revision = 2
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
     "(python_full_version < '3.14' and sys_platform != 'emscripten') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
 ]
-
-[[package]]
-name = "pat-assess"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "jsonschema" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "coverage" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-mcp = [
-    { name = "mcp" },
-]
-test-value = [
-    { name = "coverage" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "coverage", marker = "extra == 'dev'", specifier = ">=7.6,<8" },
-    { name = "coverage", marker = "extra == 'test-value'", specifier = ">=7.6,<8" },
-    { name = "jsonschema", specifier = ">=4.23,<5" },
-    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.3,<3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1,<10" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6,<8" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12,<1" },
-]
-provides-extras = ["dev", "mcp", "test-value"]
 
 [[package]]
 name = "annotated-types"
@@ -397,8 +363,8 @@ name = "httpcore2"
 version = "2.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
-    { name = "truststore", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
+    { name = "h11" },
+    { name = "truststore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c0/61/afa9d6b7452f9eca73f73d45324eb0bb52f098fd5e6049bf6b8263be9b4e/httpcore2-2.16.0.tar.gz", hash = "sha256:c72cd0413563b17e1cd8354677dff887466f8ec2551679759e93126534428643", size = 69886, upload-time = "2026-10-21T07:09:45.31Z" }
 wheels = [
@@ -534,6 +500,42 @@ sdist = { url = "https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce89
 wheels = [
     { url = "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c", size = 129956, upload-time = "2026-08-04T18:15:27.159Z" },
 ]
+
+[[package]]
+name = "pat-assess"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "jsonschema" },
+    { name = "packaging" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "coverage" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+mcp = [
+    { name = "mcp" },
+]
+test-value = [
+    { name = "coverage" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "coverage", marker = "extra == 'dev'", specifier = ">=7.6,<8" },
+    { name = "coverage", marker = "extra == 'test-value'", specifier = ">=7.6,<8" },
+    { name = "jsonschema", specifier = ">=4.23,<5" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.3,<3" },
+    { name = "packaging", specifier = ">=24,<27" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1,<10" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6,<8" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12,<1" },
+]
+provides-extras = ["dev", "mcp", "test-value"]
 
 [[package]]
 name = "pluggy"
@@ -1024,8 +1026,8 @@ name = "uvicorn"
 version = "0.54.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
-    { name = "h11", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
+    { name = "click" },
+    { name = "h11" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/da/34/30e9280707135d2cfc589dfff3cb796bd07a3aeb1a3e415ba09dd89d7bb4/uvicorn-0.54.0.tar.gz", hash = "sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620", size = 112283, upload-time = "2026-09-25T06:52:37.601Z" }
 wheels = [

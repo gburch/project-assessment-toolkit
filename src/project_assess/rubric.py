@@ -131,7 +131,29 @@ _ANCHORS = {
                     "in existing rationale/findings. Reflect supported cost in burden with evidence "
                     "and confidence; counts alone do not establish rigidity. No separate score."
                 ),
-            }
+            },
+            "ecosystem_fit": {
+                "version": 1,
+                "purpose": "Match bespoke code and library/framework reuse to demonstrated needs.",
+                "questions": [
+                    "Which requirements, exposure, workload, team and lifecycle constraints justify the current choice?",
+                    "Could a maintained library reduce ownership of custom HTTP, auth, routing, state/cache or validation behavior?",
+                    "Could a smaller dependency or direct implementation replace framework setup that a small utility does not need?",
+                    "What migration, upgrade, security and compatibility costs would each option introduce?",
+                ],
+                "guardrails": (
+                    "Both direct code and framework reuse can fit well. Package presence, count, age "
+                    "or popularity never assign scores or justify automatic migration. Current version "
+                    "support, licenses and vulnerabilities remain unknown offline; verify official "
+                    "sources when researching a recommendation. Preserve required contracts."
+                ),
+                "reporting": (
+                    "Use existing maintainability capability/burden rationale, findings and evidence. "
+                    "Cite concrete behavior, the reuse or simplification option, migration/upkeep cost "
+                    "and a smallest useful experiment with acceptance evidence. User stack preferences "
+                    "are descriptive context, not a global gate or an additional score."
+                ),
+            },
         },
         "capability": [
             "Ordinary changes cannot be made predictably because structure and dependencies are unclear.",

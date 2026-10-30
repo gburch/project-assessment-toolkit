@@ -227,11 +227,48 @@ function renderEvidence(assessment) {
   $("evidence-summary").textContent = `Captured evidence (${assessment.evidence?.length || 0} records)`;
   for (const evidence of assessment.evidence || []) {
     const detail = node("details");
+    detail.dataset.evidenceId = evidence.id;
     detail.append(node("summary", `${evidence.path} · ${evidence.kind}`), node("p", `${evidence.id} · ${evidence.digest}`, "evidence-meta"));
     if (evidence.stats) detail.append(node("pre", jsonText(evidence.stats)));
     if (evidence.excerpt) detail.append(node("pre", evidence.excerpt));
     $("evidence").append(detail);
   }
+  $("ecosystem-fit")?.remove();
+  const ecosystem = assessment.facts?.ecosystem_fit;
+  const captured = (assessment.evidence || []).find((evidence) =>
+    evidence.id === ecosystem?.evidence_id && evidence.kind === "ecosystem-analysis"
+  );
+  const detail = node("details");
+  detail.id = "ecosystem-fit";
+  detail.append(node("summary", "Ecosystem fit"));
+  if (!ecosystem) {
+    detail.append(node("p", "Not collected for this snapshot. Scan again to capture ecosystem evidence."));
+  } else {
+    const supported = ecosystem.schema_version === 1 && captured?.stats?.schema_version === 1;
+    const status = supported ? ecosystem.status : "unsupported";
+    detail.append(node("p", `Collection: ${status}. Dependency declarations: ${supported ? ecosystem.dependency_count ?? "unknown" : "unknown"}; syntax signals: ${supported ? ecosystem.signal_count ?? "unknown" : "unknown"}.`));
+    if (!supported) detail.append(node("p", "Captured ecosystem evidence is missing or unsupported. Scan again with a compatible collector."));
+    detail.append(node("p", "Declarations and syntax signals are review leads, not a fit rating or a migration recommendation. Existing primitives may be the best fit.", "secondary"));
+    if (ecosystem.gaps?.length) {
+      const gaps = node("ul");
+      gaps.append(...ecosystem.gaps.map((gap) => node("li", gap)));
+      detail.append(gaps);
+    }
+    if (captured) {
+      const button = node("button", "Inspect Ecosystem fit evidence");
+      button.type = "button";
+      button.addEventListener("click", () => {
+        const record = Array.from($("evidence").children).find((entry) => entry.dataset.evidenceId === captured.id);
+        if (!record) return;
+        $("evidence-summary").parentElement.open = true;
+        record.open = true;
+        record.querySelector("summary").focus();
+        record.scrollIntoView({ block: "nearest" });
+      });
+      detail.append(button);
+    }
+  }
+  $("gaps").before(detail);
 }
 function renderHistory(history) {
   $("history").replaceChildren();

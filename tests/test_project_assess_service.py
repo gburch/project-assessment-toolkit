@@ -566,6 +566,177 @@ def test_legacy_doctor_reports_missing_analysis_without_read_time_migration(asse
         assert db.execute("SELECT COUNT(*) FROM goals").fetchone()[0] == 0
 
 
+def test_ecosystem_fit_projects_captured_source_without_grades_or_new_reads(tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.0.0"\ndependencies = ["requests>=2"]\n'
+    )
+    source = root / "app.py"
+    source.write_text(
+        "from http.server import BaseHTTPRequestHandler\nimport sqlite3\n"
+        "raise RuntimeError('scan must not execute the project')\n"
+    )
+    service = AssessmentService(tmp_path / "state")
+    captured = service.scan(root)
+    summary = captured["facts"]["ecosystem_fit"]
+    evidence = next(row for row in captured["evidence"] if row["id"] == summary["evidence_id"])
+    history = service.history(captured["project_id"])
+    source.write_text("# Syntax changed after capture\n")
+
+    def forbid_rescan(*_args, **_kwargs):
+        raise AssertionError("report and doctor must use captured ecosystem evidence")
+
+    monkeypatch.setattr("project_assess.service.collect", forbid_rescan)
+    diagnosis = service.doctor(captured["id"])
+    ecosystem = diagnosis["ecosystem_fit"]
+    assert ecosystem["evidence_id"] == evidence["id"]
+    assert ecosystem["dependencies"] == evidence["stats"]["dependencies"]
+    assert any(row["name"] == "requests" for row in ecosystem["dependencies"])
+    assert {row["kind"] for row in ecosystem["signals"]} >= {
+        "stdlib_http_server",
+        "stdlib_sqlite",
+    }
+    candidates = [
+        row for row in diagnosis["groups"]["reuse"] if row["kind"] == "ecosystem_fit_review"
+    ]
+    assert candidates
+    source_id = next(row["id"] for row in captured["evidence"] if row["path"] == "app.py")
+    for candidate in candidates:
+        assert set(candidate["evidence_ids"]) == {evidence["id"], source_id}
+        assert candidate["locations"][0]["path"] == "app.py"
+        assert candidate["locations"][0]["line"] > 0
+        assert "retain the current approach" in candidate["smallest_fix"]
+        assert candidate["source_identity"] == "captured_snapshot"
+    report = service.get_report(captured["id"])
+    assert report["review"] is None and report["goals"] is None
+    assert "ratings" not in diagnosis
+    rendered = markdown_report(report)
+    assert "## Ecosystem fit" in rendered
+    assert "requests" in rendered and "stdlib\\_http\\_server" in rendered
+    assert "Collection limits:" in rendered and summary["evidence_id"] in rendered
+    assert "not a fit rating or a migration recommendation" in rendered
+    assert source.read_text() == "# Syntax changed after capture\n"
+    assert service.history(captured["project_id"]) == history
+
+
+def test_ecosystem_doctor_keeps_source_leads_visible_among_many_test_signals(tmp_path):
+    root = tmp_path / "project"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests/test_dom.js").write_text("document.createElement('p');\n" * 15)
+    (root / "z_app.py").write_text("from http.server import HTTPServer\n")
+    service = AssessmentService(tmp_path / "state")
+    captured = service.scan(root)
+    candidates = [
+        row
+        for row in service.doctor(captured["id"])["groups"]["reuse"]
+        if row["kind"] == "ecosystem_fit_review"
+    ]
+    assert len(candidates) == 10
+    assert candidates[0]["locations"][0]["path"] == "z_app.py"
+    assert candidates[0]["metrics"]["scope"] == "source"
+
+
+def test_legacy_ecosystem_fit_stays_not_collected_without_migration(assessed):
+    service, _, snapshot = assessed
+    snapshot["facts"].pop("ecosystem_fit", None)
+    snapshot["evidence"] = [
+        row for row in snapshot["evidence"] if row["kind"] != "ecosystem-analysis"
+    ]
+    raw = json.dumps(snapshot)
+    with sqlite3.connect(service.db_path) as db:
+        db.execute("UPDATE assessments SET data=? WHERE id=?", (raw, snapshot["id"]))
+
+    diagnosis = service.doctor(snapshot["id"])
+    assert diagnosis["ecosystem_fit"]["status"] == "not_collected"
+    assert "rescan" in diagnosis["ecosystem_fit"]["gaps"][0]
+    assert "Collection: not_collected." in markdown_report(service.get_report(snapshot["id"]))
+    assert service.get_report(snapshot["id"])["review"] is None
+    with sqlite3.connect(service.db_path) as db:
+        assert (
+            db.execute("SELECT data FROM assessments WHERE id=?", (snapshot["id"],)).fetchone()[0]
+            == raw
+        )
+        assert db.execute("SELECT COUNT(*) FROM goals").fetchone()[0] == 0
+
+
+def test_ecosystem_markdown_escapes_hostile_source_paths(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "<img src=x onerror=window.pwned=1>.py").write_text("import sqlite3\n")
+    service = AssessmentService(tmp_path / "state")
+    snapshot = service.scan(root)
+
+    rendered = markdown_report(service.get_report(snapshot["id"]))
+    assert "&lt;img src=x onerror=window.pwned=1&gt;.py" in rendered
+    assert "<img src=x" not in rendered
+
+
+@pytest.mark.parametrize("change", ["summary_version", "evidence_version", "missing_reference"])
+def test_ecosystem_fit_refuses_unsupported_or_missing_captured_evidence(assessed, change):
+    service, _, snapshot = assessed
+    if change == "summary_version":
+        snapshot["facts"]["ecosystem_fit"]["schema_version"] = 99
+    elif change == "missing_reference":
+        snapshot["facts"]["ecosystem_fit"]["evidence_id"] = "missing"
+    else:
+        next(row for row in snapshot["evidence"] if row["kind"] == "ecosystem-analysis")["stats"][
+            "schema_version"
+        ] = 99
+    raw = json.dumps(snapshot)
+    with sqlite3.connect(service.db_path) as db:
+        db.execute("UPDATE assessments SET data=? WHERE id=?", (raw, snapshot["id"]))
+
+    diagnosis = service.doctor(snapshot["id"])
+    assert diagnosis["ecosystem_fit"]["status"] == "unsupported"
+    assert not any(row["kind"] == "ecosystem_fit_review" for row in diagnosis["groups"]["reuse"])
+    report = service.get_report(snapshot["id"])
+    assert report["review"] is None and report["goals"] is None
+    assert "Collection: unsupported." in markdown_report(report)
+    with sqlite3.connect(service.db_path) as db:
+        assert (
+            db.execute("SELECT data FROM assessments WHERE id=?", (snapshot["id"],)).fetchone()[0]
+            == raw
+        )
+
+
+def test_ecosystem_candidates_respect_both_their_bound_and_prior_doctor_leads(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    for number in range(12):
+        (root / f"db{number}.py").write_text("import sqlite3\n")
+    service = AssessmentService(tmp_path / "state")
+    captured = service.scan(root)
+    diagnosis = service.doctor(captured["id"])
+    assert diagnosis["ecosystem_fit"]["signal_count"] == 12
+    assert sum(row["kind"] == "ecosystem_fit_review" for row in diagnosis["groups"]["reuse"]) == 10
+    assert any("at most 10 ecosystem" in gap for gap in diagnosis["gaps"])
+
+    report = tmp_path / "ruff.json"
+    report.write_text(
+        json.dumps(
+            [
+                {
+                    "code": "F821",
+                    "filename": str(root / "db0.py"),
+                    "location": {"row": 1, "column": 1},
+                    "end_location": {"row": 1, "column": 2},
+                    "message": "Supplied diagnostic",
+                    "fix": None,
+                }
+            ]
+            * 100
+        )
+    )
+    current = service.scan(root, [report])
+    diagnosis = service.doctor(current["id"])
+    rows = [row for group in diagnosis["groups"].values() for row in group]
+    assert len(rows) == 100
+    assert all(row["kind"] == "ruff_diagnostic" for row in rows)
+    assert diagnosis["ecosystem_fit"]["signal_count"] == 12
+    assert any("candidate limit reached" in gap for gap in diagnosis["gaps"])
+
+
 def test_doctor_preserves_current_source_and_imported_report_authority(tmp_path):
     allowed = tmp_path / "allowed"
     revoked = tmp_path / "revoked"

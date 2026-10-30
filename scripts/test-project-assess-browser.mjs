@@ -43,6 +43,8 @@ def forward_add(a, b):
 """)
 (root / 'scroll-evidence.md').write_text('# Keyboard scrolling fixture\n' +
     '\n'.join(f'Evidence line {index}' for index in range(80)))
+(root / 'ecosystem.py').write_text('import sqlite3\n')
+(root / 'package.json').write_text(json.dumps({'dependencies': {'fixture-lib': '1.0.0'}}))
 
 def synthetic_review(service, snapshot, burden, unknown_operability=False):
     review = service.review_template(snapshot['id'])
@@ -264,6 +266,8 @@ async function checkLegacyTargets(page, origin, frameworkProfile) {
   const legacy = structuredClone(original);
   delete legacy.goals.targets.extensibility;
   delete legacy.review.ratings.extensibility;
+  delete legacy.assessment.facts.ecosystem_fit;
+  legacy.assessment.evidence = legacy.assessment.evidence.filter((entry) => entry.kind !== "ecosystem-analysis");
   legacy.assessment.rubric_version = "3";
   legacy.review.rubric_version = "3";
   legacy.progress.missing_targets = ["extensibility"];
@@ -279,6 +283,8 @@ async function checkLegacyTargets(page, origin, frameworkProfile) {
     await page.reload();
     await expect(page.locator("#goal-state")).toHaveText("Saved goals need targets for Extensibility");
     await expect(ratingCard(page, "Extensibility")).toContainText("Unknown");
+    await expect(page.locator("#ecosystem-fit")).toContainText("Not collected for this snapshot");
+    await expect(page.getByRole("button", { name: "Inspect Ecosystem fit evidence" })).toHaveCount(0);
     await expect(page.locator("#extensibility-capability_min")).toHaveAttribute("aria-valuetext", "Not set");
     await expect(page.locator("#extensibility-burden_max")).toHaveAttribute("aria-valuetext", "Not set");
     await expect(page.locator("#save")).toBeDisabled();
@@ -344,6 +350,17 @@ try {
   assert(frameworkProfile, "rubric must offer the framework profile");
   const improvementSteps = Object.values(rubric.profiles["local-experiment"].targets)
     .reduce((sum, target) => sum + Math.max(4 - target.burden_max, 0) - Math.max(1 - target.burden_max, 0), 0);
+  // Exercise rendering defensively even if a captured/imported name is hostile.
+  const hostileDependency = "<img src=x onerror=window.ecosystemPwned=1>";
+  const hostileInventory = async (route) => {
+    const response = await route.fetch();
+    const report = await response.json();
+    const record = report.assessment.evidence.find((entry) => entry.kind === "ecosystem-analysis");
+    assert(record.stats.dependencies.length > 0, "fixture must capture a real dependency declaration");
+    record.stats.dependencies[0].name = hostileDependency;
+    await route.fulfill({ response, json: report });
+  };
+  await page.route("**/api/report?assessment_id=*", hostileInventory);
   await page.goto(origin);
   await expect(page.locator("#ratings .rating")).toHaveCount(dimensions.length);
   await expect(page.locator("#goal-state")).toContainText("No goals saved");
@@ -362,6 +379,16 @@ try {
   await expect(page.locator("#architecture-hints")).toContainText("1 candidate file");
   await expect(page.locator("#architecture-hints")).toContainText("architecture.py: 1 forwarding functions; 1 abstract or protocol classes");
   await expect(ratingCard(page, "Maintainability")).toContainText("4 / 5");
+  await page.locator("#ecosystem-fit summary").click();
+  await expect(page.locator("#ecosystem-fit")).toContainText("Dependency declarations: 1; syntax signals: 1");
+  await expect(page.locator("#ecosystem-fit")).toContainText("not a fit rating or a migration recommendation");
+  await page.getByRole("button", { name: "Inspect Ecosystem fit evidence" }).click();
+  const ecosystemRecord = page.locator("#evidence details").filter({ has: page.getByText("<ecosystem-analysis> · ecosystem-analysis", { exact: true }) });
+  await expect(ecosystemRecord).toHaveAttribute("open", "");
+  await expect(ecosystemRecord).toContainText(hostileDependency);
+  await expect(ecosystemRecord.locator("summary")).toBeFocused();
+  assert.equal(await page.evaluate(() => window.ecosystemPwned), undefined);
+  await page.unroute("**/api/report?assessment_id=*", hostileInventory);
 
   assert.equal(await page.evaluate(() => window.pwned), undefined);
   assert.equal(await page.locator("main img").count(), 0, "hostile names must remain text");

@@ -12,6 +12,8 @@ For each credible finding, cite the captured location, explain the concrete cost
 
 Imported Ruff diagnostics are supplied, source-unverified leads. Match them to the captured source before using their locations; suggested fix applicability does not establish behavioral safety or authorize application.
 
+For ecosystem fit, inspect both directions: replace repeated custom plumbing with an appropriate maintained library, or remove framework/dependency setup whose cost exceeds a utility's demonstrated needs. Compare migration, security, compatibility and ongoing upkeep, then name the smallest experiment and its verifier. Dependency counts and framework names alone establish neither excess nor a safe replacement.
+
 ## When fixes are authorized
 
 A request for assessment or doctor output authorizes advice. When implementation is also authorized, apply only high-confidence changes within that scope. Preserve outputs, error handling, permissions, source/evidence identity, transactions, concurrency and required performance properties. Inspect the final diff and run the closest relevant lint, type, unit or integration check; report the result and any gap. A suspected behavior bug needs explicit treatment as a bug fix, not a claim of behavior-preserving simplification.

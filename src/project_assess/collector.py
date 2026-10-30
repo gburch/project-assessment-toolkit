@@ -17,6 +17,9 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
 
+from .ecosystem import VERSION as ECOSYSTEM_VERSION
+from .ecosystem import dependency_inventory, javascript_signals, python_signals
+from .ecosystem import summarize as summarize_ecosystem
 from .rubric import RUBRIC_VERSION
 from .static_analysis import MAX_FILES as MAX_STATIC_FILES
 from .static_analysis import MAX_SYMBOLS as MAX_STATIC_SYMBOLS
@@ -380,13 +383,13 @@ def _manifest(path, text):
         )
         if not all(isinstance(group, dict) for group in groups):
             raise ValueError("invalid package manifest groups")
-        return {
+        result = {
             "ecosystem": "javascript",
             "dependencies": len(groups[0]),
             "dev_dependencies": len(groups[1]),
             "scripts": sorted(groups[2]),
         }
-    if path.name == "pyproject.toml":
+    elif path.name == "pyproject.toml":
         data = tomllib.loads(text)
         project = data.get("project", {})
         if not isinstance(project, dict):
@@ -404,7 +407,7 @@ def _manifest(path, text):
         scripts = project.get("scripts", {})
         if not isinstance(scripts, dict):
             raise ValueError("invalid Python script group")
-        return {
+        result = {
             "ecosystem": "python",
             "dependencies": len(dependencies),
             "dev_dependencies": sum(
@@ -412,15 +415,19 @@ def _manifest(path, text):
             ),
             "scripts": sorted(scripts),
         }
-    return {
-        "ecosystem": "python",
-        "dependencies": sum(
-            bool(line.strip()) and not line.lstrip().startswith(("#", "-"))
-            for line in text.splitlines()
-        ),
-        "dev_dependencies": 0,
-        "scripts": [],
-    }
+    else:
+        data = text
+        result = {
+            "ecosystem": "python",
+            "dependencies": sum(
+                bool(line.strip()) and not line.lstrip().startswith(("#", "-"))
+                for line in text.splitlines()
+            ),
+            "dev_dependencies": 0,
+            "scripts": [],
+        }
+    result["dependency_inventory"] = dependency_inventory(path.as_posix(), data)
+    return result
 
 
 def _report(payload):
@@ -681,6 +688,8 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
     }
     evidence, findings, manifest, watched = [], [], [], []
     documentation_texts, python_analysis = {}, []
+    ecosystem_manifests, ecosystem_inputs = [], []
+    ecosystem_truncated = False
     source_rows = {}
     static_symbols, value_definitions = 0, 0
     gaps, excluded, unsupported = [], Counter(), Counter()
@@ -714,7 +723,7 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
         return entry["id"]
 
     def walk(directory, relative, depth):
-        nonlocal complete, visited, total, static_symbols, value_definitions
+        nonlocal complete, visited, total, static_symbols, value_definitions, ecosystem_truncated
         if depth > MAX_DEPTH:
             gaps.append("Directory depth limit exceeded")
             complete = False
@@ -837,6 +846,23 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
                             python_analysis.append(record)
                     else:
                         stats = _javascript(text)
+                    if len(ecosystem_inputs) < MAX_STATIC_FILES:
+                        ecosystem_input = (
+                            python_signals(path.as_posix(), tree)
+                            if kind == "python"
+                            else javascript_signals(path.as_posix(), text)
+                        )
+                        for signal in ecosystem_input["signals"]:
+                            signal["scope"] = (
+                                "test"
+                                if _is_test(path)
+                                else "tooling"
+                                if set(path.parts) & {"scripts", "tools", ".github"}
+                                else "source"
+                            )
+                        ecosystem_inputs.append(ecosystem_input)
+                    else:
+                        ecosystem_truncated = True
                     if (
                         len(source_rows) < MAX_STATIC_FILES
                         and value_definitions < MAX_STATIC_DEFINITIONS
@@ -892,13 +918,17 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
                     for key, value in stats.items():
                         facts["documentation"][key] += value
                 elif kind == "manifest":
-                    stats = _manifest(path, text)
+                    stats = _redact_data(_manifest(path, text))
                     manifests = facts["manifests"]
                     manifests["paths"].append(path.as_posix())
                     manifests["ecosystems"].append(stats["ecosystem"])
                     for key in ("dependencies", "dev_dependencies"):
                         manifests[key] += stats[key]
                     manifests["scripts"].extend(stats["scripts"])
+                    if len(ecosystem_manifests) < MAX_STATIC_FILES:
+                        ecosystem_manifests.append(stats["dependency_inventory"])
+                    else:
+                        ecosystem_truncated = True
                 if any(
                     part in {".github", ".circleci", ".ssci"} for part in path.parts
                 ) or name in {"Jenkinsfile", ".gitlab-ci.yml"}:
@@ -1101,6 +1131,31 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
     if (revision, dirty) != (end_revision, end_dirty):
         gaps.append("Git identity changed during collection")
         complete = False
+    ecosystem = _redact_data(summarize_ecosystem(ecosystem_manifests, ecosystem_inputs))
+    if ecosystem_truncated:
+        ecosystem["gaps"].append("Ecosystem input file limit reached; inventory is partial")
+        ecosystem["status"] = "partial"
+    if not complete:
+        ecosystem["gaps"].append("Source capture is incomplete; ecosystem evidence is partial")
+        ecosystem["status"] = "partial"
+    ecosystem_payload = json.dumps(ecosystem, sort_keys=True).encode()
+    ecosystem_id = add_evidence(
+        "<ecosystem-analysis>",
+        ecosystem_payload,
+        "ecosystem-analysis",
+        ecosystem_payload.decode(),
+        ecosystem,
+    )
+    facts["ecosystem_fit"] = {
+        "schema_version": 1,
+        "status": ecosystem["status"],
+        "evidence_id": ecosystem_id,
+        "dependency_count": ecosystem["counts"]["dependencies"],
+        "signal_count": ecosystem["counts"]["signals"],
+        "gaps": ecosystem["gaps"],
+        "limits": ecosystem["limits"],
+    }
+    gaps.extend("Ecosystem fit: " + gap for gap in ecosystem["gaps"])
     facts["manifests"]["ecosystems"] = sorted(set(facts["manifests"]["ecosystems"]))
     facts["manifests"]["scripts"] = sorted(set(facts["manifests"]["scripts"]))
     # ``files``/``bytes`` describe recognized text inputs; these totals identify
@@ -1137,7 +1192,7 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
     if facts["javascript"]["files"]:
         gaps.append("JavaScript/TypeScript counts are lexical estimates, not semantic analysis")
     scope = {
-        "collector_version": 4,
+        "collector_version": 5,
         "rubric_version": RUBRIC_VERSION,
         "max_files": MAX_FILES,
         "max_file_bytes": MAX_FILE_BYTES,
@@ -1167,6 +1222,7 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
         },
         "javascript": "lexical",
         "documentation": "doc-value.captured.v1",
+        "ecosystem_fit": {"version": ECOSYSTEM_VERSION, "limits": ecosystem["limits"]},
     }
     return {
         "schema_version": 1,

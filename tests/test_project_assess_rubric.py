@@ -15,6 +15,7 @@ def test_rubric_exports_cannot_mutate_later_assessments():
     exported["profiles"]["local-experiment"]["targets"]["testing"]["capability_min"] = 5
     exported["burden_guidance"]["basis"].clear()
     exported["dimensions"]["maintainability"]["checks"]["rigidity"]["questions"].clear()
+    exported["dimensions"]["maintainability"]["checks"]["ecosystem_fit"]["questions"].clear()
     exported["dimensions"]["extensibility"]["capability"].clear()
     exported["profiles"]["framework"]["targets"]["extensibility"]["capability_min"] = 0
 
@@ -84,6 +85,34 @@ def test_extensibility_is_an_independent_dimension_and_rigidity_stays_a_named_ch
         > framework["maintainability"]["capability_min"]
     )
     assert PROFILES["local-experiment"]["targets"]["extensibility"]["capability_min"] == 0
+
+
+@pytest.mark.parametrize("dependency", [None, "django"])
+def test_stack_declarations_do_not_assign_ratings_or_select_goals(tmp_path, dependency):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "README.md").write_text("# Local converter\nConvert integers for local scripts.\n")
+    dependencies = '["django"]' if dependency else "[]"
+    (root / "pyproject.toml").write_text(
+        f'[project]\nname = "converter"\nversion = "0.0.0"\ndependencies = {dependencies}\n'
+    )
+    (root / "converter.py").write_text("def convert(value):\n    return int(value) * 2\n")
+    service = AssessmentService(tmp_path / "state")
+    captured = service.scan(root)
+
+    report = service.get_report(captured["id"])
+    ratings = service.review_template(captured["id"])["ratings"]
+    assert report["review"] is None and report["goals"] is None
+    assert set(ratings) == set(DIMENSIONS)
+    assert all(
+        rating["capability"] is None and rating["burden"] is None for rating in ratings.values()
+    )
+    exported = service.rubric()
+    assert exported["version"] == "4" and len(exported["dimensions"]) == 7
+    assert exported["dimensions"]["maintainability"]["checks"]["ecosystem_fit"]["version"] == 1
+    assert all(
+        "ecosystem_fit" not in profile["targets"] for profile in exported["profiles"].values()
+    )
 
 
 @pytest.mark.parametrize("structure", ["delegating_layers", "injected_boundary"])

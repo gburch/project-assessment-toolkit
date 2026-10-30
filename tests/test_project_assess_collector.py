@@ -13,6 +13,84 @@ def write(root, name, text):
     return path
 
 
+def test_ecosystem_evidence_reuses_captured_inputs_without_executing_or_exposing_urls(tmp_path):
+    sentinel = tmp_path / "executed"
+    write(
+        tmp_path,
+        "app.py",
+        "from http.server import BaseHTTPRequestHandler\nimport sqlite3\n"
+        f"open({str(sentinel)!r}, 'w').write('executed')\n",
+    )
+    write(tmp_path, "tests/test_db.py", "import sqlite3\n")
+    write(tmp_path, "ui.js", "const item = document.createElement('p');\n")
+    write(
+        tmp_path,
+        "pyproject.toml",
+        '[project]\nname="fixture"\ndependencies=["JsonSchema>=4", '
+        '"example @ https://reader:private-password@example.invalid/example.whl"]\n'
+        '[project.optional-dependencies]\nmcp=["mcp>=2"]\n',
+    )
+    write(
+        tmp_path,
+        "package.json",
+        json.dumps({"dependencies": {"react": "^19"}, "devDependencies": {"vite": "^6"}}),
+    )
+    first = collector.collect(tmp_path)
+    second = collector.collect(tmp_path)
+    summary = first["facts"]["ecosystem_fit"]
+    evidence = next(row for row in first["evidence"] if row["id"] == summary["evidence_id"])
+    analysis = evidence["stats"]
+    assert evidence["kind"] == "ecosystem-analysis" and analysis["schema_version"] == 1
+    assert {row["name"] for row in analysis["dependencies"]} == {
+        "jsonschema",
+        "example",
+        "mcp",
+        "react",
+        "vite",
+    }
+    assert {row["kind"] for row in analysis["signals"]} >= {
+        "stdlib_http_server",
+        "stdlib_sqlite",
+        "direct_dom",
+    }
+    assert any(row["scope"] == "test" for row in analysis["signals"])
+    assert all(
+        row["path"] in {"app.py", "tests/test_db.py", "ui.js"} for row in analysis["signals"]
+    )
+    assert "private-password" not in json.dumps(first) and "https://reader:" not in json.dumps(
+        analysis
+    )
+    assert first == second and not sentinel.exists()
+    assert "ratings" not in analysis and "goals" not in analysis
+
+
+def test_ecosystem_collection_limits_and_parse_failures_remain_explicit(tmp_path, monkeypatch):
+    monkeypatch.setattr(collector, "MAX_STATIC_FILES", 1)
+    write(tmp_path, "one.py", "import sqlite3\n")
+    write(tmp_path, "two.py", "from http.server import HTTPServer\n")
+    write(tmp_path, "pyproject.toml", "[project\ninvalid\n")
+    result = collector.collect(tmp_path)
+    summary = result["facts"]["ecosystem_fit"]
+    assert summary["status"] == "partial" and not result["complete"]
+    assert any("input file limit" in gap for gap in summary["gaps"])
+    assert any("capture is incomplete" in gap for gap in summary["gaps"])
+
+
+def test_ecosystem_evidence_reflects_a_late_source_revision_change(tmp_path, monkeypatch):
+    revisions = iter([("a" * 40, None), ("b" * 40, None)])
+    monkeypatch.setattr(collector, "_git", lambda root: next(revisions))
+    write(tmp_path, "app.py", "import sqlite3\n")
+    write(tmp_path, "pyproject.toml", "[project]\ndependencies=[]\n")
+    result = collector.collect(tmp_path)
+    summary = result["facts"]["ecosystem_fit"]
+    evidence = next(row for row in result["evidence"] if row["id"] == summary["evidence_id"])
+    assert not result["complete"]
+    assert summary["status"] == evidence["stats"]["status"] == "partial"
+    assert any("capture is incomplete" in gap for gap in evidence["stats"]["gaps"])
+    payload = json.dumps(evidence["stats"], sort_keys=True).encode()
+    assert evidence["digest"] == collector._bytes_digest(payload)
+
+
 def test_collects_deterministic_python_javascript_docs_and_manifests_without_execution(tmp_path):
     sentinel = tmp_path / "executed"
     write(

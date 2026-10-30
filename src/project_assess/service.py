@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import sqlite3
@@ -31,6 +32,49 @@ def now():
 
 def _id(prefix):
     return prefix + uuid.uuid4().hex
+
+
+def _ecosystem_fit(assessment):
+    """Read bounded ecosystem evidence from this snapshot, never the current worktree."""
+    summary = assessment["facts"].get("ecosystem_fit")
+    if summary is None:
+        return {
+            "status": "not_collected",
+            "gaps": ["Ecosystem fit was not collected for this snapshot; rescan to capture it."],
+        }
+    evidence = next(
+        (
+            entry
+            for entry in assessment["evidence"]
+            if entry["id"] == summary.get("evidence_id") and entry["kind"] == "ecosystem-analysis"
+        ),
+        None,
+    )
+    if evidence is None or summary.get("schema_version") != 1:
+        return {
+            **summary,
+            "status": "unsupported",
+            "gaps": [
+                *summary.get("gaps", []),
+                "Captured ecosystem evidence is missing or unsupported; rescan with a compatible collector.",
+            ],
+        }
+    stats = evidence["stats"]
+    if stats.get("schema_version") != 1:
+        return {
+            **summary,
+            "status": "unsupported",
+            "gaps": [
+                *summary.get("gaps", []),
+                "Captured ecosystem-analysis schema is unsupported; use a compatible collector.",
+            ],
+        }
+    return {
+        **summary,
+        "dependencies": stats["dependencies"],
+        "signals": stats["signals"],
+        "caveat": stats["caveat"],
+    }
 
 
 def _gap(score, target, axis):
@@ -571,6 +615,40 @@ class AssessmentService:
                         "verification": "Recheck the diagnostic and the affected behavior; a suggested fix is not proof of safety.",
                     }
                 )
+        ecosystem = _ecosystem_fit(assessment)
+        if ecosystem["status"] in {"complete", "partial"}:
+            signals = sorted(
+                ecosystem["signals"], key=lambda signal: signal.get("scope") != "source"
+            )
+            for signal in signals[:10]:
+                if sum(len(rows) for rows in groups.values()) >= 100:
+                    gaps.append(
+                        "Doctor candidate limit reached; inspect the remaining captured evidence directly."
+                    )
+                    break
+                if signal["path"] not in source_ids or not signal.get("line"):
+                    continue
+                groups["reuse"].append(
+                    {
+                        "kind": "ecosystem_fit_review",
+                        "lens": "reuse",
+                        "locations": [{"path": signal["path"], "line": signal["line"]}],
+                        "metrics": {
+                            "signal_kind": signal["kind"],
+                            "scope": signal.get("scope", "unknown"),
+                        },
+                        "evidence_ids": sorted(
+                            {ecosystem["evidence_id"], source_ids[signal["path"]]}
+                        ),
+                        "source_identity": "captured_snapshot",
+                        "smallest_fix": "Trace whether the syntax signal is active and inspect its required behavior. Compare an existing maintained ecosystem option with the current primitives; retain the current approach when it fits better.",
+                        "verification": "Compare required semantics, errors, security, compatibility and dependency upkeep before choosing a bounded change; a syntax signal does not justify migration.",
+                    }
+                )
+            if len(signals) > 10:
+                gaps.append(
+                    "Doctor shows at most 10 ecosystem signals; inspect their captured evidence for the remaining leads."
+                )
         if status == "complete" and not assessment.get("complete", False):
             status = "partial"
         return {
@@ -584,6 +662,7 @@ class AssessmentService:
             "groups": groups,
             "goal_alignment": alignment,
             "test_value_static": inventory,
+            "ecosystem_fit": ecosystem,
             "gaps": sorted(set(gaps)),
             "verification": "Trace actual callers and choose relevant behavior checks before an authorized edit; rescan afterward to assess the change.",
             "caveat": "Static candidates and supplied diagnostics require review. Empty groups are not a clean bill of health; this operation assigns no grades and applies no fixes.",
@@ -923,6 +1002,13 @@ class AssessmentService:
             return {"assessments": assessments, "reviews": reviews, "goals": goals}
 
 
+def _markdown_text(value):
+    text = html.escape(str(value), quote=False).replace("\r", " ").replace("\n", " ")
+    for character in ("\\", "`", "*", "_", "[", "]", "|"):
+        text = text.replace(character, "\\" + character)
+    return text
+
+
 def markdown_report(report):
     assessment = report["assessment"]
     lines = [
@@ -990,6 +1076,43 @@ def markdown_report(report):
             "These are inspection leads, not defects or ratings. "
             f"Evidence: {analysis['evidence_id']}.",
         ]
+    ecosystem = _ecosystem_fit(assessment)
+    lines += ["", "## Ecosystem fit", "", f"Collection: {ecosystem['status']}."]
+    if ecosystem["status"] in {"complete", "partial"}:
+        lines += [
+            "",
+            f"Captured dependency declarations: {ecosystem['dependency_count']}; "
+            f"syntax signals: {ecosystem['signal_count']}. "
+            "These are review leads, not a fit rating or a migration recommendation. "
+            f"Evidence: {_markdown_text(ecosystem['evidence_id'])}.",
+            "",
+            _markdown_text(ecosystem["caveat"]),
+            "",
+            "Dependency inventory:",
+        ]
+        for dependency in ecosystem["dependencies"]:
+            location = dependency["path"]
+            if dependency.get("line"):
+                location += f":{dependency['line']}"
+            lines.append(
+                f"- {_markdown_text(dependency['name'])} "
+                f"({_markdown_text(dependency['group'])}) — {_markdown_text(location)}"
+            )
+        if not ecosystem["dependencies"]:
+            lines.append("- No declarations captured; runtime dependencies may still exist.")
+        lines += ["", "Syntax signals to inspect:"]
+        for signal in ecosystem["signals"]:
+            location = signal["path"]
+            if signal.get("line"):
+                location += f":{signal['line']}"
+            lines.append(f"- {_markdown_text(signal['kind'])} — {_markdown_text(location)}")
+        if not ecosystem["signals"]:
+            lines.append("- No supported signals captured; this does not establish fit.")
+        lines += [
+            "",
+            "Collection limits: " + _markdown_text(json.dumps(ecosystem["limits"], sort_keys=True)),
+        ]
+    lines += ["", *["- " + _markdown_text(gap) for gap in ecosystem.get("gaps", [])]]
     lines += ["", "## Evidence gaps", ""]
     lines += ["- " + gap for gap in assessment["gaps"]] or ["- No collector gaps recorded."]
     for dimension, rating in ratings.items():
