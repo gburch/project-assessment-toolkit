@@ -1,9 +1,9 @@
 # PAT — Project Assessment Toolkit
 
-[![PAT assessment snapshot](docs/badges/summary.svg)](docs/PROJECT_ASSESS.md#github-badges)
-[![PAT testing snapshot](docs/badges/testing.svg)](docs/PROJECT_ASSESS.md#github-badges)
-[![PAT maintainability snapshot](docs/badges/maintainability.svg)](docs/PROJECT_ASSESS.md#github-badges)
-[![PAT extensibility snapshot](docs/badges/extensibility.svg)](docs/PROJECT_ASSESS.md#github-badges)
+[![PAT assessment snapshot](docs/badges/summary.svg)](docs/badges/README.md)
+[![PAT testing snapshot](docs/badges/testing.svg)](docs/badges/README.md)
+[![PAT maintainability snapshot](docs/badges/maintainability.svg)](docs/badges/README.md)
+[![PAT extensibility snapshot](docs/badges/extensibility.svg)](docs/badges/README.md)
 
 Understand a project's engineering capability and upkeep burden, choose goals that fit, and see progress toward them.
 
