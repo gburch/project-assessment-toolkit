@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from project_assess.cli import main
@@ -99,6 +100,19 @@ def test_installed_cli_roundtrip_without_source_path_imports(tmp_path):
     history_before = json.loads(command("history", snapshot["project_id"]))
     state_before = {item.name: item.read_bytes() for item in state.iterdir() if item.is_file()}
     source_before = {item.name: item.read_bytes() for item in root.iterdir()}
+
+    badge_json = json.loads(
+        command("badge", snapshot["id"], "--dimension", "testing", "--format", "json")
+    )
+    assert badge_json["schemaVersion"] == 1
+    assert "C3/5" in badge_json["message"] and "B2/5" in badge_json["message"]
+    badge_svg = command("badge", snapshot["id"], "--dimension", "testing")
+    assert ET.fromstring(badge_svg).tag == "{http://www.w3.org/2000/svg}svg"
+    assert "C3/5" in badge_svg and str(root) not in badge_svg
+    assert (
+        command("badge", snapshot["id"], "--dimension", "testing", program=legacy_executable)
+        == badge_svg
+    )
 
     plan = json.loads(command("evolve", snapshot["id"]))
     assert json.loads(command("evolve", snapshot["id"], program=legacy_executable)) == plan

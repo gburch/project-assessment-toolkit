@@ -48,6 +48,40 @@ Save the JSON printed by `review-template` to a file outside the assessed reposi
 
 The [project-assess skill](../.agents/skills/project-assess/SKILL.md) guides evidence review and judgment. Its structured review is bound to an assessment ID, source digest and rubric version. It supplies each dimension's scores, confidence, rationale, evidence IDs and recommendations; findings retain separate severity and evidence. Review submission cannot overwrite collected metrics or source identity. Its validation checks structure and provenance, not the truth of an agent's conclusion.
 
+## GitHub badges
+
+`badge ASSESSMENT_ID` exports a saved assessment without running the project or changing its ratings, goals or state. By default it prints a summary SVG to stdout. Choose a destination explicitly; the shell redirection below writes the files:
+
+```bash
+mkdir -p docs/badges
+uv run --locked pat --state-dir /path/outside/repos/pat-state badge ASSESSMENT_ID \
+  > docs/badges/summary.svg
+uv run --locked pat --state-dir /path/outside/repos/pat-state badge ASSESSMENT_ID \
+  --dimension testing > docs/badges/testing.svg
+```
+
+Use `--dimension summary` or any of the seven dimension names. Dimension badges show capability `Cx/5` (higher) and burden `Bx/5` (lower); unknown values display `?`. The summary counts a dimension as known only when both scores are numeric. Reported critical/high finding counts include records in the selected snapshot and saved review; they are not an aggregate quality score or proof of absent risks. Unreviewed assessments and partial scans are labeled.
+
+Commit the SVGs and reference them relative to the README on GitHub:
+
+```markdown
+![PAT assessment summary](docs/badges/summary.svg)
+![PAT testing capability and burden](docs/badges/testing.svg)
+```
+
+You can wrap an image in a Markdown link to a report URL you intentionally make public. `--format json` exports the selected badge in the [Shields Endpoint format](https://shields.io/badges/endpoint-badge), with sanitized PAT provenance:
+
+```bash
+uv run --locked pat --state-dir /path/outside/repos/pat-state badge ASSESSMENT_ID \
+  --dimension testing --format json > docs/badges/testing.json
+```
+
+If you host that JSON at a public URL, Shields can render it as an endpoint badge. PAT does not host it or add a service dependency; committed SVGs need neither.
+
+The read-only MCP tool `get_badge(assessment_id, dimension="summary")` returns the same public JSON.
+
+Exports omit private evidence content, rationale and local paths, but publish ratings, assessment date, confidence, burden basis, source revision/digest and assessment metadata. Inspect the artifact before sharing it. Badges reflect the saved assessment and review: they have no live host or automatic review, and only update when regenerated. To reflect changed code, scan and review it first, then export the new assessment. Unknown ratings remain unknown.
+
 ## Doctor and Evolve
 
 `doctor ASSESSMENT_ID` groups captured static-analysis candidates into **reuse**, **quality** and **efficiency**, with source locations, evidence references and suggested verification. The Python equivalent is `AssessmentService.doctor(assessment_id)`; the same read-only operation is available over MCP. It reads the saved snapshot without executing or editing the assessed project. An older snapshot without these facts reports `not_collected`; rescan when the additional evidence is wanted.

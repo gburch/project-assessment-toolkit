@@ -53,6 +53,7 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 assert {
                     "scan_project",
                     "get_report",
+                    "get_badge",
                     "submit_review",
                     "set_targets",
                     "get_progress",
@@ -64,7 +65,7 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 assert all(
                     tool.annotations.read_only_hint
                     for tool in discovered.tools
-                    if tool.name in {"get_report", "doctor", "evolve"}
+                    if tool.name in {"get_report", "get_badge", "doctor", "evolve"}
                 )
                 assert not next(
                     tool.annotations.read_only_hint
@@ -79,6 +80,16 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 assert not captured.is_error
                 snapshot = captured.structured_content
                 assert snapshot["source"]["root"] == str(root.resolve())
+                badge = await session.call_tool(
+                    "get_badge", {"assessment_id": snapshot["id"], "dimension": "testing"}
+                )
+                assert not badge.is_error and badge.structured_content["schemaVersion"] == 1
+                assert "C?/5" in badge.structured_content["message"]
+                assert str(root) not in json.dumps(badge.structured_content)
+                invalid_badge = await session.call_tool(
+                    "get_badge", {"assessment_id": snapshot["id"], "dimension": "../private"}
+                )
+                assert invalid_badge.is_error
                 diagnosis = await session.call_tool("doctor", {"assessment_id": snapshot["id"]})
                 assert not diagnosis.is_error
                 assert diagnosis.structured_content["source"] == snapshot["source"]

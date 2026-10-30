@@ -67,7 +67,7 @@ def test_review_replay_cannot_substitute_an_authorized_assessment(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "operation", ["report", "evidence", "history", "history_summary", "progress"]
+    "operation", ["report", "badge", "evidence", "history", "history_summary", "progress"]
 )
 @pytest.mark.parametrize("report_kind", ["junit", "test-value"])
 def test_revoked_imported_report_authority_is_rechecked_on_saved_reads(
@@ -87,6 +87,7 @@ def test_revoked_imported_report_authority_is_rechecked_on_saved_reads(
 
     calls = {
         "report": lambda: restricted.get_report(snapshot["id"]),
+        "badge": lambda: restricted.get_badge(snapshot["id"]),
         "evidence": lambda: restricted.evidence(snapshot["id"]),
         "history": lambda: restricted.history(snapshot["project_id"]),
         "history_summary": lambda: restricted.history(snapshot["project_id"], summary=True),

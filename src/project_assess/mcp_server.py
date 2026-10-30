@@ -46,6 +46,11 @@ def create_mcp(service):
         return service.get_report(assessment_id)
 
     @server.tool(annotations={"readOnlyHint": True})
+    def get_badge(assessment_id: str, dimension: str = "summary") -> dict[str, Any]:
+        """Export public badge JSON without source paths, excerpts or review prose."""
+        return service.get_badge(assessment_id, dimension, format="json")
+
+    @server.tool(annotations={"readOnlyHint": True})
     def doctor(assessment_id: str) -> dict[str, Any]:
         """Inspect captured reuse, quality and efficiency candidates without rerunning source."""
         return service.doctor(assessment_id)

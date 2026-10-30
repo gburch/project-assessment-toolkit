@@ -1,5 +1,10 @@
 # PAT — Project Assessment Toolkit
 
+[![PAT assessment snapshot](docs/badges/summary.svg)](docs/PROJECT_ASSESS.md#github-badges)
+[![PAT testing snapshot](docs/badges/testing.svg)](docs/PROJECT_ASSESS.md#github-badges)
+[![PAT maintainability snapshot](docs/badges/maintainability.svg)](docs/PROJECT_ASSESS.md#github-badges)
+[![PAT extensibility snapshot](docs/badges/extensibility.svg)](docs/PROJECT_ASSESS.md#github-badges)
+
 Understand a project's engineering capability and upkeep burden, choose goals that fit, and see progress toward them.
 
 PAT assesses **security, testing, documentation, maintainability, delivery, operability and extensibility**. Each has independent 0–5 capability and burden ratings: adding missing protection and removing needless upkeep can both improve a project. Missing evidence stays unknown. Counts never assign scores.
@@ -43,6 +48,22 @@ The [user guide](docs/PROJECT_ASSESS.md) covers reviews, goal profiles, progress
 Run `uv run --locked pat skills` to locate the bundled assessment, documentation and test-value skills. Import supported reports with `pat scan --report FILE`; supplied claims remain distinct from verified source identity. AST, lexical and overlap hints do not establish correctness, safe deletion or deployed security. See the guide's [limits](docs/PROJECT_ASSESS.md#agent-connection-and-limits).
 
 The Python distribution is `pat-assess`, the canonical CLI is `pat`, and the Python package is `project_assess`. The `project-assess` CLI alias and skill name remain available for compatibility. The core dependency is `jsonschema`; MCP is optional.
+
+## GitHub badges
+
+Export a saved assessment to SVG, then commit the file with a relative image link in your README:
+
+```bash
+mkdir -p docs/badges
+uv run --locked pat --state-dir /path/outside/repos/pat-state badge ASSESSMENT_ID \
+  --dimension testing > docs/badges/testing.svg
+```
+
+```markdown
+![PAT testing capability and burden](docs/badges/testing.svg)
+```
+
+Badges show separate capability (`C`, higher) and burden (`B`, lower) ratings, with `?` for unknowns. They are static snapshots: regenerate after saving a new review. Exported metrics and metadata are public when committed; private evidence, rationale and paths are excluded. See the [badge guide](docs/PROJECT_ASSESS.md#github-badges) for summary badges, JSON and publication details.
 
 ## Contribute and report problems
 

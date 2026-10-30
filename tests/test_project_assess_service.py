@@ -45,6 +45,21 @@ def test_facts_remain_immutable_and_absent_review_is_unknown(assessed):
     assert {p.name for p in root.iterdir()} == {"app.py", "README.md"}
 
 
+def test_badge_keeps_selected_snapshot_review_and_ignores_goal_changes(assessed):
+    service, root, old = assessed
+    reviewed(service, old, capability=2, burden=1)
+    old_badge = service.get_badge(old["id"], "testing", format="json")
+    (root / "app.py").write_text("def add(a, b):\n    return sum((a, b))\n")
+    current = service.scan(root)
+    reviewed(service, current, capability=4, burden=3)
+    service.set_targets(current["project_id"], profile="public-production", expected_revision=0)
+    assert service.get_badge(old["id"], "testing", format="json") == old_badge
+    assert "C2/5 B1/5" in old_badge["message"]
+    assert "C4/5 B3/5" in service.get_badge(current["id"], "testing", format="json")["message"]
+    with pytest.raises(ValueError, match="format"):
+        service.get_badge(current["id"], format="html")
+
+
 def test_scan_persists_safe_test_value_evidence_and_keeps_claims_unrated(tmp_path):
     root = tmp_path / "project"
     root.mkdir()

@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+from .rubric import DIMENSIONS
+
 
 def _input(path):
     source = Path(path)
@@ -40,6 +42,12 @@ def parser():
         if name == "review":
             command.add_argument("--input", required=True)
             command.add_argument("--request-id")
+    badge = commands.add_parser(
+        "badge", help="Export a public GitHub badge from a saved assessment"
+    )
+    badge.add_argument("assessment_id")
+    badge.add_argument("--dimension", choices=("summary", *DIMENSIONS), default="summary")
+    badge.add_argument("--format", choices=("svg", "json"), default="svg")
     targets = commands.add_parser("targets")
     targets.add_argument("project_id")
     choice = targets.add_mutually_exclusive_group(required=True)
@@ -107,6 +115,11 @@ def main(argv=None):
             output = service.doctor(args.assessment_id)
         elif args.command == "evolve":
             output = service.evolve(args.assessment_id)
+        elif args.command == "badge":
+            output = service.get_badge(args.assessment_id, args.dimension, format=args.format)
+            if args.format == "svg":
+                print(output)
+                return 0
         elif args.command == "report":
             output = service.get_report(args.assessment_id)
             if args.format == "markdown":

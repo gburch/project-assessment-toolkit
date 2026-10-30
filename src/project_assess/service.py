@@ -872,6 +872,19 @@ class AssessmentService:
                 "progress": self._progress(db, assessment["project_id"]),
             }
 
+    def get_badge(self, assessment_id, dimension="summary", *, format="svg"):
+        """Export only public badge fields from the requested authorized snapshot and review."""
+        from .badges import badge, badge_data
+
+        if format not in {"svg", "json"}:
+            raise ValueError("Badge format must be svg or json")
+        with self._db() as db:
+            report = {
+                "assessment": self._assessment(db, assessment_id),
+                "review": self._review(db, assessment_id),
+            }
+        return badge(report, dimension) if format == "svg" else badge_data(report, dimension)
+
     def history(self, project_id, *, summary=False):
         with self._db() as db:
             self._project(db, project_id)
