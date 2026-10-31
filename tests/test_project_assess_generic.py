@@ -99,3 +99,48 @@ def test_supported_extension_inventory_requires_no_per_language_executables():
     ):
         assert generic.source_language(path) == language
     assert generic.source_language("a.png") is None
+
+
+def test_overlapping_matches_with_different_repeat_counts_remain_exact_windows():
+    first, repeated, last = (
+        "startUniqueOperation(0);\n",
+        "doRepeatedOperation(0);\n",
+        "endUniqueOperation(0);\n",
+    )
+    sources = {
+        "src/A.swift": first + repeated * 11 + last,
+        "src/B.swift": first + repeated * 12 + last,
+    }
+    result = generic.summarize_source_text(sources)
+    blocks = [row for row in result["candidate_index"] if row["kind"] == "duplicate_source_block"]
+    assert len(blocks) == 2
+    for block in blocks:
+        values = []
+        for location in block["locations"]:
+            assert set(location) == {"path", "line", "end_line"}
+            selected = sources[location["path"]].splitlines()[
+                location["line"] - 1 : location["end_line"]
+            ]
+            values.append("\n".join(line for line in selected if line.strip()))
+        assert len(set(values)) == 1
+        assert len(values[0].splitlines()) == generic.BLOCK_LINES
+
+
+def test_aligned_nonblank_windows_still_merge_across_different_blank_line_spacing():
+    shared = statements()
+    sources = {
+        "src/A.swift": "func first() {\n" + shared + "\n} // first only\n",
+        "src/B.swift": "func second() {\n"
+        + "\n\n".join(shared.splitlines())
+        + "\n} // second only\n",
+    }
+    result = generic.summarize_source_text(sources)
+    blocks = [row for row in result["candidate_index"] if row["kind"] == "duplicate_source_block"]
+    assert len(blocks) == 1
+    assert {
+        location["path"]: (location["line"], location["end_line"])
+        for location in blocks[0]["locations"]
+    } == {
+        "src/A.swift": (2, 19),
+        "src/B.swift": (2, 36),
+    }

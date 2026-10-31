@@ -109,18 +109,34 @@ def _merged_blocks(groups, file_hashes):
         rows, key=lambda row: (row[0], tuple(loc["line"] for loc in row[2]))
     ):
         prior = previous.get(paths)
-        if prior is not None and all(
-            old["line"] <= current["line"] <= old["end_line"]
-            for old, current in zip(prior[1], locations, strict=True)
+        if (
+            prior is not None
+            and all(
+                old["_nonblank_start"] <= current["_nonblank_start"] <= old["_nonblank_end"]
+                for old, current in zip(prior[1], locations, strict=True)
+            )
+            and len(
+                {
+                    current["_nonblank_start"] - old["_nonblank_start"]
+                    for old, current in zip(prior[1], locations, strict=True)
+                }
+            )
+            == 1
         ):
             for old, current in zip(prior[1], locations, strict=True):
                 old["end_line"] = max(old["end_line"], current["end_line"])
+                old["_nonblank_end"] = max(old["_nonblank_end"], current["_nonblank_end"])
             prior[0].append(digest)
         else:
             prior = ([digest], [dict(row) for row in locations])
             previous[paths] = prior
             merged.append(prior)
-    return {_fingerprint("|".join(digests)): locations for digests, locations in merged}
+    return {
+        _fingerprint("|".join(digests)): [
+            {key: row[key] for key in ("path", "line", "end_line")} for row in locations
+        ]
+        for digests, locations in merged
+    }
 
 
 def summarize_source_text(sources: dict[str, str], *, max_blocks=40_000, deadline=None):
@@ -170,7 +186,13 @@ def summarize_source_text(sources: dict[str, str], *, max_blocks=40_000, deadlin
             if code_lines < 4 or len(value) < MIN_BLOCK_CHARACTERS:
                 continue
             blocks[_fingerprint(value)].append(
-                {"path": path, "line": window[0][0], "end_line": window[-1][0]}
+                {
+                    "path": path,
+                    "line": window[0][0],
+                    "end_line": window[-1][0],
+                    "_nonblank_start": index,
+                    "_nonblank_end": index + BLOCK_LINES - 1,
+                }
             )
     roles = {row["path"]: row["role"] for row in modules}
     languages = {row["path"]: row["language"] for row in modules}
