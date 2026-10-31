@@ -5,6 +5,9 @@ let titles = {};
 const $ = (id) => document.getElementById(id);
 const MAX_REVIEW_BYTES = 256 * 1024;
 const state = { token: null, rubric: null, projects: [], project: null, report: null, targets: {}, revision: 0, dirty: false, load: 0, loading: true, saving: false, reviewLoading: false, reviewDirty: false, reviewAssessment: null, reviewRequest: null };
+let queryLoad = 0;
+let queryNext = null;
+let queryParams = null;
 
 function node(tag, text, className) {
   const el = document.createElement(tag);
@@ -237,7 +240,153 @@ function renderFindings(report) {
   $("recommendations").replaceChildren(...recommendations.map((text) => node("li", text)));
   $("findings-empty").textContent = !report.review ? "An evidence-backed skill review can add ratings and recommendations. File counts alone do not establish maturity or excess burden." : findings.length || recommendations.length ? "" : "No findings or recommendations recorded. This is not a certification.";
 }
+function textList(parent, heading, items) {
+  parent.append(node("h3", heading));
+  if (!items?.length) { parent.append(node("p", "None recorded.", "secondary")); return; }
+  const list = node("ul");
+  list.append(...items.map((item) => node("li", item)));
+  parent.append(list);
+}
+function renderAlignment(alignment) {
+  const states = {
+    no_review: "No saved review. Diagnosis, coverage and an improvement plan remain unknown.",
+    missing_plan: "No full improvement plan recorded. Numeric directions alone are not a roadmap.",
+    scenario_unconfirmed: "Proposed or unbound plan: select targets explicitly and confirm the plan. No goals are saved automatically.",
+    targets_changed: "Saved goals differ from this plan's assumptions. Review the plan before using it for the new targets.",
+    not_comparable: "The saved plan and goals use incompatible rubric identities. Reconfirm them before choosing changes.",
+    ready: "Plan is bound to the selected goals. This does not mean the goals are achieved or the plan is independently validated."
+  };
+  $("plan-state").textContent = states[alignment?.planning_status] || "Planning context was not recorded for this report.";
+  $("plan-urgent").replaceChildren();
+  if (alignment?.urgent_findings?.length) {
+    textList($("plan-urgent"), "Critical and high findings remain priorities", alignment.urgent_findings.map((finding) => `${finding.severity}: ${finding.title || finding.message} · Evidence: ${(finding.evidence_ids || []).join(", ") || "see captured finding"}`));
+  }
+  const coverage = $("review-coverage");
+  coverage.replaceChildren();
+  if (alignment?.coverage) {
+    const value = alignment.coverage;
+    const details = node("details");
+    details.append(node("summary", `Review coverage · ${value.scope === "whole_project" ? "whole project" : "focused"}`));
+    textList(details, "Examined areas", value.examined.map((area) => `${area.area} · Evidence: ${area.evidence_ids.join(", ")}`));
+    textList(details, "Unexamined areas", value.unexamined.map((area) => `${area.area}: ${area.reason}`));
+    textList(details, "Limits on conclusions", value.limitations);
+    textList(details, "Validation evidence", value.validation.map((check) => `${check.check}: ${check.status} · Evidence: ${check.evidence_ids.join(", ") || "none supplied"}`));
+    coverage.append(details);
+    if (value.unexamined.length || value.limitations.length) coverage.append(node("p", `${value.unexamined.length} unexamined area(s); ${value.limitations.length} review limitation(s). Collection counts do not establish review coverage.`, "secondary"));
+  } else coverage.append(node("p", "Review coverage was not recorded. Examined and unexamined areas remain unknown.", "secondary"));
+  const container = $("improvement-plan");
+  container.replaceChildren();
+  const plan = alignment?.plan;
+  if (plan) {
+    container.append(node("h3", "Diagnosis"), node("p", plan.diagnosis), node("h3", "Full target state"), node("p", plan.target_state));
+    const list = node("ol", undefined, "plan-list");
+    for (const initiative of plan.initiatives) {
+      const item = node("li", undefined, "initiative");
+      item.append(node("h3", `${initiative.title} · ${initiative.priority}`), node("p", `Root cause: ${initiative.root_cause}`), node("p", `Full scope: ${initiative.scope}`));
+      textList(item, "Intended dimension effects", Object.entries(initiative.dimension_impacts).map(([dim, effect]) => `${titles[dim] || dim}: ${effect}`));
+      textList(item, "Acceptance for the full outcome", initiative.acceptance);
+      item.append(node("p", `Upkeep effect: ${initiative.burden_effect}`), node("p", `Depends on: ${initiative.depends_on.join(", ") || "No dependencies recorded"}`), node("p", `Evidence: ${initiative.evidence_ids.join(", ")}`, "evidence-meta"));
+      const first = node("details");
+      first.append(node("summary", "First implementation slice"), node("p", initiative.first_slice));
+      item.append(first);
+      list.append(item);
+    }
+    container.append(list);
+    if (!plan.initiatives.length) container.append(node("p", "No change initiatives recorded. Preserve useful capability and keep unresolved findings visible."));
+  }
+  $("dimension-guidance").replaceChildren();
+  for (const [dim, value] of Object.entries(alignment?.dimensions || {})) {
+    const detail = node("details");
+    detail.append(node("summary", `${titles[dim] || dim} · ${value.action}`), node("p", value.rationale || "No judgment rationale recorded."), node("p", value.next_step), node("p", `Acceptance direction: ${value.verification}`));
+    if (value.recommendations?.length) textList(detail, "Saved recommendations", value.recommendations);
+    $("dimension-guidance").append(detail);
+  }
+}
+function resetEvidenceBrowser(assessment) {
+  ++queryLoad;
+  queryNext = queryParams = null;
+  $("evidence-query-form").reset();
+  $("query-results").replaceChildren();
+  $("query-state").textContent = "Choose filters and query the saved snapshot.";
+  $("query-submit").disabled = false;
+  $("query-more").hidden = true;
+  for (const [id, values, label] of [
+    ["query-kind", [...new Set(assessment.evidence.map((entry) => entry.kind))], "All kinds"],
+    ["query-candidate", [...new Set(assessment.evidence.flatMap((entry) => Object.keys(entry.stats?.candidate_counts?.by_kind || {}).concat((entry.stats?.candidates || []).map((candidate) => candidate.kind).filter(Boolean))))], "All leads"]
+  ]) {
+    $(id).replaceChildren(node("option", label));
+    $(id).firstChild.value = "";
+    for (const value of values.sort()) { const option = node("option", value); option.value = value; $(id).append(option); }
+  }
+}
+function evidenceResult(row, load, assessmentId) {
+  const item = node("details", undefined, "evidence-result");
+  const location = row.locations?.[0] || (row.path ? row : null);
+  item.append(node("summary", `${row.kind || row.name || row.record_type || row.evidence_kind || "Evidence"}${location ? ` · ${location.path}${location.line ? `:${location.line}` : ""}` : ""}`), node("pre", jsonText(row)));
+  // Join by captured path; analysis evidence IDs cannot authorize arbitrary file reads.
+  const source = location && state.report.assessment.evidence.find((entry) => entry.path === location.path && ["python", "javascript", "documentation", "manifest", "configuration"].includes(entry.kind));
+  if (source) {
+    const button = node("button", "Read matching source context");
+    button.type = "button";
+    const context = node("div", undefined, "context-result");
+    context.setAttribute("aria-live", "polite");
+    button.addEventListener("click", async () => {
+      if (!currentSnapshot(load, assessmentId)) return;
+      button.disabled = true;
+      context.replaceChildren(node("p", "Checking captured source identity…"));
+      try {
+        const line = Number.isInteger(location.line) ? location.line : 1;
+        const parameters = new URLSearchParams({ assessment_id: assessmentId, evidence_id: source.id, line: String(line), end_line: String(Math.min(location.end_line || line + 39, line + 39)), max_chars: "8000" });
+        const result = await api(`/api/source-context?${parameters}`);
+        if (!currentSnapshot(load, assessmentId)) return;
+        context.replaceChildren(node("p", `${result.path}:${result.line}–${result.end_line} · ${result.source_identity}`, "evidence-meta"), node("pre", result.excerpt), node("p", `${result.caveat}${result.truncated ? " Range was truncated." : ""}`, "secondary"));
+      } catch (error) {
+        if (currentSnapshot(load, assessmentId)) context.replaceChildren(node("p", error.message, "severity"));
+      } finally { if (currentSnapshot(load, assessmentId)) button.disabled = false; }
+    });
+    item.append(button, context);
+  }
+  return item;
+}
+async function queryEvidence(append = false) {
+  if (!state.report || state.loading || (append && queryNext === null)) return;
+  const load = state.load;
+  const assessmentId = state.report.assessment.id;
+  const ticket = ++queryLoad;
+  const parameters = append ? new URLSearchParams(queryParams) : new URLSearchParams({ assessment_id: assessmentId, limit: "20", max_chars: "16000" });
+  if (!append) for (const [key, id] of [["view", "query-view"], ["kind", "query-kind"], ["role", "query-role"], ["candidate_kind", "query-candidate"], ["path", "query-path"]]) {
+    if ($(id).value) parameters.set(key, $(id).value);
+  }
+  parameters.set("offset", String(append ? queryNext : 0));
+  queryParams = parameters.toString();
+  $("query-submit").disabled = $("query-more").disabled = true;
+  $("query-state").textContent = "Querying captured evidence…";
+  try {
+    const result = await api(`/api/evidence-query?${parameters}`);
+    if (!currentSnapshot(load, assessmentId) || ticket !== queryLoad) return;
+    if (!append) $("query-results").replaceChildren();
+    $("query-results").append(...result.items.map((row) => evidenceResult(row, load, assessmentId)));
+    queryNext = result.next_offset;
+    $("query-more").hidden = queryNext === null;
+    const analysis = (result.analysis_scope || []).map((entry) => `${entry.status || "unknown"}: ${entry.candidate_counts.indexed ?? "unknown"}/${entry.candidate_counts.total ?? "unknown"} leads indexed`).join("; ");
+    $("query-state").textContent = `${result.matched} matching row(s); ${$("query-results").children.length} shown. ${result.collection_complete ? "" : "Source collection is partial. "}${result.gap || ""}${result.oversized_rows ? " Oversized rows omitted; narrow the view or filters." : ""}${analysis ? ` Analysis scope: ${analysis}.` : ""}`;
+  } catch (error) {
+    if (currentSnapshot(load, assessmentId) && ticket === queryLoad) $("query-state").textContent = error.message;
+  } finally {
+    if (currentSnapshot(load, assessmentId) && ticket === queryLoad) $("query-submit").disabled = $("query-more").disabled = false;
+  }
+}
+$("evidence-query-form").addEventListener("submit", (event) => { event.preventDefault(); queryEvidence(); });
+$("query-more").addEventListener("click", () => queryEvidence(true));
+$("evidence-query-form").addEventListener("input", () => {
+  ++queryLoad;
+  queryNext = null;
+  $("query-more").hidden = true;
+  $("query-submit").disabled = false;
+  $("query-state").textContent = "Filters changed. Query evidence to apply them.";
+});
 function renderEvidence(assessment) {
+  resetEvidenceBrowser(assessment);
   $("facts").textContent = jsonText(assessment.facts);
   $("coverage").textContent = `Rubric ${assessment.rubric_version}; ${assessment.evidence?.length || 0} evidence records. ${assessment.complete === false ? "Collection is incomplete." : "Source collection completed; runtime assurance still requires evidence."}`;
   $("gaps").replaceChildren();
@@ -340,6 +489,7 @@ async function loadReport(id) {
     renderControls(result.goals);
     renderProgress(result.progress);
     renderFindings(result);
+    renderAlignment(result.goal_alignment);
     renderEvidence(result.assessment);
     const history = await api(`/api/history?project_id=${encodeURIComponent(result.assessment.project_id)}`);
     if (load !== state.load) return;
@@ -432,13 +582,16 @@ $("goal-form").addEventListener("submit", async (event) => {
     if (!current()) return;
     state.report.goals = goals;
     renderControls(goals);
-    const [progress, history] = await Promise.all([
+    const [progress, history, evolve] = await Promise.all([
       api(`/api/progress?project_id=${encodeURIComponent(projectId)}`),
-      api(`/api/history?project_id=${encodeURIComponent(projectId)}`)
+      api(`/api/history?project_id=${encodeURIComponent(projectId)}`),
+      api(`/api/evolve?assessment_id=${encodeURIComponent(state.report.assessment.id)}`)
     ]);
     if (!current()) return;
     renderProgress(progress);
     renderHistory(history);
+    state.report.goal_alignment = evolve.goal_alignment;
+    renderAlignment(evolve.goal_alignment);
     message("Goals saved. This starts a new baseline; it does not record engineering progress.");
   } catch (error) {
     if (current()) message(`${error.message}. Reload the report if another session changed its goals.`, true);
@@ -593,13 +746,16 @@ $("review-form").addEventListener("submit", async (event) => {
     renderRatings(state.report);
     renderFindings(state.report);
     const projectId = state.report.assessment.project_id;
-    const [progress, history] = await Promise.all([
+    const [progress, history, evolve] = await Promise.all([
       api(`/api/progress?project_id=${encodeURIComponent(projectId)}`),
-      api(`/api/history?project_id=${encodeURIComponent(projectId)}`)
+      api(`/api/history?project_id=${encodeURIComponent(projectId)}`),
+      api(`/api/evolve?assessment_id=${encodeURIComponent(id)}`)
     ]);
     if (!currentSnapshot(load, id)) return;
     renderProgress(progress);
     renderHistory(history);
+    state.report.goal_alignment = evolve.goal_alignment;
+    renderAlignment(evolve.goal_alignment);
     message("Review saved. Collected facts and project files are unchanged.");
   } catch (error) {
     if (currentSnapshot(load, id)) message(saved ? `Review saved, but the report refresh failed: ${error.message}` : error.message, true);

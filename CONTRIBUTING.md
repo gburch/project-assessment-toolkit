@@ -9,13 +9,15 @@ Requires macOS or Linux, Python 3.11+ and [uv](https://docs.astral.sh/uv/). The 
 ```bash
 git clone https://github.com/gburch/project-assessment-toolkit.git
 cd project-assessment-toolkit
-uv sync --extra dev --extra mcp --locked
-uv run --extra mcp --locked pytest -q
+uv sync --extra dev --extra mcp --extra analysis --locked
+uv run --extra mcp --extra analysis --locked pytest -q
 uv run --extra mcp --locked ruff check src tests
 uv run --extra mcp --locked ruff format --check src tests
 ```
 
 The default tests use local synthetic projects and state; keep them offline and free of cloud credentials. Use checks appropriate to the change: focused tests while working and the full suite for behavior or contract changes. Prose-only edits usually need command and link review. Exercise the real CLI or MCP adapter when changing its contract.
+
+The optional `analysis` extra supplies Tree-sitter syntax parsers for JavaScript/TypeScript; it does not install target dependencies or type-check the project. Preserve a usable core installation without it, with explicit unavailable evidence. Analyzer changes need representative source/test/tooling, large-file, truncation and uncertainty cases; keep captured identities, candidate counts and partial metrics honest. Run the relevant tests after installing locked dependencies; they then stay offline. Collection scope changes must remain distinguishable from changes in project quality.
 
 For changes to the local report UI or browser behavior:
 
@@ -46,6 +48,6 @@ Use a **new directory outside the checkout**. The command builds one wheel, expo
 - Keep scans read-only: do not execute assessed code, import its plugins, install its dependencies or contact its services. Separate test-value runtime collectors run only when explicitly requested.
 - Keep collected facts, reviewer judgments and user-selected goals distinct. Preserve unknowns, evidence identity, versioned rubrics and compatible history. Static hints never become automatic scores.
 - Preserve source/report access checks, secret handling, transaction consistency, concurrent-update checks and idempotency. Cover a changed boundary with meaningful behavior or recovery evidence.
-- Prefer the existing shared service and the smallest adequate seam. Search callers and references before extracting a helper or removing an apparent duplicate. Avoid speculative frameworks, test quotas and new gates without a current need.
+- Prefer the existing shared service and the smallest adequate seam. Search callers, exports, entry points and dynamic/plugin use before extracting a helper or removing an apparent duplicate or unused symbol. Static confidence is confidence in the lead, not safe deletion. Avoid speculative frameworks, test quotas and new gates without a current need.
 
 Keep documentation beside its canonical workflow and link to it rather than duplicating instructions. Retain third-party attribution and license notices if introducing external material. Contributions are distributed under the repository's [MIT license](LICENSE).

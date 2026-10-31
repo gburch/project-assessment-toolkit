@@ -5,7 +5,7 @@ from copy import deepcopy
 import pytest
 
 from project_assess.rubric import DIMENSIONS, rubric
-from project_assess.service import AssessmentService
+from project_assess.service import AssessmentService, markdown_report
 
 
 @pytest.fixture
@@ -138,7 +138,7 @@ def test_alignment_routes_independent_axes_without_penalizing_excess_capability(
     assert rows(service) == before
 
 
-def test_strengthening_uses_one_rubric_step_and_a_dimension_specific_proof(project):
+def test_strengthening_names_full_target_before_optional_first_milestone(project):
     service, _, snapshot = project
     save_review(service, snapshot, capability=1)
     save_goals(service, snapshot, capability=4)
@@ -152,12 +152,14 @@ def test_strengthening_uses_one_rubric_step_and_a_dimension_specific_proof(proje
         assert item["current"] == {"capability": 1, "burden": 1}
         assert item["target"] == {"capability_min": 4, "burden_max": 2}
         assert item["next_capability"] == 2
-        assert anchors[dimension]["capability"][2] in item["next_step"]
-        assert anchors[dimension]["capability"][4] not in item["next_step"]
+        assert item["target_capability"] == 4
+        assert item["target_anchor"] == anchors[dimension]["capability"][4]
+        assert anchors[dimension]["capability"][4] in item["next_step"]
+        assert "system changes" in item["next_step"]
     assert len({item["verification"] for item in alignment["dimensions"].values()}) == 7
 
 
-def test_framework_rebalance_proposes_one_extension_step_with_cost_constraint(project):
+def test_framework_rebalance_plans_full_extension_goal_with_cost_constraint(project):
     service, _, snapshot = project
     save_review(service, snapshot, {"extensibility": (2, 3)})
     goals = service.set_targets(snapshot["project_id"], profile="framework", expected_revision=0)
@@ -172,7 +174,8 @@ def test_framework_rebalance_proposes_one_extension_step_with_cost_constraint(pr
     assert extension["target"] == {"capability_min": 4, "burden_max": 2}
     assert extension["next_capability"] == 3
     anchors = rubric()["dimensions"]["extensibility"]["capability"]
-    assert anchors[3] in extension["next_step"] and anchors[4] not in extension["next_step"]
+    assert extension["target_capability"] == 4 and extension["target_anchor"] == anchors[4]
+    assert anchors[4] in extension["next_step"]
     assert "tradeoff" in extension["next_step"]
     assert "variation" in extension["verification"] and "compatibility" in extension["verification"]
 
@@ -340,3 +343,224 @@ def test_evolve_rechecks_source_and_import_authority_before_returning_saved_advi
         with pytest.raises(PermissionError):
             restricted.evolve(snapshot["id"])
     assert rows(owner) == before
+
+
+def review_with_plan(service, snapshot, goals=None):
+    """Synthetic authored roadmap; fixtures do not establish automatic grades."""
+    review = service.review_template(snapshot["id"])
+    evidence_id = next(row["id"] for row in snapshot["evidence"] if row["path"] == "app.py")
+    for rating in review["ratings"].values():
+        rating.update(
+            capability=3,
+            burden=1,
+            rationale="Synthetic inspected behavior, with source-estimated upkeep.",
+            recommendations=["Trace the shared change path before adding more independent checks."],
+            evidence_ids=[evidence_id],
+        )
+    review["coverage"] = {
+        "schema_version": 1,
+        "scope": "whole_project",
+        "examined": [
+            {"area": "Public computation and shared callers", "evidence_ids": [evidence_id]}
+        ],
+        "unexamined": [
+            {"area": "Production recovery", "reason": "No deployment evidence supplied."}
+        ],
+        "limitations": ["Source review only; runtime effectiveness remains unverified."],
+        "validation": [
+            {"check": "Full application suite", "status": "not_run", "evidence_ids": []}
+        ],
+    }
+    review["plan"] = {
+        "schema_version": 1,
+        "diagnosis": "Repeated lifecycle ownership couples valuable changes across boundaries.",
+        "target_state": "One clear lifecycle owner with tested public behavior and documented recovery.",
+        "initiatives": [
+            {
+                "id": "lifecycle",
+                "title": "Consolidate lifecycle ownership",
+                "priority": "high",
+                "root_cause": "Lifecycle responsibility is duplicated across boundary implementations.",
+                "scope": "All affected entry points, durable state transitions and recovery callers.",
+                "dimension_impacts": {
+                    "maintainability": "Reduce coordinated edits without removing authority checks.",
+                    "testing": "Exercise shared public outcomes rather than private call sequences.",
+                },
+                "evidence_ids": [evidence_id],
+                "acceptance": [
+                    "Required callers retain authorization, error and recovery behavior."
+                ],
+                "burden_effect": "Replace duplicate upkeep with one responsibility; no new framework.",
+                "depends_on": [],
+                "first_slice": "Move one lifecycle path and demonstrate its public contract.",
+            },
+            {
+                "id": "recovery",
+                "title": "Verify recovery guidance",
+                "priority": "medium",
+                "root_cause": "Recovery guidance and actual ownership can diverge.",
+                "scope": "Operator recovery through every supported lifecycle entry point.",
+                "dimension_impacts": {
+                    "documentation": "Make the supported recovery task reliable."
+                },
+                "evidence_ids": [evidence_id],
+                "acceptance": ["A reader follows source-matched recovery guidance successfully."],
+                "burden_effect": "Maintain one canonical recovery explanation.",
+                "depends_on": ["lifecycle"],
+                "first_slice": "Trace the recovery task against the consolidated lifecycle.",
+            },
+        ],
+    }
+    if goals:
+        review["plan"]["goal_revision"] = goals["revision"]
+    return review
+
+
+def test_markdown_report_preserves_full_roadmap_before_first_slice_and_review_limits(project):
+    service, _, snapshot = project
+    goals = save_goals(service, snapshot)
+    review = review_with_plan(service, snapshot, goals)
+    review["plan"]["diagnosis"] += " <script>unsafe()</script>"
+    service.submit_review(snapshot["id"], review)
+    text = markdown_report(service.get_report(snapshot["id"]))
+    assert "Unexamined: Production recovery" in text
+    assert "Full application suite: not\\_run" in text
+    assert "&lt;script&gt;unsafe()&lt;/script&gt;" in text
+    assert "<script>" not in text
+    assert text.index("Full scope: All affected entry points") < text.index(
+        "First implementation slice:"
+    )
+    assert "Acceptance:" in text and "Burden effect:" in text and "Dependencies: lifecycle" in text
+
+
+def test_evolve_preserves_whole_project_plan_coverage_and_urgent_findings_when_goals_met(project):
+    service, root, snapshot = project
+    goals = save_goals(service, snapshot)
+    review = review_with_plan(service, snapshot, goals)
+    evidence_id = review["ratings"]["testing"]["evidence_ids"][0]
+    review["findings"] = [
+        {
+            "severity": "critical",
+            "title": "Synthetic critical boundary issue",
+            "evidence_ids": [evidence_id],
+        },
+        {
+            "severity": "high",
+            "title": "Synthetic high recovery issue",
+            "evidence_ids": [evidence_id],
+        },
+        {"severity": "low", "title": "Synthetic minor issue", "evidence_ids": [evidence_id]},
+    ]
+    saved = service.submit_review(snapshot["id"], review)
+    before, source = rows(service), (root / "app.py").read_bytes()
+
+    alignment = service.evolve(snapshot["id"])["goal_alignment"]
+
+    assert alignment["planning_status"] == "ready"
+    assert alignment["review_id"] == saved["id"]
+    assert all(item["action"] == "maintain" for item in alignment["dimensions"].values())
+    assert alignment["coverage"] == review["coverage"]
+    assert alignment["plan"] == review["plan"]
+    assert alignment["findings"] == review["findings"]
+    assert alignment["urgent_findings"] == review["findings"][:2]
+    for dimension, rating in review["ratings"].items():
+        assert alignment["dimensions"][dimension]["rationale"] == rating["rationale"]
+        assert alignment["dimensions"][dimension]["recommendations"] == rating["recommendations"]
+    assert service.doctor(snapshot["id"])["goal_alignment"] == alignment
+    assert service.get_report(snapshot["id"])["goal_alignment"] == alignment
+    assert rows(service) == before and (root / "app.py").read_bytes() == source
+
+
+def test_proposed_target_scenario_does_not_select_goals_or_turn_unknown_into_zero(project):
+    service, _, snapshot = project
+    review = review_with_plan(service, snapshot)
+    review["ratings"]["testing"]["capability"] = None
+    scenario = {dim: {"capability_min": 4, "burden_max": 2} for dim in DIMENSIONS}
+    review["plan"]["assumed_targets"] = scenario
+    service.submit_review(snapshot["id"], review)
+    before = rows(service)
+
+    alignment = service.evolve(snapshot["id"])["goal_alignment"]
+
+    assert alignment["status"] == "no_goals"
+    assert alignment["planning_status"] == "scenario_unconfirmed"
+    assert alignment["plan"]["assumed_targets"] == scenario
+    assert alignment["dimensions"]["testing"]["current"]["capability"] is None
+    assert alignment["dimensions"]["testing"]["target_capability"] is None
+    assert alignment["dimensions"]["testing"]["capability_gap"] is None
+    assert service.history(snapshot["project_id"])["goals"] == []
+    assert rows(service) == before
+
+
+@pytest.mark.parametrize("binding", ["goal_revision", "assumed_targets"])
+def test_authored_plan_binding_expires_after_goal_change_without_rewriting_review(project, binding):
+    service, _, snapshot = project
+    goals = save_goals(service, snapshot)
+    review = review_with_plan(service, snapshot)
+    review["plan"][binding] = goals["revision"] if binding == "goal_revision" else goals["targets"]
+    saved = service.submit_review(snapshot["id"], review)
+    assert service.evolve(snapshot["id"])["goal_alignment"]["planning_status"] == "ready"
+
+    save_goals(service, snapshot, capability=4, revision=1)
+    before = rows(service)
+    alignment = service.evolve(snapshot["id"])["goal_alignment"]
+
+    assert alignment["planning_status"] == "targets_changed"
+    assert alignment["plan"] == review["plan"]
+    assert alignment["review_id"] == saved["id"]
+    assert alignment["dimensions"]["testing"]["target_capability"] == 4
+    assert rows(service) == before
+
+
+def test_legacy_review_has_no_fabricated_roadmap_and_plan_without_binding_stays_unconfirmed(
+    project,
+):
+    service, _, snapshot = project
+    goals = save_goals(service, snapshot)
+    legacy = review_with_plan(service, snapshot)
+    legacy.pop("coverage")
+    legacy.pop("plan")
+    service.submit_review(snapshot["id"], legacy)
+    alignment = service.evolve(snapshot["id"])["goal_alignment"]
+    assert alignment["coverage"] is None and alignment["plan"] is None
+    assert alignment["planning_status"] == "missing_plan"
+
+    authored = review_with_plan(service, snapshot)
+    service.submit_review(snapshot["id"], authored)
+    assert (
+        service.evolve(snapshot["id"])["goal_alignment"]["planning_status"]
+        == "scenario_unconfirmed"
+    )
+    assert service.history(snapshot["project_id"])["goals"] == [goals]
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "coverage_citation",
+        "validation_citation",
+        "initiative_citation",
+        "duplicate_id",
+        "missing_dependency",
+        "cycle",
+    ],
+)
+def test_invalid_planning_never_partially_saves_review(project, invalid):
+    service, _, snapshot = project
+    review = review_with_plan(service, snapshot)
+    if invalid == "coverage_citation":
+        review["coverage"]["examined"][0]["evidence_ids"] = ["e_foreign"]
+    elif invalid == "validation_citation":
+        review["coverage"]["validation"][0]["status"] = "passed"
+    elif invalid == "initiative_citation":
+        review["plan"]["initiatives"][0]["evidence_ids"] = ["e_foreign"]
+    elif invalid == "duplicate_id":
+        review["plan"]["initiatives"][1]["id"] = "lifecycle"
+    elif invalid == "missing_dependency":
+        review["plan"]["initiatives"][0]["depends_on"] = ["missing"]
+    else:
+        review["plan"]["initiatives"][0]["depends_on"] = ["recovery"]
+    before = rows(service)
+    with pytest.raises(ValueError):
+        service.submit_review(snapshot["id"], review)
+    assert rows(service) == before

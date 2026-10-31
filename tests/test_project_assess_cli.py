@@ -37,7 +37,40 @@ def test_installed_cli_roundtrip_without_source_path_imports(tmp_path):
     help_text = command("--help")
     assert help_text.startswith("usage: pat ") and "Project Assessment Toolkit" in help_text
     snapshot = json.loads(command("scan", str(root)))
+    brief = json.loads(command("report", snapshot["id"], "--brief"))
+    assert brief["assessment_id"] == snapshot["id"] and brief["source"] == snapshot["source"]
+    assert "evidence" not in brief and brief["planning_status"]["status"] == "no_review"
+    assert brief["planning_status"]["gap_status"] == "no_goals"
+    index = json.loads(
+        command("evidence-query", snapshot["id"], "--path", "README.md", "--limit", "1")
+    )
+    assert index["returned"] == 1 and index["items"][0]["path"] == "README.md"
+    assert "excerpt" not in index["items"][0] and "stats" not in index["items"][0]
+    context = json.loads(
+        command(
+            "source-context",
+            snapshot["id"],
+            index["items"][0]["id"],
+            "--line",
+            "1",
+            "--end-line",
+            "1",
+        )
+    )
+    assert context["source_identity"] == "snapshot_matched_live_bytes"
+    assert "# Project" in context["excerpt"] and context["digest"] == index["items"][0]["digest"]
+    assert json.loads(command("evidence-query", snapshot["id"], "--view", "coverage"))[
+        "collection_gap_count"
+    ] == len(snapshot["gaps"])
+    identity = json.loads(command("info"))
+    assert identity["distribution"] == "pat-assess" and identity["code_digest"].startswith(
+        "sha256:"
+    )
+    assert all(
+        row["status"] == "available_not_attested_read" for row in identity["available_instructions"]
+    )
     diagnosis = json.loads(command("doctor", snapshot["id"]))
+    assert json.loads(command("doctor", snapshot["id"], "--limit", "1"))["selection"]["limit"] == 1
     assert diagnosis["assessment_id"] == snapshot["id"]
     assert diagnosis["source"] == snapshot["source"]
     assert set(diagnosis["groups"]) == {"reuse", "quality", "efficiency"}
@@ -141,6 +174,9 @@ def test_installed_cli_roundtrip_without_source_path_imports(tmp_path):
     } == state_before
     assert {item.name: item.read_bytes() for item in root.iterdir()} == source_before
     assert json.loads(command("history", snapshot["project_id"])) == history_before
+    next_scan = json.loads(command("scan", str(root), "--brief"))
+    assert next_scan["assessment_id"] != snapshot["id"] and "evidence" not in next_scan
+    assert next_scan["source"]["manifest_digest"] == snapshot["source"]["manifest_digest"]
 
     skills = subprocess.run(
         [str(executable), "skills"],

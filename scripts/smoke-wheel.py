@@ -22,6 +22,7 @@ base = Path(cli.__file__).resolve().parent
 assert base.is_relative_to(Path(sys.prefix).resolve())
 assert not base.is_relative_to(Path(sys.argv[1]).resolve())
 assert importlib.util.find_spec('mcp') is None
+assert importlib.util.find_spec('tree_sitter') is None
 for name in ('static/index.html', 'static/app.js', 'static/style.css', 'docs/PROJECT_ASSESS.md'):
     assert (base / name).is_file() and (base / name).read_bytes()
 for name in ('project-assess', 'doc-value', 'test-value'):
@@ -32,7 +33,8 @@ for name in ('project-assess', 'doc-value', 'test-value'):
             resource = (skill.parent / target.split('#')[0]).resolve()
             assert resource.is_relative_to(base) and resource.is_file()
 print(json.dumps({'version': metadata.version('pat-assess'), 'python': sys.version.split()[0],
-                  'origin': str(base.relative_to(sys.prefix)), 'mcp_installed': False}))
+                  'origin': str(base.relative_to(sys.prefix)), 'mcp_installed': False,
+                  'analysis_installed': False}))
 """
 
 
@@ -153,6 +155,9 @@ def main():
         project, state = output / "project", output / "state"
         project.mkdir()
         (project / "app.py").write_text("def add(a, b):\n    return a + b\n")
+        (project / "app.js").write_text(
+            "throw new Error('Assessment must not execute this source');\n"
+        )
         pat = output / "venv/bin/pat"
 
         def cli(*arguments, state_dir=state, expected=0):
@@ -161,6 +166,15 @@ def main():
 
         step = "public CLI roundtrip"
         snapshot = cli("scan", project)
+        javascript = next(
+            row for row in snapshot["evidence"] if row["kind"] == "javascript-analysis"
+        )
+        check(
+            snapshot["facts"]["python"]["files"] == 1
+            and not javascript["stats"]["analyzer"]["available"]
+            and javascript["stats"]["gaps"],
+            "core scan preserves Python facts and explicit unavailable JavaScript analysis",
+        )
         review = cli("review-template", snapshot["id"])
         for rating in review["ratings"].values():
             rating.update(

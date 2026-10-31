@@ -61,11 +61,23 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                     "doctor",
                     "evolve",
                     "get_history",
+                    "get_tool_info",
+                    "start_assessment",
+                    "query_evidence",
+                    "inspect_source_context",
                 } <= names
                 assert all(
                     tool.annotations.read_only_hint
                     for tool in discovered.tools
-                    if tool.name in {"get_report", "get_badge", "doctor", "evolve"}
+                    if tool.name
+                    in {
+                        "get_report",
+                        "get_badge",
+                        "doctor",
+                        "evolve",
+                        "get_tool_info",
+                        "query_evidence",
+                    }
                 )
                 assert not next(
                     tool.annotations.read_only_hint
@@ -80,6 +92,46 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 assert not captured.is_error
                 snapshot = captured.structured_content
                 assert snapshot["source"]["root"] == str(root.resolve())
+                identity = await session.call_tool("get_tool_info", {})
+                assert not identity.is_error and identity.structured_content[
+                    "code_digest"
+                ].startswith("sha256:")
+                assert identity.structured_content["allowed_roots"] == [
+                    str(root.resolve()),
+                    str(reports.resolve()),
+                ]
+                brief = await session.call_tool(
+                    "get_report", {"assessment_id": snapshot["id"], "brief": True}
+                )
+                assert (
+                    not brief.is_error
+                    and brief.structured_content["assessment_id"] == snapshot["id"]
+                )
+                assert "evidence" not in brief.structured_content
+                queried = await session.call_tool(
+                    "query_evidence",
+                    {"assessment_id": snapshot["id"], "path": "README.md", "limit": 1},
+                )
+                assert not queried.is_error and queried.structured_content["returned"] == 1
+                assert queried.structured_content["items"][0]["path"] == "README.md"
+                context = await session.call_tool(
+                    "inspect_source_context",
+                    {
+                        "assessment_id": snapshot["id"],
+                        "evidence_id": queried.structured_content["items"][0]["id"],
+                        "line": 1,
+                        "end_line": 1,
+                    },
+                )
+                assert not context.is_error
+                assert (
+                    context.structured_content["source_identity"] == "snapshot_matched_live_bytes"
+                )
+                assert "# Project" in context.structured_content["excerpt"]
+                invalid_query = await session.call_tool(
+                    "query_evidence", {"assessment_id": snapshot["id"], "limit": 101}
+                )
+                assert invalid_query.is_error
                 badge = await session.call_tool(
                     "get_badge", {"assessment_id": snapshot["id"], "dimension": "testing"}
                 )
@@ -92,6 +144,7 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 assert invalid_badge.is_error
                 diagnosis = await session.call_tool("doctor", {"assessment_id": snapshot["id"]})
                 assert not diagnosis.is_error
+                assert diagnosis.structured_content["selection"]["limit"] == 20
                 assert diagnosis.structured_content["source"] == snapshot["source"]
                 assert set(diagnosis.structured_content["groups"]) == {
                     "reuse",
@@ -243,5 +296,14 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 assert not after.is_error
                 assert after.structured_content == before.structured_content
                 assert (root / "README.md").read_bytes() == source_before
+                compact_scan = await session.call_tool("start_assessment", {"root": str(root)})
+                assert (
+                    not compact_scan.is_error and "evidence" not in compact_scan.structured_content
+                )
+                assert compact_scan.structured_content["assessment_id"] != snapshot["id"]
+                assert (
+                    compact_scan.structured_content["source"]["manifest_digest"]
+                    == snapshot["source"]["manifest_digest"]
+                )
 
     asyncio.run(exercise())

@@ -83,6 +83,9 @@ service.set_targets(second['project_id'], None, 0, profile='internal-service')
 first_root = base / 'ui-first-project'
 first_root.mkdir()
 (first_root / 'app.py').write_text("raise AssertionError('Scans must not execute this project')\n")
+(first_root / 'src').mkdir()
+(first_root / 'src' / 'dead.py').write_text('\n'.join(
+    f"def _unused{index}():\n    return {index}\n    print('never_called')\n" for index in range(25)))
 (first_root / '.env').write_text('PRIVATE_UI_SCAN_MARKER=never-return-this-value\n')
 forbidden_root = base / 'forbidden-project'
 forbidden_root.mkdir()
@@ -99,6 +102,10 @@ badges['warning'] = badge(warning, 'maintainability')
 def commands():
     for line in sys.stdin:
         command = line.strip()
+        if command == 'change-context-source':
+            (first_root / 'src' / 'dead.py').write_text("value = 'new_source_must_not_be_returned'\n")
+            print(json.dumps({'command': command}), flush=True)
+            continue
         if command not in {'review-complete', 'rereview'}:
             continue
         project = next(project for project in service.list_projects() if project['root'] == str(root))
@@ -539,6 +546,108 @@ async function checkBadgeText(browser, badges) {
   }
 }
 
+async function checkPlanningEvidence(browser, info) {
+  const origin = info.first_origin;
+  const context = await browser.newContext({ viewport: { width: 320, height: 900 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("dialog", (dialog) => dialog.accept());
+  try {
+    const projects = await (await page.request.get(`${origin}/api/projects`)).json();
+    const project = projects.find((entry) => entry.root === info.first_root);
+    const other = projects.find((entry) => entry.id !== project.id);
+    await page.goto(origin);
+    await page.selectOption("#project", project.id);
+    await expect(page.locator("#source")).toContainText(info.first_root);
+    await expect(page.locator("#review-coverage")).toContainText("unexamined");
+    await page.selectOption("#profile", "internal-service");
+    await page.getByRole("button", { name: "Save goals", exact: true }).click();
+    await expect(page.locator("#goal-state")).toContainText("Saved goal version");
+    const report = await (await page.request.get(`${origin}/api/report?assessment_id=${project.latest_assessment_id}`)).json();
+    const source = report.assessment.evidence.find((entry) => entry.path === "src/dead.py");
+    const review = await (await page.request.get(`${origin}/api/review-template?assessment_id=${project.latest_assessment_id}`)).json();
+    for (const rating of Object.values(review.ratings)) Object.assign(rating, {
+      capability: 3, burden: 1, confidence: "medium", burden_basis: "source_estimate", burden_confidence: "low",
+      rationale: "Synthetic full review, not an automatically calculated grade.", evidence_ids: [source.id], recommendations: ["Consolidate responsibility across the supported paths."]
+    });
+    const hostile = "<img src=x onerror=window.planPwned=1>";
+    review.coverage = { schema_version: 1, scope: "whole_project", examined: [{ area: "Production lifecycle", evidence_ids: [source.id] }], unexamined: [{ area: "Provider recovery", reason: "No runtime receipt supplied" }], limitations: ["Source-only review"], validation: [{ check: "Provider recovery", status: "not_run", evidence_ids: [] }] };
+    review.plan = { schema_version: 1, goal_revision: report.goals.revision, diagnosis: `Shared lifecycle ownership needs consolidation ${hostile}`, target_state: "One supported lifecycle across all entry points with source-linked failure verification", initiatives: [
+      { id: "consolidate", title: "Consolidate lifecycle ownership", priority: "high", root_cause: "Ownership duplicated across callers", scope: "Every entry point, persisted transition and recovery caller", dimension_impacts: { maintainability: "Reduce coordinated edits", testing: "Protect shared public outcomes" }, evidence_ids: [source.id], acceptance: ["All supported callers preserve authority and recovery behavior"], burden_effect: "Replace duplicate upkeep; add no framework", depends_on: [], first_slice: "Move one path after agreeing the complete contract" },
+      { id: "recovery", title: "Verify recovery guidance", priority: "medium", root_cause: "Guidance can drift from lifecycle ownership", scope: "Supported operator recovery workflows", dimension_impacts: { documentation: "Reliable recovery task" }, evidence_ids: [source.id], acceptance: ["A reader completes the recovery task"], burden_effect: "Maintain one canonical explanation", depends_on: ["consolidate"], first_slice: "Trace the documented recovery path" }
+    ] };
+    review.findings = [{ severity: "critical", title: "Synthetic critical finding remains visible despite met goals", evidence_ids: [source.id] }];
+    await page.locator("#review-editor summary").click();
+    await page.locator("#review-json").fill(JSON.stringify(review));
+    await page.getByRole("button", { name: "Submit review", exact: true }).click();
+    await expect(page.locator("#review-state")).toContainText("Saved review");
+    await expect(page.locator("#plan-state")).toContainText("Plan is bound");
+    await expect(page.locator("#plan-urgent")).toContainText("Synthetic critical finding");
+    await expect(page.locator("#progress-summary")).toContainText("Remaining gap: 0");
+    await expect(page.locator("#improvement-plan")).toContainText(hostile);
+    await expect(page.locator("#improvement-plan")).toContainText("Every entry point, persisted transition and recovery caller");
+    await expect(page.locator("#improvement-plan")).toContainText("Depends on: consolidate");
+    const roadmap = await page.locator("#improvement-plan").textContent();
+    assert(roadmap.indexOf("Full target state") < roadmap.indexOf("First implementation slice"));
+    assert(roadmap.indexOf("Acceptance for the full outcome") < roadmap.indexOf("First implementation slice"));
+    await page.locator("#review-coverage summary").click();
+    await expect(page.locator("#review-coverage")).toContainText("Provider recovery: No runtime receipt supplied");
+    const history = await (await page.request.get(`${origin}/api/history?project_id=${project.id}`)).json();
+    await page.locator("#evidence-browser summary").first().click();
+    await page.selectOption("#query-role", "production");
+    await page.selectOption("#query-candidate", "unreachable_statement");
+    await page.locator("#query-path").fill("src/dead.py");
+    const hostileLead = async (route) => {
+      const response = await route.fetch();
+      const result = await response.json();
+      result.items[0].metrics.caveat = hostile;
+      await route.fulfill({ response, json: result });
+    };
+    await page.route("**/api/evidence-query?*", hostileLead);
+    await page.getByRole("button", { name: "Query evidence", exact: true }).click();
+    await expect(page.locator("#query-state")).toContainText("25 matching row(s)");
+    const firstCount = await page.locator("#query-results > details").count();
+    assert(firstCount > 0 && firstCount <= 20);
+    const lead = page.locator("#query-results > details").first();
+    await lead.locator("summary").click();
+    await expect(lead).toContainText(hostile);
+    const requested = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/source-context");
+    await lead.getByRole("button", { name: "Read matching source context" }).click();
+    assert.equal(new URL((await requested).url()).searchParams.get("evidence_id"), source.id);
+    await expect(lead).toContainText("snapshot_matched_live_bytes");
+    await expect(lead).toContainText("never_called");
+    await page.unroute("**/api/evidence-query?*", hostileLead);
+    await page.getByRole("button", { name: "Load more evidence" }).click();
+    await expect.poll(() => page.locator("#query-results > details").count()).toBeGreaterThan(firstCount);
+    await fixtureCommand("change-context-source");
+    await lead.getByRole("button", { name: "Read matching source context" }).click();
+    await expect(lead.locator(".context-result")).toContainText("changed since capture");
+    await expect(lead.locator(".context-result")).not.toContainText("new_source_must_not_be_returned");
+    await page.selectOption("#query-view", "snippets");
+    await page.getByRole("button", { name: "Query evidence", exact: true }).click();
+    await expect(page.locator("#query-state")).not.toContainText("Querying");
+    await expect(page.locator("#query-results")).toContainText("never_called");
+    const pending = await holdResponse(page, "**/api/evidence-query?*");
+    await page.getByRole("button", { name: "Query evidence", exact: true }).click();
+    await pending.entered;
+    await page.selectOption("#project", other.id);
+    await expect(page.locator("#source")).toContainText(info.second_root);
+    await pending.release();
+    await expect(page.locator("#query-results")).toBeEmpty();
+    assert.deepEqual(await (await page.request.get(`${origin}/api/history?project_id=${project.id}`)).json(), history, "evidence/context queries must not mutate history");
+    await page.selectOption("#project", project.id);
+    await expect(page.locator("#plan-urgent")).toContainText("Synthetic critical finding");
+    await page.locator("#plan-heading").locator("..").screenshot({ path: path.join(output, "project-assess-planning-mobile.png") });
+    assert.equal(await page.evaluate(() => window.planPwned), undefined);
+    assert.equal(await page.locator("#improvement-plan img, #query-results img").count(), 0);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "roadmap and evidence browser fit mobile");
+    const accessibility = await new AxeBuilder({ page }).analyze();
+    assert.deepEqual(accessibility.violations.map((violation) => ({ id: violation.id, targets: violation.nodes.map((node) => node.target) })), [], "roadmap/evidence mobile accessibility");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+}
+
 let browser;
 try {
   const info = await launch;
@@ -546,6 +655,7 @@ try {
   browser = await chromium.launch({ headless: true });
   await checkBadgeText(browser, info.badges);
   await checkFirstScanAndReview(browser, info);
+  await checkPlanningEvidence(browser, info);
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
   page.on("dialog", (dialog) => dialog.accept());
@@ -684,7 +794,7 @@ try {
   assert.deepEqual(mobileAccessibility.violations.map((v) => ({ id: v.id, impact: v.impact, targets: v.nodes.map((node) => node.target) })), [], "mobile accessibility");
   await page.screenshot({ path: path.join(output, "project-assess-mobile.png"), fullPage: true });
   assert.deepEqual(errors, [], "browser should not report JavaScript errors");
-  console.log("PAT browser acceptance passed: first scan/review, validation, snapshot races, goals, progress, hostile content, keyboard, mobile, accessibility, badge text bounds.");
+  console.log("PAT browser acceptance passed: first scan/review, shared roadmap/coverage/urgent findings, filtered evidence/pagination/source identity, stale responses, goals/progress, hostile content, keyboard/mobile/accessibility, badge text bounds.");
 } finally {
   await browser?.close();
   lines.close();

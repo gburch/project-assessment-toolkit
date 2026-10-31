@@ -17,25 +17,35 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
 
+from .capture_context import attach_source_windows
+from .diagnostics import sarif_report
 from .ecosystem import VERSION as ECOSYSTEM_VERSION
 from .ecosystem import dependency_inventory, javascript_signals, python_signals
 from .ecosystem import summarize as summarize_ecosystem
+from .javascript_analysis import (
+    analyze_javascript,
+    javascript_analyzer_identity,
+    summarize_javascript,
+)
+from .provenance import tool_info
 from .rubric import RUBRIC_VERSION
 from .static_analysis import MAX_FILES as MAX_STATIC_FILES
 from .static_analysis import MAX_SYMBOLS as MAX_STATIC_SYMBOLS
 from .static_analysis import VERSION as STATIC_VERSION
-from .static_analysis import analyze_python, ruff_report
+from .static_analysis import analyze_python, ruff_report, source_role
 from .static_analysis import summarize as summarize_static
 from .test_value.assessment import summarize as summarize_test_value
 
 MAX_FILES = 20_000
 MAX_FILE_BYTES = 1024 * 1024
+MAX_SOURCE_FILE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_REPORTS = 32
 MAX_TEST_VALUE_REPORT_BYTES = 16 * 1024 * 1024
 MAX_TEST_VALUE_REPORT_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_STATIC_EVIDENCE_BYTES = 4 * 1024 * 1024
 MAX_STATIC_DEFINITIONS = 2000
+MAX_DETAIL_PER_FILE = 64
 MAX_DEPTH = 64
 MAX_EXCERPT = 800
 MAX_GIT_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -195,10 +205,57 @@ def _kind(path):
 
 
 def _is_test(path):
-    parts, stem = {p.lower() for p in path.parts}, path.stem.lower()
-    return bool(parts & {"test", "tests", "__tests__", "spec", "specs"}) or (
-        stem.startswith("test_") or stem.endswith(("_test", ".test", ".spec"))
-    )
+    return source_role(path.as_posix())["role"] == "test"
+
+
+def _priority(path):
+    kind, role = _kind(path), source_role(path.as_posix())["role"]
+    if kind == "manifest" or path.name in {
+        "src",
+        "frontend",
+        "backend",
+        "web",
+        "app",
+        "apps",
+        "services",
+        "packages",
+    }:
+        return 0
+    if kind in {"python", "javascript"} and role == "production":
+        return 0
+    if kind == "configuration" and role not in {"test", "tooling"}:
+        return 1
+    if kind in {"python", "javascript"} and role == "unknown":
+        return 1
+    if path.name.lower() in {"readme.md", "agents.md", "contributing.md", "security.md"}:
+        return 2
+    if role == "test" or path.name in {"test", "tests", "e2e", "__tests__"}:
+        return 3
+    if role == "tooling" or path.name in {
+        ".agents",
+        ".claude",
+        ".codex",
+        "ops",
+        "tools",
+        "scripts",
+        "evals",
+    }:
+        return 4
+    return 5 if kind == "documentation" or path.name == "docs" else 6
+
+
+def _parent_at(root_descriptor, path):
+    """Reopen a discovered parent through contained directory FDs, never symlinks."""
+    descriptor = os.dup(root_descriptor)
+    try:
+        for part in path.parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def _python(text):
@@ -687,12 +744,13 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
         "reports": {},
     }
     evidence, findings, manifest, watched = [], [], [], []
-    documentation_texts, python_analysis = {}, []
+    documentation_texts, python_analysis, javascript_analysis, captured_sources = {}, [], [], {}
     ecosystem_manifests, ecosystem_inputs = [], []
     ecosystem_truncated = False
     source_rows = {}
     static_symbols, value_definitions = 0, 0
     gaps, excluded, unsupported = [], Counter(), Counter()
+    inputs, skipped, unsearched_directories = [], [], []
     complete, visited, total = True, 0, 0
     revision, dirty = _git(root)
     selected, selection_mode, selection_gap, selection_failed = _git_inventory(root)
@@ -723,9 +781,10 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
         return entry["id"]
 
     def walk(directory, relative, depth):
-        nonlocal complete, visited, total, static_symbols, value_definitions, ecosystem_truncated
+        nonlocal complete, visited
         if depth > MAX_DEPTH:
             gaps.append("Directory depth limit exceeded")
+            unsearched_directories.append({"path": relative.as_posix(), "reason": "depth-limit"})
             complete = False
             return
         watched.append((str(relative), _fingerprint(os.fstat(directory))))
@@ -736,16 +795,24 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
                     names.append(entry.name)
                     if len(names) > MAX_FILES:
                         gaps.append("Directory entry limit exceeded")
+                        unsearched_directories.append(
+                            {"path": relative.as_posix(), "reason": "directory-entry-limit"}
+                        )
                         complete = False
                         return
-                names.sort()
+                names.sort(key=lambda name: (_priority(relative / name), name))
         except OSError:
             gaps.append("Unable to list a source directory")
             complete = False
             return
         for name in names:
-            if visited >= MAX_FILES or total >= MAX_TOTAL_BYTES:
-                gaps.append("Repository file or total byte limit exceeded")
+            if visited >= MAX_FILES:
+                gaps.append(
+                    "Repository discovery file limit exceeded; undiscovered paths are unknown"
+                )
+                unsearched_directories.append(
+                    {"path": relative.as_posix(), "reason": "discovery-file-limit"}
+                )
                 complete = False
                 return
             visited += 1
@@ -785,161 +852,238 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
                 if not stat.S_ISREG(info.st_mode):
                     excluded["nonregular files"] += 1
                     continue
-                # A supplied report is handled below by its dedicated bounded
-                # parser.  Do not also treat its JSON as project source, which
-                # could expose test identities or report output in evidence.
                 if os.path.normpath(str(root / path)) in supplied_report_paths:
                     continue
                 if _secret_name(name):
                     excluded["credential files"] += 1
                     continue
-                kind = _kind(path)
-                payload, fingerprint = _read_at(
-                    directory, name, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total)
-                )
-                watched.append((str(path), fingerprint))
-                total += len(payload)
-                manifest.append(
-                    {
-                        "path": path.as_posix(),
-                        "digest": _bytes_digest(payload),
-                        "bytes": len(payload),
-                    }
-                )
-                if kind is None:
-                    unsupported[path.suffix.lower() or "extensionless"] += 1
-                    continue
-                try:
-                    text = payload.decode("utf-8")
-                except UnicodeDecodeError:
-                    gaps.append("Unsupported non-UTF-8 input: " + path.as_posix())
-                    complete = False
-                    continue
-                if "\x00" in text:
-                    gaps.append("Unsupported binary input: " + path.as_posix())
-                    complete = False
-                    continue
-                stats = {}
-                inventory = facts["inventory"]
-                inventory["files"] += 1
-                inventory["bytes"] += len(payload)
-                inventory["lines"] += len(text.splitlines())
-                if kind in {"python", "javascript"}:
-                    inventory["source_files"] += 1
-                    inventory["test_files"] += _is_test(path)
-                    facts[kind]["files"] += 1
-                    if kind == "python":
-                        stats, tree = _python(text)
-                        if (
-                            len(python_analysis) < MAX_STATIC_FILES
-                            and static_symbols < MAX_STATIC_SYMBOLS
-                        ):
-                            record = analyze_python(path.as_posix(), tree)
-                            remaining = MAX_STATIC_SYMBOLS - static_symbols
-                            symbols = len(record["functions"]) + len(record["imports"])
-                            if symbols > remaining:
-                                record["functions"] = record["functions"][:remaining]
-                                remaining -= len(record["functions"])
-                                record["imports"] = record["imports"][:remaining]
-                                record["gaps"].append("Project static symbol limit reached")
-                            static_symbols += len(record["functions"]) + len(record["imports"])
-                            python_analysis.append(record)
-                    else:
-                        stats = _javascript(text)
-                    if len(ecosystem_inputs) < MAX_STATIC_FILES:
-                        ecosystem_input = (
-                            python_signals(path.as_posix(), tree)
-                            if kind == "python"
-                            else javascript_signals(path.as_posix(), text)
-                        )
-                        for signal in ecosystem_input["signals"]:
-                            signal["scope"] = (
-                                "test"
-                                if _is_test(path)
-                                else "tooling"
-                                if set(path.parts) & {"scripts", "tools", ".github"}
-                                else "source"
-                            )
-                        ecosystem_inputs.append(ecosystem_input)
-                    else:
-                        ecosystem_truncated = True
-                    if (
-                        len(source_rows) < MAX_STATIC_FILES
-                        and value_definitions < MAX_STATIC_DEFINITIONS
-                    ):
-                        from .test_value import static as static_tool
-
-                        try:
-                            if kind == "python":
-                                found, found_gaps, _ = static_tool.python_rows(
-                                    root / path, root, tree
-                                )
-                            else:
-                                found, found_gaps = static_tool._js_file(root / path, root, text)
-                                found_gaps.append(
-                                    {
-                                        "path": path.as_posix(),
-                                        "reason": "javascript-lexical-analysis-not-parse-proof",
-                                    }
-                                )
-                        except (TypeError, ValueError, SyntaxError, RecursionError):
-                            found, found_gaps = (
-                                [],
-                                [{"path": path.as_posix(), "reason": "static-analysis-error"}],
-                            )
-                        remaining = MAX_STATIC_DEFINITIONS - value_definitions
-                        if len(found) > remaining:
-                            found_gaps.append(
-                                {"path": path.as_posix(), "reason": "static-definition-limit"}
-                            )
-                        found = found[:remaining]
-                        for row in found:
-                            if len(row.get("setupLeads", [])) > 32:
-                                row["setupLeadCount"] = len(row["setupLeads"])
-                                row["setupLeads"] = row["setupLeads"][:32]
-                                found_gaps.append(
-                                    {"path": path.as_posix(), "reason": "static-setup-lead-limit"}
-                                )
-                        value_definitions += len(found)
-                        source_rows[path.as_posix()] = {"rows": found, "gaps": found_gaps}
-                    else:
-                        gaps.append(
-                            "Test-value static input limit reached; remaining inputs were not analyzed"
-                        )
-                    for key, value in stats.items():
-                        facts[kind][key] += value
-                    stats["is_test"] = _is_test(path)
-                elif kind == "documentation":
-                    documentation_texts[path.as_posix()] = text
-                    stats = _documentation(text)
-                    inventory["documentation_files"] += 1
-                    facts["documentation"]["files"] += 1
-                    facts["documentation"]["lines"] += len(text.splitlines())
-                    for key, value in stats.items():
-                        facts["documentation"][key] += value
-                elif kind == "manifest":
-                    stats = _redact_data(_manifest(path, text))
-                    manifests = facts["manifests"]
-                    manifests["paths"].append(path.as_posix())
-                    manifests["ecosystems"].append(stats["ecosystem"])
-                    for key in ("dependencies", "dev_dependencies"):
-                        manifests[key] += stats[key]
-                    manifests["scripts"].extend(stats["scripts"])
-                    if len(ecosystem_manifests) < MAX_STATIC_FILES:
-                        ecosystem_manifests.append(stats["dependency_inventory"])
-                    else:
-                        ecosystem_truncated = True
-                if any(
-                    part in {".github", ".circleci", ".ssci"} for part in path.parts
-                ) or name in {"Jenkinsfile", ".gitlab-ci.yml"}:
-                    facts["ci"]["paths"].append(path.as_posix())
-                add_evidence(path.as_posix(), payload, kind, text, stats)
-            except (OSError, ValueError, SyntaxError, RecursionError):
-                gaps.append("Unable to collect or parse input safely: " + path.as_posix())
+                inputs.append((path, _fingerprint(info), info.st_size, _kind(path)))
+            except (OSError, ValueError):
+                gaps.append("Unable to inspect source input safely: " + path.as_posix())
                 complete = False
+
+    def capture(directory, path, expected):
+        nonlocal complete, total, static_symbols, value_definitions, ecosystem_truncated
+        name = path.name
+        try:
+            # A supplied report is handled below by its dedicated bounded
+            # parser.  Do not also treat its JSON as project source, which
+            # could expose test identities or report output in evidence.
+            if os.path.normpath(str(root / path)) in supplied_report_paths:
+                return
+            if _secret_name(name):
+                excluded["credential files"] += 1
+                return
+            kind = _kind(path)
+            file_limit = (
+                MAX_SOURCE_FILE_BYTES if kind in {"python", "javascript"} else MAX_FILE_BYTES
+            )
+            payload, fingerprint = _read_at(
+                directory, name, min(file_limit, MAX_TOTAL_BYTES - total)
+            )
+            if fingerprint != expected:
+                gaps.append("Source changed during collection")
+                complete = False
+            watched.append((str(path), fingerprint))
+            total += len(payload)
+            manifest.append(
+                {
+                    "path": path.as_posix(),
+                    "digest": _bytes_digest(payload),
+                    "bytes": len(payload),
+                }
+            )
+            if kind is None:
+                unsupported[path.suffix.lower() or "extensionless"] += 1
+                return
+            try:
+                text = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                gaps.append("Unsupported non-UTF-8 input: " + path.as_posix())
+                complete = False
+                return
+            if "\x00" in text:
+                gaps.append("Unsupported binary input: " + path.as_posix())
+                complete = False
+                return
+            stats = {}
+            inventory = facts["inventory"]
+            inventory["files"] += 1
+            inventory["bytes"] += len(payload)
+            inventory["lines"] += len(text.splitlines())
+            if kind in {"python", "javascript"}:
+                captured_sources[path.as_posix()] = text
+                inventory["source_files"] += 1
+                inventory["test_files"] += _is_test(path)
+                facts[kind]["files"] += 1
+                if kind == "python":
+                    stats, tree = _python(text)
+                    remaining = max(0, MAX_STATIC_SYMBOLS - static_symbols)
+                    record = analyze_python(
+                        path.as_posix(), tree, detail_budget=min(fair_detail_budget, remaining)
+                    )
+                    record["module"]["lines"] = len(text.splitlines())
+                    if not remaining and record["module"]["function_count"]:
+                        record["gaps"].append(
+                            "Project static detail limit reached; module overview/imports retained"
+                        )
+                    static_symbols += len(record["functions"])
+                    python_analysis.append(record)
+                else:
+                    stats = _javascript(text)
+                    javascript_analysis.append(analyze_javascript(path.as_posix(), text))
+                if len(ecosystem_inputs) < MAX_STATIC_FILES:
+                    ecosystem_input = (
+                        python_signals(path.as_posix(), tree)
+                        if kind == "python"
+                        else javascript_signals(path.as_posix(), text)
+                    )
+                    for signal in ecosystem_input["signals"]:
+                        signal["scope"] = (
+                            "test"
+                            if _is_test(path)
+                            else "tooling"
+                            if set(path.parts) & {"scripts", "tools", ".github"}
+                            else "source"
+                        )
+                    ecosystem_inputs.append(ecosystem_input)
+                else:
+                    ecosystem_truncated = True
+                if (
+                    len(source_rows) < MAX_STATIC_FILES
+                    and value_definitions < MAX_STATIC_DEFINITIONS
+                ):
+                    from .test_value import static as static_tool
+
+                    try:
+                        if kind == "python":
+                            found, found_gaps, _ = static_tool.python_rows(root / path, root, tree)
+                        else:
+                            found, found_gaps = static_tool._js_file(root / path, root, text)
+                            found_gaps.append(
+                                {
+                                    "path": path.as_posix(),
+                                    "reason": "javascript-lexical-analysis-not-parse-proof",
+                                }
+                            )
+                    except (TypeError, ValueError, SyntaxError, RecursionError):
+                        found, found_gaps = (
+                            [],
+                            [{"path": path.as_posix(), "reason": "static-analysis-error"}],
+                        )
+                    remaining = MAX_STATIC_DEFINITIONS - value_definitions
+                    if len(found) > remaining:
+                        found_gaps.append(
+                            {"path": path.as_posix(), "reason": "static-definition-limit"}
+                        )
+                    found = found[:remaining]
+                    for row in found:
+                        if len(row.get("setupLeads", [])) > 32:
+                            row["setupLeadCount"] = len(row["setupLeads"])
+                            row["setupLeads"] = row["setupLeads"][:32]
+                            found_gaps.append(
+                                {"path": path.as_posix(), "reason": "static-setup-lead-limit"}
+                            )
+                    value_definitions += len(found)
+                    source_rows[path.as_posix()] = {"rows": found, "gaps": found_gaps}
+                else:
+                    gaps.append(
+                        "Test-value static input limit reached; remaining inputs were not analyzed"
+                    )
+                for key, value in stats.items():
+                    facts[kind][key] += value
+                stats["is_test"] = _is_test(path)
+            elif kind == "documentation":
+                documentation_texts[path.as_posix()] = text
+                stats = _documentation(text)
+                inventory["documentation_files"] += 1
+                facts["documentation"]["files"] += 1
+                facts["documentation"]["lines"] += len(text.splitlines())
+                for key, value in stats.items():
+                    facts["documentation"][key] += value
+            elif kind == "manifest":
+                stats = _redact_data(_manifest(path, text))
+                manifests = facts["manifests"]
+                manifests["paths"].append(path.as_posix())
+                manifests["ecosystems"].append(stats["ecosystem"])
+                for key in ("dependencies", "dev_dependencies"):
+                    manifests[key] += stats[key]
+                manifests["scripts"].extend(stats["scripts"])
+                if len(ecosystem_manifests) < MAX_STATIC_FILES:
+                    ecosystem_manifests.append(stats["dependency_inventory"])
+                else:
+                    ecosystem_truncated = True
+            if any(part in {".github", ".circleci", ".ssci"} for part in path.parts) or name in {
+                "Jenkinsfile",
+                ".gitlab-ci.yml",
+            }:
+                facts["ci"]["paths"].append(path.as_posix())
+            stats.update(source_role(path.as_posix()))
+            add_evidence(path.as_posix(), payload, kind, text, stats)
+        except (OSError, ValueError, SyntaxError, RecursionError):
+            gaps.append("Unable to collect or parse input safely: " + path.as_posix())
+            complete = False
+            skipped.append(
+                {
+                    "path": path.as_posix(),
+                    "kind": _kind(path),
+                    "role": source_role(path.as_posix())["role"],
+                    "bytes": expected[3],
+                    "reason": "read-or-parse-error",
+                }
+            )
 
     try:
         walk(descriptor, Path("."), 0)
+        discovery_complete = complete
+        python_inputs = sum(
+            kind == "python" and size <= MAX_SOURCE_FILE_BYTES for _, _, size, kind in inputs
+        )
+        fair_detail_budget = min(
+            MAX_DETAIL_PER_FILE, max(1, MAX_STATIC_SYMBOLS // max(python_inputs, 1))
+        )
+        for path, expected, size, kind in sorted(
+            inputs, key=lambda row: (_priority(row[0]), row[0].as_posix())
+        ):
+            file_limit = (
+                MAX_SOURCE_FILE_BYTES if kind in {"python", "javascript"} else MAX_FILE_BYTES
+            )
+            reason = (
+                "file-byte-limit"
+                if size > file_limit
+                else "total-byte-limit"
+                if size > MAX_TOTAL_BYTES - total
+                else None
+            )
+            if reason:
+                skipped.append(
+                    {
+                        "path": path.as_posix(),
+                        "kind": kind,
+                        "role": source_role(path.as_posix())["role"],
+                        "bytes": size,
+                        "reason": reason,
+                    }
+                )
+                complete = False
+                continue
+            try:
+                parent = _parent_at(descriptor, path)
+                try:
+                    capture(parent, path, expected)
+                finally:
+                    os.close(parent)
+            except OSError:
+                skipped.append(
+                    {
+                        "path": path.as_posix(),
+                        "kind": kind,
+                        "role": source_role(path.as_posix())["role"],
+                        "bytes": size,
+                        "reason": "parent-changed-or-inaccessible",
+                    }
+                )
+                complete = False
         for path, expected in watched:
             try:
                 current = os.stat(path, dir_fd=descriptor, follow_symlinks=False)
@@ -1030,13 +1174,31 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
     analysis = summarize_static(
         python_analysis, facts["python"]["files"], facts["javascript"]["files"]
     )
+    js_analysis = summarize_javascript(javascript_analysis, facts["javascript"]["files"])
+    attach_source_windows(
+        [analysis, js_analysis], captured_sources, evidence, _redact, MAX_STATIC_EVIDENCE_BYTES
+    )
     payload = json.dumps(analysis, sort_keys=True).encode()
     evidence_id = add_evidence("<static-analysis>", payload, "static-analysis", "", analysis)
     facts["static_analysis"] = {
-        key: value for key, value in analysis.items() if key != "candidates"
+        key: value
+        for key, value in analysis.items()
+        if key not in {"candidates", "candidate_index", "modules", "topology", "hotspots"}
     }
     facts["static_analysis"]["evidence_id"] = evidence_id
     gaps.extend(analysis["gaps"])
+    if facts["javascript"]["files"]:
+        payload = json.dumps(js_analysis, sort_keys=True).encode()
+        evidence_id = add_evidence(
+            "<javascript-analysis>", payload, "javascript-analysis", "", js_analysis
+        )
+        facts["javascript_analysis"] = {
+            key: value
+            for key, value in js_analysis.items()
+            if key not in {"candidates", "candidate_index", "modules", "topology", "hotspots"}
+        }
+        facts["javascript_analysis"]["evidence_id"] = evidence_id
+        gaps.extend(js_analysis["gaps"])
     if documentation_texts:
         from .documentation import captured_documentation
 
@@ -1073,7 +1235,10 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
                 raise ValueError("report path must not contain symlinks")
             report_fd = _open_directory(path.parent)
             try:
-                is_json_report = path.suffix.lower() == ".json"
+                is_sarif_report = path.suffix.lower() == ".sarif" or path.name.lower().endswith(
+                    ".sarif.json"
+                )
+                is_json_report = path.suffix.lower() == ".json" or is_sarif_report
                 limit = MAX_TEST_VALUE_REPORT_BYTES if is_json_report else MAX_FILE_BYTES
                 payload, _ = _read_at(report_fd, path.name, limit)
             finally:
@@ -1084,7 +1249,13 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
             json_report_total += len(payload)
             if json_report_total > MAX_TEST_VALUE_REPORT_TOTAL_BYTES:
                 raise ValueError("JSON report cumulative byte limit exceeded")
-        if is_json_report and payload.lstrip().startswith(b"["):
+        if is_sarif_report:
+            kind = "sarif"
+            stats = sarif_report(payload, root, {entry["path"] for entry in manifest}, _redact)
+            gaps.extend(stats["gaps"])
+            if stats["status"] == "partial":
+                complete = False
+        elif is_json_report and payload.lstrip().startswith(b"["):
             kind = "ruff"
             stats = ruff_report(payload, root, {entry["path"] for entry in manifest}, _redact)
             gaps.extend(stats["gaps"])
@@ -1109,15 +1280,18 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
         else:
             kind, stats = _report(payload)
         report_kinds.append(kind)
-        # Never expose raw test output or Ruff edit text; retain bounded,
+        # Never expose raw test output or Ruff/SARIF edit text; retain bounded,
         # redacted diagnostics and summaries from the dedicated adapters.
         add_evidence(str(path), payload, kind, json.dumps(stats, sort_keys=True), stats)
         previous = facts["reports"].setdefault(kind, {"files": 0})
         previous["files"] += 1
-        if kind == "ruff":
+        if kind in {"ruff", "sarif"}:
             previous["diagnostics"] = (
                 previous.get("diagnostics", 0) + stats["summary"]["diagnostics"]
             )
+            if kind == "sarif":
+                previous["source_identity"] = "unverified"
+                previous["supplied"] = previous.get("supplied", 0) + stats["summary"]["supplied"]
         elif kind == "test-value":
             # The adapter already returns bounded nested summaries.  Keep one
             # per supplied artifact; never merge claims as if they were facts.
@@ -1163,6 +1337,38 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
     facts["inventory"]["recognized_files"] = facts["inventory"]["files"]
     facts["inventory"]["manifest_files"] = len(manifest)
     facts["inventory"]["manifest_bytes"] = total
+    role_counts = {
+        role: {"files": 0, "bytes": 0, "lines": 0}
+        for role in ("production", "test", "tooling", "unknown")
+    }
+    source_bytes = {row["path"]: row["bytes"] for row in manifest}
+    for entry in evidence:
+        if entry["kind"] in {"python", "javascript"}:
+            role = entry["stats"]["role"]
+            role_counts[role]["files"] += 1
+            role_counts[role]["bytes"] += source_bytes[entry["path"]]
+            role_counts[role]["lines"] += entry["lines"]
+    facts["inventory"]["roles"] = role_counts
+    facts["collection"] = {
+        "priority": "application source and manifests/configuration before tests, tooling and unsupported assets",
+        "eligible_files_seen": len(inputs),
+        "captured_files": len(manifest),
+        "skipped_files": len(skipped),
+        "skipped_by_reason": dict(sorted(Counter(row["reason"] for row in skipped).items())),
+        "skipped_by_role": dict(sorted(Counter(row["role"] for row in skipped).items())),
+        "skipped_inputs": sorted(skipped, key=lambda row: (row["path"], row["reason"])),
+        "discovery_complete": discovery_complete,
+        "unsearched_directories": sorted(
+            unsearched_directories, key=lambda row: (row["path"], row["reason"])
+        ),
+        "python_detail_budget_per_file": fair_detail_budget,
+        "python_detail_functions": static_symbols,
+        "caveat": "Role labels are path heuristics. Counts describe discovered/captured inputs, not the entire repository when discovery is incomplete, production LOC, test coverage or quality.",
+    }
+    if skipped:
+        gaps.append(
+            f"Source capture omitted {len(skipped)} regular input(s); exact paths/reasons are in facts.collection.skipped_inputs"
+        )
     facts["maintainability"] = {
         "method": "static_review_hints",
         "forwarding_functions": facts["python"]["forwarding_functions"],
@@ -1192,10 +1398,11 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
     if facts["javascript"]["files"]:
         gaps.append("JavaScript/TypeScript counts are lexical estimates, not semantic analysis")
     scope = {
-        "collector_version": 5,
+        "collector_version": 6,
         "rubric_version": RUBRIC_VERSION,
         "max_files": MAX_FILES,
         "max_file_bytes": MAX_FILE_BYTES,
+        "max_source_file_bytes": MAX_SOURCE_FILE_BYTES,
         "max_total_bytes": MAX_TOTAL_BYTES,
         "max_depth": MAX_DEPTH,
         "max_reports": MAX_REPORTS,
@@ -1203,6 +1410,9 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
         "max_test_value_report_total_bytes": MAX_TEST_VALUE_REPORT_TOTAL_BYTES,
         "max_static_evidence_bytes": MAX_STATIC_EVIDENCE_BYTES,
         "max_static_definitions": MAX_STATIC_DEFINITIONS,
+        "max_detail_per_file": MAX_DETAIL_PER_FILE,
+        "max_static_symbols": MAX_STATIC_SYMBOLS,
+        "capture_priority": "application-first-v1",
         "max_git_output_bytes": MAX_GIT_OUTPUT_BYTES,
         "selection_mode": selection_mode,
         "excluded_dirs": sorted(_SKIP_DIRS | _SECRET_DIRS),
@@ -1221,12 +1431,14 @@ def collect(root: Path, reports: list[Path] | None = None) -> dict:
             "limits": facts["static_analysis"]["limits"],
         },
         "javascript": "lexical",
+        "javascript_analysis": javascript_analyzer_identity(),
         "documentation": "doc-value.captured.v1",
         "ecosystem_fit": {"version": ECOSYSTEM_VERSION, "limits": ecosystem["limits"]},
     }
     return {
         "schema_version": 1,
         "rubric_version": RUBRIC_VERSION,
+        "tool_provenance": tool_info(),
         "source": {
             "root": str(root),
             "revision": revision,

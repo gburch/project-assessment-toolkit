@@ -22,13 +22,15 @@ def parser():
     result.add_argument("--state-dir", help="Local state outside assessed projects")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("skills", help="Locate the bundled general assessment skills")
+    commands.add_parser("info", help="Read this installation's tool and instruction provenance")
     scan = commands.add_parser("scan", help="Capture deterministic source facts")
     scan.add_argument("root")
+    scan.add_argument("--brief", action="store_true", help="Return a compact, queryable handoff")
     scan.add_argument(
         "--report",
         action="append",
         default=[],
-        help="Import bounded JUnit, coverage, test-value or Ruff JSON evidence",
+        help="Import bounded JUnit, coverage, test-value, Ruff JSON or SARIF 2.1 (.sarif/.sarif.json) evidence",
     )
     commands.add_parser("list")
     commands.add_parser("rubric")
@@ -37,11 +39,54 @@ def parser():
         command.add_argument("assessment_id")
         if name == "report":
             command.add_argument("--format", choices=("json", "markdown"), default="json")
+            command.add_argument("--brief", action="store_true", help="Read a compact handoff")
         if name == "evidence":
             command.add_argument("--evidence-id")
+        if name == "doctor":
+            command.add_argument(
+                "--limit",
+                type=int,
+                default=100,
+                help="Share 1..100 candidates across evidence families; 20 is useful for a first pass",
+            )
         if name == "review":
             command.add_argument("--input", required=True)
             command.add_argument("--request-id")
+    query = commands.add_parser("evidence-query", help="Browse bounded captured evidence")
+    query.add_argument("assessment_id")
+    query.add_argument(
+        "--view",
+        choices=(
+            "index",
+            "details",
+            "candidates",
+            "snippets",
+            "graph",
+            "hotspots",
+            "coverage",
+            "provenance",
+        ),
+        default="index",
+    )
+    for field, help_text in (
+        ("kind", "Evidence kind, such as python, static-analysis or javascript-analysis"),
+        ("path", "Case-sensitive substring of a captured relative path"),
+        ("role", "Captured/heuristic role: production, test, tooling or unknown"),
+        ("candidate-kind", "Static candidate kind, such as complex_function"),
+    ):
+        query.add_argument("--" + field, help=help_text)
+    query.add_argument("--line", type=int)
+    query.add_argument("--offset", type=int, default=0)
+    query.add_argument("--limit", type=int, default=20)
+    query.add_argument("--max-chars", type=int, default=24000)
+    context = commands.add_parser(
+        "source-context", help="Read captured source only when its live digest still matches"
+    )
+    context.add_argument("assessment_id")
+    context.add_argument("evidence_id")
+    context.add_argument("--line", type=int, default=1)
+    context.add_argument("--end-line", type=int)
+    context.add_argument("--max-chars", type=int, default=8000)
     badge = commands.add_parser(
         "badge", help="Export a public GitHub badge from a saved assessment"
     )
@@ -68,6 +113,11 @@ def parser():
 def main(argv=None):
     argument_parser = parser()
     args = argument_parser.parse_args(argv)
+    if args.command == "info":
+        from .provenance import tool_info
+
+        print(json.dumps(tool_info(), indent=2, allow_nan=False))
+        return 0
     if args.command == "skills":
         from importlib.resources import files
 
@@ -107,12 +157,14 @@ def main(argv=None):
             return 0
         if args.command == "scan":
             output = service.scan(args.root, args.report)
+            if args.brief:
+                output = service.overview(output["id"])
         elif args.command == "list":
             output = service.list_projects()
         elif args.command == "rubric":
             output = service.rubric()
         elif args.command == "doctor":
-            output = service.doctor(args.assessment_id)
+            output = service.doctor(args.assessment_id, limit=args.limit)
         elif args.command == "evolve":
             output = service.evolve(args.assessment_id)
         elif args.command == "badge":
@@ -121,12 +173,44 @@ def main(argv=None):
                 print(output)
                 return 0
         elif args.command == "report":
-            output = service.get_report(args.assessment_id)
+            if args.brief and args.format != "json":
+                raise ValueError("--brief requires --format json")
+            output = (
+                service.overview(args.assessment_id)
+                if args.brief
+                else service.get_report(args.assessment_id)
+            )
             if args.format == "markdown":
                 print(markdown_report(output))
                 return 0
         elif args.command == "evidence":
             output = service.evidence(args.assessment_id, args.evidence_id)
+        elif args.command == "evidence-query":
+            output = service.query_evidence(
+                args.assessment_id,
+                **{
+                    key: getattr(args, key)
+                    for key in (
+                        "view",
+                        "kind",
+                        "path",
+                        "role",
+                        "candidate_kind",
+                        "line",
+                        "offset",
+                        "limit",
+                        "max_chars",
+                    )
+                },
+            )
+        elif args.command == "source-context":
+            output = service.source_context(
+                args.assessment_id,
+                args.evidence_id,
+                line=args.line,
+                end_line=args.end_line,
+                max_chars=args.max_chars,
+            )
         elif args.command == "review-template":
             output = service.review_template(args.assessment_id)
         elif args.command == "review":

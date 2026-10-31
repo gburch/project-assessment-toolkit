@@ -77,6 +77,22 @@ def create_server(service, port=0):
                 raise ValueError(f"Expected one {key}")
             return values[key][0]
 
+        def _parameters(self, query, required, optional, integers=()):
+            if len(query) > 4096:
+                raise ValueError("Report query is too long")
+            values = parse_qs(query, strict_parsing=True, keep_blank_values=True)
+            if not set(required) <= values.keys() or values.keys() - set(required) - set(optional):
+                raise ValueError("Missing or unsupported report query parameters")
+            if any(len(items) != 1 or not items[0] for items in values.values()):
+                raise ValueError("Report query parameters require one nonempty value")
+            result = {key: items[0] for key, items in values.items()}
+            for key in integers:
+                if key in result:
+                    if not result[key].isascii() or not result[key].isdigit():
+                        raise ValueError("Report query ranges require integer values")
+                    result[key] = int(result[key])
+            return result
+
         def _dispatch(self):
             if not self._authorized_origin():
                 return
@@ -96,6 +112,37 @@ def create_server(service, port=0):
                     result = service.get_report(self._query(parsed.query, "assessment_id"))
                 elif parsed.path == "/api/review-template":
                     result = service.review_template(self._query(parsed.query, "assessment_id"))
+                elif parsed.path == "/api/evolve":
+                    result = service.evolve(self._query(parsed.query, "assessment_id"))
+                elif parsed.path == "/api/evidence-query":
+                    parameters = self._parameters(
+                        parsed.query,
+                        {"assessment_id"},
+                        {
+                            "view",
+                            "kind",
+                            "path",
+                            "role",
+                            "candidate_kind",
+                            "line",
+                            "offset",
+                            "limit",
+                            "max_chars",
+                        },
+                        {"line", "offset", "limit", "max_chars"},
+                    )
+                    parameters.setdefault("max_chars", 16000)
+                    if parameters["max_chars"] > 16000:
+                        raise ValueError("Local evidence queries are limited to 16000 characters")
+                    result = service.query_evidence(**parameters)
+                elif parsed.path == "/api/source-context":
+                    parameters = self._parameters(
+                        parsed.query,
+                        {"assessment_id", "evidence_id"},
+                        {"line", "end_line", "max_chars"},
+                        {"line", "end_line", "max_chars"},
+                    )
+                    result = service.source_context(**parameters)
                 elif parsed.path == "/api/history":
                     result = service.history(self._query(parsed.query, "project_id"), summary=True)
                 elif parsed.path == "/api/progress":

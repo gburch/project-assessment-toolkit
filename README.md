@@ -27,7 +27,7 @@ PAT runs locally without an AI service. Scans collect facts; a person or optiona
 | **Scan** | Capture source facts and supplied reports without executing the project or changing its files. |
 | **Review** | Add capability and burden ratings supported by the captured evidence. |
 | **Goals** | Choose capability minimums and burden ceilings, then compare later assessments. |
-| **Doctor / Evolve** | Inspect reuse, quality and efficiency candidates; plan a bounded next step against selected goals. |
+| **Doctor / Evolve** | Inspect reuse, quality and efficiency leads; read the diagnosis, coverage and full roadmap before choosing a first implementation slice. |
 
 Doctor and Evolve provide advice. They do not assign ratings, save goals or repair source automatically. A target edit changes the goal, not the observed project.
 
@@ -39,15 +39,18 @@ Requires macOS or Linux, Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 git clone https://github.com/gburch/project-assessment-toolkit.git
 cd project-assessment-toolkit
 uv sync --locked
-uv run --locked pat --state-dir /path/outside/repos/pat-state scan /path/to/project
+uv run --locked pat info
+uv run --locked pat --state-dir /path/outside/repos/pat-state scan /path/to/project --brief
 uv run --locked pat --state-dir /path/outside/repos/pat-state list
-uv run --locked pat --state-dir /path/outside/repos/pat-state report ASSESSMENT_ID --format markdown
+uv run --locked pat --state-dir /path/outside/repos/pat-state report ASSESSMENT_ID --brief
 uv run --locked pat --state-dir /path/outside/repos/pat-state serve --open
 ```
 
 The local app can scan a project, inspect evidence, load or import a cited JSON review, submit it and save goals. It also shows ratings, history and progress. **Keep state outside assessed repositories:** it contains captured source excerpts, reviews and goals.
 
 Follow the [local workflow](docs/PROJECT_ASSESS.md#local-workflow) to fill a `review-template`, inspect `evidence` and `rubric`, and submit the review. The optional [assessment skill](.agents/skills/project-assess/SKILL.md) guides the same process. Choose goals explicitly; profiles are starting suggestions.
+
+Version **0.2.0** adds compact, paginated evidence inspection, module/dependency overviews, richer duplication and conservative dead-code leads. Coverage, role labels and omissions remain visible; similarity or an absent reference never proves safe deletion. Collector 6 / Python analyzer 2 starts a new collection scope: old snapshots and goals remain saved, and newly visible evidence is not engineering progress. See [analysis limits](docs/PROJECT_ASSESS.md#doctor-and-evolve).
 
 ## PAT's own assessment
 
@@ -67,6 +70,7 @@ Export saved assessments as badges for your own README. See the [badge guide](do
 
 - [Documentation tools](docs/PROJECT_ASSESS.md#documentation-evidence-and-navigation): `doc-value` and `doc-value-nav` inspect documentation and navigation evidence.
 - [Test-value tools](docs/PROJECT_ASSESS.md#test-value-evidence): static inventory and explicitly requested runtime test evidence. Scanning never runs tests automatically.
+- [JavaScript/TypeScript syntax analysis](docs/PROJECT_ASSESS.md#doctor-and-evolve): `uv sync --extra analysis --locked` installs optional Tree-sitter parsers in PAT's environment. It provides source leads, without type checking or executing the project.
 - [MCP and bundled skills](docs/PROJECT_ASSESS.md#agent-connection-and-limits): connect an agent to the same local service with explicit allowed roots. No cloud credentials or AI API key are required.
 
 The CLI is `pat`, the Python distribution is `pat-assess`, and the package is `project_assess`. The `project-assess` command alias and skill name remain available for compatibility. Read the [guide](docs/PROJECT_ASSESS.md) for evidence limits, source identity and local state.

@@ -7,6 +7,7 @@ import html
 import json
 import os
 import sqlite3
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -115,12 +116,12 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
     anchors = rubric()["dimensions"]
     proofs = {
         "security": "Demonstrate that the selected boundary rejects an unauthorized case while preserving authorized use and relevant failure handling.",
-        "testing": "Show that the smallest relevant check detects the intended defect and preserves required behavior; review its recurring upkeep before broadening the suite.",
-        "documentation": "Have a reader complete one needed task from the guidance and verify that its paths, examples and required steps match the captured implementation.",
-        "maintainability": "Trace one representative change through its edit sites and verify the required outputs, errors and safeguards; identify the upkeep it avoids or adds.",
-        "delivery": "Show source-linked evidence for one required build or release boundary, including its applicable failure and recovery path, without assuming a green run proves delivery.",
-        "operability": "Demonstrate one needed detection or recovery scenario and verify that an operator can follow the relevant evidence and recovery steps.",
-        "extensibility": "Prove one needed variation through the simplest adequate supported seam, including compatibility and failure behavior; a plugin framework is not required by the score.",
+        "testing": "Demonstrate effective protection of the important outcomes and failures in scope, with source-linked execution evidence for the selected rubric level; distinguish missing tests from missing execution evidence and account for recurring upkeep.",
+        "documentation": "Verify the needed reader workflows against the captured implementation, including setup, common changes and applicable recovery; identify workflows that remain unexamined.",
+        "maintainability": "Trace representative valuable changes through their edit sites and verify required outputs, errors and safeguards; identify the upkeep the proposed design avoids or adds across the affected system.",
+        "delivery": "Show source-linked evidence for the required build and release boundaries in scope, including applicable failure and recovery paths, without assuming a green run proves delivery.",
+        "operability": "Demonstrate the needed detection and recovery scenarios in scope and verify that operators can use the evidence and recovery steps; retain explicit gaps for unverified scenarios.",
+        "extensibility": "Demonstrate the actual variations and supported authors in scope through adequate seams, including compatibility and failure behavior; a plugin framework is not required by the score.",
     }
     dimensions = {}
     for dimension in DIMENSIONS:
@@ -128,6 +129,12 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
         capability = _gap(rating.get("capability"), target.get("capability_min"), "capability")
         burden = _gap(rating.get("burden"), target.get("burden_max"), "burden")
         next_capability = None
+        target_capability = target.get("capability_min")
+        target_anchor = (
+            anchors[dimension]["capability"][target_capability]
+            if compatible and target_capability is not None
+            else None
+        )
         verification = "Cite captured evidence for both capability and upkeep, including relevant failure paths; reassess after an authorized change."
         if goals is not None and not compatible:
             capability = burden = None
@@ -140,20 +147,19 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
             action = "inspect"
             next_step = "Review the unknown axis against captured evidence before choosing a change; a missing score does not mean zero or a need for more machinery."
             if capability:
-                next_step += " The saved review shows a capability deficit; inspect the cost of one bounded protection before strengthening."
+                next_step += " The saved review shows a capability deficit; establish the missing cost evidence while planning the full capability target."
             if burden:
                 next_step += " The saved review shows excess upkeep; investigate a smaller implementation while preserving important protections and clarifying the unknown capability."
         elif capability:
             action = "rebalance" if burden else "strengthen"
             next_capability = min(rating["capability"] + 1, target["capability_min"])
-            anchor = anchors[dimension]["capability"][next_capability]
-            next_step = f"Take one bounded step toward: {anchor} Preserve required behavior and safeguards; keep upkeep within burden ceiling {target['burden_max']}."
+            next_step = f"Plan for the full capability minimum {target_capability}: {target_anchor} Preserve required behavior and safeguards; keep upkeep within burden ceiling {target['burden_max']}. Choose a first implementation slice after identifying the required system changes and acceptance evidence."
             if burden:
-                next_step += " Remove or reuse existing upkeep while closing that gap; if no bounded change fits both goals, surface the tradeoff before expanding scope."
+                next_step += " Reduce demonstrated upkeep while closing that gap; surface any tradeoff that prevents meeting both targets."
             verification = proofs[dimension]
         elif burden:
             action = "simplify"
-            next_step = "Remove one evidenced source of upkeep while preserving the selected capability minimum, required behavior and safeguards; do not weaken a contract merely to lower burden."
+            next_step = "Plan to reduce the demonstrated upkeep to the selected ceiling while preserving the full capability minimum, required behavior and safeguards; do not weaken a contract merely to lower burden."
         else:
             action = "maintain"
             next_step = "Preserve the demonstrated fit. Capability above the selected minimum needs no reduction, and meeting a goal alone does not justify adding machinery."
@@ -163,22 +169,51 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
             "capability_gap": capability,
             "burden_gap": burden,
             "next_capability": next_capability,
+            "target_capability": target_capability,
+            "target_anchor": target_anchor,
             "action": action,
             "next_step": next_step,
             "verification": verification,
             "evidence_ids": list(rating.get("evidence_ids", [])),
+            "rationale": rating.get("rationale"),
+            "recommendations": list(rating.get("recommendations", [])),
             "confidence": rating.get("confidence"),
             "burden_basis": rating.get(
                 "burden_basis", "source_estimate" if rating.get("burden") is not None else "unknown"
             ),
             "burden_confidence": rating.get("burden_confidence"),
         }
+    plan = (review or {}).get("plan")
+    planning_status = "ready"
+    if not compatible:
+        planning_status = "not_comparable"
+    elif review is None:
+        planning_status = "no_review"
+    elif plan is None:
+        planning_status = "missing_plan"
+    elif goals is None or missing:
+        planning_status = "scenario_unconfirmed"
+    elif (plan.get("assumed_targets") is not None and plan["assumed_targets"] != targets) or (
+        plan.get("goal_revision") is not None and plan["goal_revision"] != goals["revision"]
+    ):
+        planning_status = "targets_changed"
+    elif plan.get("assumed_targets") is None and plan.get("goal_revision") is None:
+        planning_status = "scenario_unconfirmed"
+    findings = []
+    for finding in assessment.get("findings", []) + (review or {}).get("findings", []):
+        if finding not in findings:
+            findings.append(finding)
     return {
         "status": status,
         "goal_revision": goals["revision"] if goals else 0,
         "review_id": review["id"] if review else None,
         "missing_targets": missing,
         "dimensions": dimensions,
+        "coverage": (review or {}).get("coverage"),
+        "plan": plan,
+        "planning_status": planning_status,
+        "findings": findings,
+        "urgent_findings": [item for item in findings if item["severity"] in {"critical", "high"}],
     }
 
 
@@ -218,6 +253,67 @@ RATING_SCHEMA = _object(
     },
     required=["capability", "burden", "confidence", "rationale", "evidence_ids", "recommendations"],
 )
+COVERAGE_SCHEMA = _object(
+    {
+        "schema_version": {"const": 1},
+        "scope": {"enum": ["whole_project", "focused"]},
+        "examined": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _object({"area": TEXT, "evidence_ids": IDS}),
+        },
+        "unexamined": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _object({"area": TEXT, "reason": TEXT}),
+        },
+        "limitations": {"type": "array", "items": TEXT, "maxItems": 100},
+        "validation": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _object(
+                {
+                    "check": TEXT,
+                    "status": {"enum": ["passed", "failed", "not_run", "unavailable"]},
+                    "evidence_ids": IDS,
+                }
+            ),
+        },
+    }
+)
+INITIATIVE_ID = {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$"}
+PLAN_SCHEMA = _object(
+    {
+        "schema_version": {"const": 1},
+        "diagnosis": TEXT,
+        "target_state": TEXT,
+        "goal_revision": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+        "assumed_targets": {"anyOf": [TARGET_SCHEMA, {"type": "null"}]},
+        "initiatives": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _object(
+                {
+                    "id": INITIATIVE_ID,
+                    "title": TEXT,
+                    "priority": {"enum": ["critical", "high", "medium", "low"]},
+                    "root_cause": TEXT,
+                    "scope": TEXT,
+                    "dimension_impacts": {
+                        **_object({dimension: TEXT for dimension in DIMENSIONS}, required=[]),
+                        "minProperties": 1,
+                    },
+                    "evidence_ids": IDS,
+                    "acceptance": {"type": "array", "items": TEXT, "minItems": 1, "maxItems": 30},
+                    "burden_effect": TEXT,
+                    "depends_on": {"type": "array", "items": INITIATIVE_ID, "maxItems": 100},
+                    "first_slice": TEXT,
+                }
+            ),
+        },
+    },
+    required=["schema_version", "diagnosis", "target_state", "initiatives"],
+)
 REVIEW_SCHEMA = _object(
     {
         "assessment_id": {"type": "string", "maxLength": 100},
@@ -235,8 +331,64 @@ REVIEW_SCHEMA = _object(
                 }
             ),
         },
-    }
+        "coverage": COVERAGE_SCHEMA,
+        "plan": PLAN_SCHEMA,
+        "review_context": _object(
+            {
+                "tool_code_digest": {"type": ["string", "null"], "maxLength": 100},
+                "loaded_instructions": {
+                    "type": "array",
+                    "maxItems": 30,
+                    "items": _object(
+                        {
+                            "path": {"type": "string", "maxLength": 4096},
+                            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                            "read_status": {"enum": ["complete", "partial"]},
+                        }
+                    ),
+                },
+            },
+            required=[],
+        ),
+    },
+    required=["assessment_id", "source_digest", "rubric_version", "ratings", "findings"],
 )
+
+
+def _validate_planning(review, evidence_ids):
+    """Bind optional authored planning to captured evidence, without judging its quality."""
+    coverage = review.get("coverage", {})
+    for area in coverage.get("examined", []):
+        if not area["evidence_ids"] or not set(area["evidence_ids"]) <= evidence_ids:
+            raise ValueError("Examined coverage areas must cite captured evidence")
+    for check in coverage.get("validation", []):
+        if not set(check["evidence_ids"]) <= evidence_ids or (
+            check["status"] in {"passed", "failed"} and not check["evidence_ids"]
+        ):
+            raise ValueError("Completed validation checks must cite captured evidence")
+    initiatives = review.get("plan", {}).get("initiatives", [])
+    dependencies = {item["id"]: item["depends_on"] for item in initiatives}
+    if len(dependencies) != len(initiatives):
+        raise ValueError("Plan initiative IDs must be unique")
+    for item in initiatives:
+        if not item["evidence_ids"] or not set(item["evidence_ids"]) <= evidence_ids:
+            raise ValueError("Plan initiatives must cite captured evidence")
+        if not set(item["depends_on"]) <= dependencies.keys():
+            raise ValueError("Plan dependencies must reference existing initiative IDs")
+    visiting, visited = set(), set()
+
+    def visit(initiative_id):
+        if initiative_id in visiting:
+            raise ValueError("Plan dependencies must not contain cycles")
+        if initiative_id not in visited:
+            visiting.add(initiative_id)
+            for dependency in dependencies[initiative_id]:
+                visit(dependency)
+            visiting.remove(initiative_id)
+            visited.add(initiative_id)
+
+    for initiative_id in dependencies:
+        visit(initiative_id)
 
 
 class AssessmentService:
@@ -349,7 +501,9 @@ class AssessmentService:
             ):
                 raise PermissionError("Report is outside configured allowed roots")
             report_paths.append(path)
+        started = time.monotonic()
         snapshot = collect(root, reports=report_paths)
+        snapshot["collection"] = {"seconds": round(time.monotonic() - started, 4)}
         project_id = "p_" + hashlib.sha256(str(root).encode()).hexdigest()[:24]
         snapshot.update(id=_id("a_"), project_id=project_id, created_at=now())
         with self._db(write=True) as db:
@@ -376,7 +530,7 @@ class AssessmentService:
         self._project(db, assessment["project_id"])
         if self.allowed_roots is not None:
             for evidence in assessment["evidence"]:
-                if evidence["kind"] in {"junit", "cobertura", "test-value", "ruff"}:
+                if evidence["kind"] in {"junit", "cobertura", "test-value", "ruff", "sarif"}:
                     path = Path(evidence["path"]).resolve()
                     if not any(path.is_relative_to(root) for root in self.allowed_roots):
                         raise PermissionError("Captured report is outside configured allowed roots")
@@ -415,6 +569,420 @@ class AssessmentService:
                 return item
         raise ValueError("Unknown evidence ID in this assessment")
 
+    def overview(self, assessment_id):
+        """Read a compact handoff; detailed captured data remains queryable by view."""
+        with self._db() as db:
+            assessment = self._assessment(db, assessment_id)
+            review = self._review(db, assessment_id)
+            alignment = self._alignment(db, assessment)
+        facts = assessment["facts"]
+        findings = [*assessment["findings"], *(review or {}).get("findings", [])]
+        urgent = [row for row in findings if row.get("severity") in {"critical", "high"}]
+        coverage = (review or {}).get("coverage", {})
+        return {
+            "assessment_id": assessment_id,
+            "project_id": assessment["project_id"],
+            "created_at": assessment["created_at"],
+            "source": assessment["source"],
+            "scope_digest": assessment["scope_digest"],
+            "rubric_version": assessment["rubric_version"],
+            "complete": assessment["complete"],
+            "gap_count": len(assessment["gaps"]),
+            "inventory": facts.get("inventory", {}),
+            "static_analysis": {
+                key: value
+                for key, value in facts.get("static_analysis", {}).items()
+                if key
+                in {
+                    "analyzer",
+                    "status",
+                    "coverage",
+                    "summary",
+                    "candidate_counts",
+                    "limits",
+                    "evidence_id",
+                }
+            },
+            "javascript_analysis": facts.get("javascript_analysis", {}),
+            "evidence_kinds": {
+                kind: sum(entry["kind"] == kind for entry in assessment["evidence"])
+                for kind in sorted({entry["kind"] for entry in assessment["evidence"]})
+            },
+            "review_id": (review or {}).get("id"),
+            "review_coverage": {
+                "scope": coverage.get("scope", "unknown"),
+                "examined_count": len(coverage.get("examined", [])),
+                "unexamined_count": len(coverage.get("unexamined", [])),
+                "limitation_count": len(coverage.get("limitations", [])),
+            },
+            "urgent_findings": [
+                {key: row.get(key) for key in ("severity", "title", "evidence_ids")}
+                for row in urgent[:20]
+            ],
+            "urgent_findings_omitted": max(0, len(urgent) - 20),
+            "planning_status": {
+                "status": alignment.get("planning_status"),
+                "gap_status": alignment["status"],
+                "review_id": alignment["review_id"],
+                "goal_revision": alignment["goal_revision"],
+                "missing_targets": alignment["missing_targets"],
+            },
+            "tool_provenance": assessment.get("tool_provenance", facts.get("tool_provenance")),
+            "reported_findings": {
+                severity: sum(row.get("severity") == severity for row in findings)
+                for severity in ("critical", "high", "medium", "low", "info")
+            },
+            "ratings": {
+                dimension: {
+                    key: row.get(key)
+                    for key in (
+                        "capability",
+                        "burden",
+                        "confidence",
+                        "burden_basis",
+                        "burden_confidence",
+                    )
+                }
+                for dimension, row in (review or {}).get("ratings", {}).items()
+            },
+            "next_step": "Use query_evidence views for bounded index, candidates, snippets, graph, hotspots, coverage and provenance. Read collection gaps before judging scope.",
+        }
+
+    def query_evidence(
+        self,
+        assessment_id,
+        *,
+        view="index",
+        kind=None,
+        path=None,
+        role=None,
+        candidate_kind=None,
+        line=None,
+        offset=0,
+        limit=20,
+        max_chars=24000,
+    ):
+        """Filter and page immutable captured evidence without reading the current source."""
+        from .static_analysis import source_role
+
+        views = {
+            "index",
+            "details",
+            "candidates",
+            "snippets",
+            "graph",
+            "hotspots",
+            "coverage",
+            "provenance",
+        }
+        if view not in views:
+            raise ValueError("Unknown evidence query view")
+        if any(
+            value is not None and (not isinstance(value, str) or len(value) > 256)
+            for value in (kind, path, role, candidate_kind)
+        ):
+            raise ValueError("Evidence filters must be strings of at most 256 characters")
+        if any(type(value) is not int for value in (offset, limit, max_chars)) or not (
+            offset >= 0 and 1 <= limit <= 100 and 2000 <= max_chars <= 100000
+        ):
+            raise ValueError("Require offset >= 0, limit 1..100 and max_chars 2000..100000")
+        if line is not None and (type(line) is not int or line < 1):
+            raise ValueError("line must be a positive integer")
+        with self._db() as db:
+            assessment = self._assessment(db, assessment_id)
+        entries = assessment["evidence"]
+        source = {entry["path"]: entry for entry in entries}
+        captured_roles = {
+            module["path"]: module["role"]
+            for entry in entries
+            for module in entry.get("stats", {}).get("modules", [])
+        }
+
+        def entry_role(entry):
+            stats = entry.get("stats", {})
+            if entry.get("role") or stats.get("role"):
+                return entry.get("role") or stats["role"]
+            if stats.get("is_test"):
+                return "test"
+            if entry["path"] in captured_roles:
+                return captured_roles[entry["path"]]
+            if entry["kind"] in {"python", "javascript"}:
+                return source_role(entry["path"])["role"]
+            return entry["kind"]
+
+        candidate_rows = []
+        for entry in entries if candidate_kind is not None or view == "candidates" else []:
+            stats = entry.get("stats", {})
+            definitions = {row["id"]: row for row in stats.get("definitions", []) if "id" in row}
+            candidates = list(stats.get("candidate_index", stats.get("candidates", [])))
+            if entry["kind"] in {"ruff", "sarif"}:
+                candidates.extend(
+                    {
+                        **diagnostic,
+                        "kind": entry["kind"] + "_diagnostic",
+                        "locations": [
+                            {key: diagnostic[key] for key in ("path", "line", "end_line")}
+                        ],
+                        "source_identity": "unverified",
+                    }
+                    for diagnostic in stats.get("diagnostics", [])
+                )
+            if entry["kind"] == "ecosystem-analysis":
+                candidates.extend(
+                    {
+                        "kind": "ecosystem_fit_review",
+                        "locations": [{"path": signal["path"], "line": signal["line"]}],
+                        "metrics": {"signal_kind": signal["kind"]},
+                        "source_identity": "captured_snapshot",
+                    }
+                    for signal in stats.get("signals", [])
+                )
+            for row in candidates:
+                if not isinstance(row, dict):
+                    continue
+                locations = row.get("locations", [])
+                if not locations and row.get("id"):
+                    definition = definitions.get(row["id"])
+                    if definition:
+                        locations = [
+                            {
+                                "path": definition["path"],
+                                "line": definition["span"]["line"],
+                                "end_line": definition["span"]["endLine"],
+                            }
+                        ]
+                candidate_rows.append(
+                    {
+                        **row,
+                        "locations": locations,
+                        "evidence_id": entry["id"],
+                        "evidence_kind": entry["kind"],
+                    }
+                )
+        matching_candidates = [
+            row
+            for row in candidate_rows
+            if candidate_kind is None or row.get("kind") == candidate_kind
+        ]
+        candidate_paths = {
+            location["path"] for row in matching_candidates for location in row.get("locations", [])
+        }
+        by_evidence = {}
+        candidate_ranges = {}
+        for row in matching_candidates:
+            by_evidence.setdefault(row["evidence_id"], []).append(row)
+            for location in row.get("locations", []):
+                candidate_ranges.setdefault(location["path"], []).append(location)
+        rows = []
+        for entry in entries:
+            if kind is not None and entry["kind"] != kind:
+                continue
+            stats = entry.get("stats", {})
+            common = {"evidence_id": entry["id"], "evidence_kind": entry["kind"]}
+            if view in {"index", "details"}:
+                if (
+                    candidate_kind
+                    and entry["path"] not in candidate_paths
+                    and entry["id"] not in by_evidence
+                ):
+                    continue
+                rows.append(
+                    {
+                        **(
+                            {key: entry[key] for key in ("id", "path", "digest", "kind", "lines")}
+                            if view == "index"
+                            else entry
+                        ),
+                        "role": entry_role(entry),
+                        "sections": sorted(stats),
+                        **common,
+                    }
+                )
+            elif view == "candidates":
+                rows.extend(by_evidence.get(entry["id"], []))
+            elif view == "snippets":
+                windows = entry.get("source_windows", stats.get("source_windows", []))
+                if isinstance(windows, list):
+                    rows.extend(
+                        {
+                            **window,
+                            "path": window.get("path", entry["path"]),
+                            "digest": entry["digest"],
+                            **common,
+                        }
+                        for window in windows
+                    )
+                rows.extend(
+                    {**common, **snippet, "analysis_evidence_id": entry["id"]}
+                    for candidate in stats.get("candidates", [])
+                    for snippet in candidate.get("snippets", [])
+                    if not candidate_kind or candidate.get("kind") == candidate_kind
+                )
+            elif view == "graph":
+                rows.extend(
+                    {**edge, "path": edge["source"], "record_type": "edge", **common}
+                    for edge in stats.get("topology", {}).get("edges", [])
+                )
+                rows.extend(
+                    {**module, "record_type": "module", **common}
+                    for module in stats.get("modules", [])
+                )
+            elif view == "hotspots":
+                rows.extend({**row, **common} for row in stats.get("hotspots", []))
+            elif view == "coverage" and "coverage" in stats:
+                rows.append(
+                    {
+                        "coverage": stats["coverage"],
+                        "status": stats.get("status"),
+                        "limits": stats.get("limits", {}),
+                        "candidate_counts": stats.get("candidate_counts", {}),
+                        **common,
+                    }
+                )
+        if view == "coverage" and kind is None:
+            rows.extend({"record_type": "collection_gap", "gap": gap} for gap in assessment["gaps"])
+        if view == "provenance":
+            rows = [
+                {
+                    "source": assessment["source"],
+                    "scope_digest": assessment["scope_digest"],
+                    "rubric_version": assessment["rubric_version"],
+                    "tool_provenance": assessment.get(
+                        "tool_provenance", assessment["facts"].get("tool_provenance")
+                    ),
+                    "collection_gap_count": len(assessment["gaps"]),
+                }
+            ]
+        filtered = []
+        seen_snippets = set()
+        for row in rows:
+            paths = (
+                [row["path"]]
+                if "path" in row
+                else [location["path"] for location in row.get("locations", [])]
+            )
+            if path and not any(path in location for location in paths):
+                continue
+            roles = (
+                {row["role"]}
+                if "role" in row
+                else {entry_role(source[location]) for location in paths if location in source}
+            )
+            if role and role not in roles:
+                continue
+            if line is not None and not any(
+                location.get("line", line + 1)
+                <= line
+                <= location.get("end_line", location.get("line", 0))
+                and (not path or path in location.get("path", ""))
+                for location in ([row] if "line" in row else row.get("locations", []))
+            ):
+                continue
+            if (
+                candidate_kind
+                and view not in {"candidates", "index", "details"}
+                and not any(location in candidate_paths for location in paths)
+            ):
+                continue
+            if view == "snippets":
+                if candidate_kind and not any(
+                    location["path"] == row.get("path")
+                    and location.get("line", 0) <= row.get("end_line", 0)
+                    and location.get("end_line", location.get("line", 0)) >= row.get("line", 0)
+                    for location in candidate_ranges.get(row.get("path"), [])
+                ):
+                    continue
+                identity = (
+                    row.get("path"),
+                    row.get("line"),
+                    row.get("end_line"),
+                    row.get("digest"),
+                    row.get("excerpt"),
+                )
+                if identity in seen_snippets:
+                    continue
+                seen_snippets.add(identity)
+            filtered.append(row)
+        result = {
+            "schema_version": 1,
+            "assessment_id": assessment_id,
+            "source": assessment["source"],
+            "scope_digest": assessment["scope_digest"],
+            "view": view,
+            "collection_complete": assessment["complete"],
+            "collection_gap_count": len(assessment["gaps"]),
+            "matched": len(filtered),
+            "offset": offset,
+            "returned": 0,
+            "next_offset": None,
+            "max_chars": max_chars,
+            "items": [],
+            "oversized_rows": 0,
+            "analysis_scope": [
+                {
+                    "evidence_id": entry["id"],
+                    "status": entry["stats"].get("status"),
+                    "candidate_counts": entry["stats"].get("candidate_counts", {}),
+                    "topology_complete": entry["stats"].get("topology", {}).get("complete"),
+                }
+                for entry in entries
+                if entry["kind"] in {"static-analysis", "javascript-analysis"}
+            ],
+        }
+        if view == "snippets" and not filtered:
+            result["gap"] = (
+                "No matching source window was captured; the range is unknown. Rescan with a compatible collector or inspect source separately and verify its digest."
+            )
+        if view in {"graph", "hotspots"} and not any(
+            ("topology" if view == "graph" else "hotspots") in entry.get("stats", {})
+            for entry in entries
+        ):
+            result["gap"] = (
+                "This view was not collected for the saved snapshot; rescan with a compatible collector."
+            )
+        for row in filtered[offset : offset + limit]:
+            result["items"].append(row)
+            if len(json.dumps(result, indent=2)) + 100 > max_chars:
+                result["items"].pop()
+                if result["items"]:
+                    break
+                result["items"].append(
+                    {
+                        "evidence_id": row.get("evidence_id"),
+                        "path": row.get("path"),
+                        "omitted": "Row exceeds output budget; use a narrower view or raise max_chars.",
+                    }
+                )
+                result["oversized_rows"] += 1
+                break
+        result["returned"] = len(result["items"])
+        end = offset + result["returned"]
+        result["next_offset"] = end if end < len(filtered) else None
+        if len(json.dumps(result, indent=2)) > max_chars:
+            raise ValueError("Output budget is too small for snapshot identity; raise max_chars")
+        return result
+
+    def source_context(self, assessment_id, evidence_id, line=1, end_line=None, max_chars=8000):
+        """Read only captured source whose current complete bytes match the saved digest."""
+        with self._db() as db:
+            assessment = self._assessment(db, assessment_id)
+        entry = next((row for row in assessment["evidence"] if row["id"] == evidence_id), None)
+        if entry is None:
+            raise ValueError("Unknown evidence ID in this assessment")
+        from .source_context import read_context
+
+        return {
+            "assessment_id": assessment_id,
+            "source": assessment["source"],
+            **read_context(
+                Path(assessment["source"]["root"]),
+                entry,
+                line=line,
+                end_line=end_line,
+                max_chars=max_chars,
+            ),
+        }
+
     def _alignment(self, db, assessment):
         goals = self._goals(db, assessment["project_id"])
         baseline_id = (goals or {}).get("baseline_assessment_id")
@@ -441,16 +1009,34 @@ class AssessmentService:
                 "goal_alignment": self._alignment(db, assessment),
             }
 
-    def doctor(self, assessment_id):
+    def doctor(self, assessment_id, *, limit=100):
         """Project captured simplify candidates without executing or changing source."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Doctor limit must be an integer from 1 to 100")
         with self._db() as db:
             assessment = self._assessment(db, assessment_id)
             alignment = self._alignment(db, assessment)
         groups = {lens: [] for lens in ("reuse", "quality", "efficiency")}
+        families = {
+            name: []
+            for name in (
+                "python_ast",
+                "javascript_ast",
+                "tests",
+                "ruff",
+                "ecosystem",
+                "dead_code",
+                "sarif",
+            )
+        }
         entries = assessment["evidence"]
         source_ids = {entry["path"]: entry["id"] for entry in entries}
-        static = next((entry for entry in entries if entry["kind"] == "static-analysis"), None)
-        analysis = static["stats"] if static else None
+        analyses = [
+            entry
+            for entry in entries
+            if entry["kind"] in {"static-analysis", "javascript-analysis"}
+        ]
+        analysis = analyses[0]["stats"] if analyses else None
         gaps = list(assessment["gaps"])
         guidance = {
             "duplicate_function": (
@@ -470,20 +1056,61 @@ class AssessmentService:
                 "Verify ordering, freshness, failure handling and the relevant operation count.",
             ),
         }
+        guidance.update(
+            {
+                "near_duplicate_function": (
+                    "Compare the differing literals, callees and interfaces before sharing behavior.",
+                    "Preserve each caller's distinct outputs, errors and side effects.",
+                ),
+                "duplicate_block": (
+                    "Compare bindings and control flow around the repeated block before extracting one shared concern.",
+                    "Check the enclosing functions' outcomes, errors and early exits.",
+                ),
+                "unreachable_statement": (
+                    "Inspect the stated control-flow proof and remove only statements that cannot execute in this context.",
+                    "Verify the enclosing branch and its important success and failure outcomes.",
+                ),
+                "unused_symbol": (
+                    "Trace local references, public exports, decorators and reflection before changing the symbol.",
+                    "Check supported callers and entrypoints; absence of static references alone does not justify deletion.",
+                ),
+                "unreferenced_module": (
+                    "Check package discovery, entrypoints, configuration and dynamic loading before treating the module as unused.",
+                    "Verify supported imports and the installed package layout before an authorized removal.",
+                ),
+                "shadowed_module": (
+                    "Verify which module Python resolves in supported source and installed layouts before removing a predecessor.",
+                    "Check public imports and packaging; a source-layout collision alone does not establish deletion safety.",
+                ),
+            }
+        )
         status = "not_collected"
-        if analysis is None:
+        if not analyses:
             gaps.append(
                 "Static analysis was not collected for this snapshot; rescan to capture candidates."
             )
-        elif analysis.get("schema_version") != 1:
-            status = "unsupported"
-            gaps.append(
-                "Captured static-analysis schema is unsupported; use a compatible analyzer and rescan."
-            )
-        else:
-            status = analysis["status"]
+        for static in analyses:
+            analysis = static["stats"]
+            if analysis.get("schema_version") != 1:
+                status = "unsupported" if status == "not_collected" else "partial"
+                gaps.append(
+                    "Captured static-analysis schema is unsupported; use a compatible analyzer and rescan."
+                )
+                continue
+            if status == "not_collected":
+                status = analysis["status"]
+            elif status != "complete" or analysis["status"] != "complete":
+                status = "partial"
             gaps.extend(analysis["gaps"])
-            for candidate in analysis["candidates"][:100]:
+            rich = analysis["candidates"]
+            index = analysis.get("candidate_index", rich)
+            rich_ids = {row.get("id") for row in rich if row.get("id")}
+            ordered = (
+                [*rich, *(row for row in index if row.get("id") not in rich_ids)]
+                if rich_ids
+                else index
+            )
+            for candidate in ordered:
                 lens = candidate["lens"]
                 if lens not in groups or candidate["kind"] not in guidance:
                     gaps.append(
@@ -492,7 +1119,20 @@ class AssessmentService:
                     status = "partial"
                     continue
                 smallest_fix, verification = guidance[candidate["kind"]]
-                groups[lens].append(
+                family = (
+                    "dead_code"
+                    if candidate["kind"]
+                    in {
+                        "unreachable_statement",
+                        "unused_symbol",
+                        "unreferenced_module",
+                        "shadowed_module",
+                    }
+                    else "javascript_ast"
+                    if static["kind"] == "javascript-analysis"
+                    else "python_ast"
+                )
+                families[family].append(
                     {
                         **candidate,
                         "evidence_ids": sorted(
@@ -508,6 +1148,7 @@ class AssessmentService:
                         "verification": verification,
                     }
                 )
+        analysis = analyses[0]["stats"] if analyses else None
         inventory = None
         test_static = next(
             (entry for entry in entries if entry["kind"] == "test-value-static-analysis"), None
@@ -540,12 +1181,6 @@ class AssessmentService:
                     # stricter AST clone leads with weaker merge suggestions.
                     if candidate["kind"] not in {"test-static-lead", "javascript-matrix-lead"}:
                         continue
-                    if sum(len(rows) for rows in groups.values()) >= 100:
-                        gaps.append(
-                            "Doctor candidate limit reached; inspect the remaining captured evidence directly."
-                        )
-                        status = "partial"
-                        break
                     definition = definitions.get(candidate["id"])
                     if not definition or definition["path"] not in source_ids:
                         gaps.append(
@@ -563,7 +1198,7 @@ class AssessmentService:
                         if candidate["kind"] == "test-static-lead"
                         else {"matrix": candidate["matrix"], "confidence": "low"}
                     )
-                    groups["quality"].append(
+                    families["tests"].append(
                         {
                             "kind": candidate["kind"],
                             "lens": "quality",
@@ -584,31 +1219,38 @@ class AssessmentService:
                         }
                     )
         for entry in entries:
-            if entry["kind"] != "ruff":
+            if entry["kind"] not in {"ruff", "sarif"}:
                 continue
             if status in {"not_collected", "unsupported"}:
                 status = "partial"
             gaps.extend(entry["stats"]["gaps"])
+            report_kind = entry["kind"]
             gaps.append(
-                "Supplied Ruff diagnostics have unverified source identity; inspect applicability before changing code."
+                f"Supplied {report_kind.upper()} diagnostics have unverified source identity; inspect applicability before changing code."
             )
             for diagnostic in entry["stats"]["diagnostics"]:
-                if sum(len(rows) for rows in groups.values()) >= 100:
-                    gaps.append(
-                        "Doctor candidate limit reached; inspect the remaining captured evidence directly."
-                    )
-                    break
-                lens = "efficiency" if diagnostic["code"].startswith("PERF") else "quality"
-                groups[lens].append(
+                lens = (
+                    "efficiency"
+                    if report_kind == "ruff" and diagnostic["code"].startswith("PERF")
+                    else "quality"
+                )
+                families[report_kind].append(
                     {
-                        "kind": "ruff_diagnostic",
+                        "kind": report_kind + "_diagnostic",
                         "lens": lens,
                         "locations": [
                             {key: diagnostic[key] for key in ("path", "line", "end_line")}
                         ],
                         "code": diagnostic["code"],
                         "message": diagnostic["message"],
-                        "fix_applicability": diagnostic["fix_applicability"],
+                        **(
+                            {"fix_applicability": diagnostic["fix_applicability"]}
+                            if report_kind == "ruff"
+                            else {
+                                "tool": diagnostic["tool"],
+                                "producer_level": diagnostic["producer_level"],
+                            }
+                        ),
                         "evidence_ids": [entry["id"]],
                         "source_identity": "unverified",
                         "smallest_fix": "Inspect the diagnostic against the intended behavior and apply only the smallest authorized correction.",
@@ -620,15 +1262,10 @@ class AssessmentService:
             signals = sorted(
                 ecosystem["signals"], key=lambda signal: signal.get("scope") != "source"
             )
-            for signal in signals[:10]:
-                if sum(len(rows) for rows in groups.values()) >= 100:
-                    gaps.append(
-                        "Doctor candidate limit reached; inspect the remaining captured evidence directly."
-                    )
-                    break
+            for signal in signals:
                 if signal["path"] not in source_ids or not signal.get("line"):
                     continue
-                groups["reuse"].append(
+                families["ecosystem"].append(
                     {
                         "kind": "ecosystem_fit_review",
                         "lens": "reuse",
@@ -645,10 +1282,36 @@ class AssessmentService:
                         "verification": "Compare required semantics, errors, security, compatibility and dependency upkeep before choosing a bounded change; a syntax signal does not justify migration.",
                     }
                 )
-            if len(signals) > 10:
-                gaps.append(
-                    "Doctor shows at most 10 ecosystem signals; inspect their captured evidence for the remaining leads."
-                )
+        # A large family cannot hide a smaller, independently useful family.
+        counts = {
+            family: {"captured": len(rows), "returned": 0, "omitted": len(rows)}
+            for family, rows in families.items()
+        }
+        returned = 0
+        for index in range(limit):
+            for family, rows in families.items():
+                if index >= len(rows) or returned >= limit:
+                    continue
+                candidate = rows[index]
+                candidate["family"] = family
+                candidate["candidate_confidence"] = {
+                    "level": candidate.get("confidence", "low"),
+                    "basis": "supplied_unverified_diagnostic"
+                    if family in {"ruff", "sarif"}
+                    else "captured_syntax",
+                    "defect_established": False,
+                    "change_safety": "requires_review",
+                }
+                groups[candidate["lens"]].append(candidate)
+                counts[family]["returned"] += 1
+                counts[family]["omitted"] -= 1
+                returned += 1
+        captured = sum(len(rows) for rows in families.values())
+        if captured > returned:
+            gaps.append(
+                "Doctor candidate limit reached; query captured evidence for remaining candidates."
+            )
+            status = "partial"
         if status == "complete" and not assessment.get("complete", False):
             status = "partial"
         return {
@@ -660,6 +1323,28 @@ class AssessmentService:
             "status": status,
             "method": "captured_static_analysis",
             "groups": groups,
+            "analysis_scope": {
+                "coverage": (analysis or {}).get("coverage", {}),
+                "candidate_counts": (analysis or {}).get("candidate_counts", {}),
+                "summary": (analysis or {}).get("summary", {}),
+                "analyses": [
+                    {
+                        "evidence_id": entry["id"],
+                        "kind": entry["kind"],
+                        "coverage": entry["stats"].get("coverage", {}),
+                        "candidate_counts": entry["stats"].get("candidate_counts", {}),
+                    }
+                    for entry in analyses
+                ],
+            },
+            "selection": {
+                "method": "round_robin_families",
+                "limit": limit,
+                "captured": captured,
+                "returned": returned,
+                "omitted": captured - returned,
+                "families": counts,
+            },
             "goal_alignment": alignment,
             "test_value_static": inventory,
             "ecosystem_fit": ecosystem,
@@ -689,6 +1374,23 @@ class AssessmentService:
                 for dimension in DIMENSIONS
             },
             "findings": [],
+            "coverage": {
+                "schema_version": 1,
+                "scope": "whole_project",
+                "examined": [],
+                "unexamined": [
+                    {
+                        "area": "Project-wide review",
+                        "reason": "Not yet reviewed; replace this placeholder with actual examined and unexamined areas.",
+                    }
+                ],
+                "limitations": [],
+                "validation": [],
+            },
+            "review_context": {
+                "tool_code_digest": assessment.get("tool_provenance", {}).get("code_digest"),
+                "loaded_instructions": [],
+            },
         }
 
     @staticmethod
@@ -741,6 +1443,7 @@ class AssessmentService:
             for finding in review["findings"]:
                 if not finding["evidence_ids"] or not set(finding["evidence_ids"]) <= evidence_ids:
                     raise ValueError("Findings require evidence from this snapshot")
+            _validate_planning(review, evidence_ids)
             result = {
                 **review,
                 "schema_version": 1,
@@ -949,6 +1652,7 @@ class AssessmentService:
                 "review": self._review(db, assessment_id),
                 "goals": self._goals(db, assessment["project_id"]),
                 "progress": self._progress(db, assessment["project_id"]),
+                "goal_alignment": self._alignment(db, assessment),
             }
 
     def get_badge(self, assessment_id, dimension="summary", *, format="svg"):
@@ -1007,6 +1711,81 @@ def _markdown_text(value):
     for character in ("\\", "`", "*", "_", "[", "]", "|"):
         text = text.replace(character, "\\" + character)
     return text
+
+
+def _planning_markdown(alignment):
+    lines = ["", "## Review coverage", ""]
+    coverage = alignment.get("coverage")
+    if coverage:
+        lines.append("Scope: " + _markdown_text(coverage["scope"]) + ".")
+        for area in coverage["examined"]:
+            lines.append(
+                "- Examined: "
+                + _markdown_text(area["area"])
+                + "; evidence: "
+                + _markdown_text(", ".join(area["evidence_ids"]))
+            )
+        for area in coverage["unexamined"]:
+            lines.append(
+                "- Unexamined: "
+                + _markdown_text(area["area"])
+                + ": "
+                + _markdown_text(area["reason"])
+            )
+        lines.extend("- Limitation: " + _markdown_text(value) for value in coverage["limitations"])
+        for check in coverage["validation"]:
+            lines.append(
+                "- Validation: "
+                + _markdown_text(check["check"])
+                + ": "
+                + _markdown_text(check["status"])
+                + "; evidence: "
+                + _markdown_text(", ".join(check["evidence_ids"]))
+            )
+    else:
+        lines.append("Review coverage was not recorded.")
+    lines += [
+        "",
+        "## Improvement plan",
+        "",
+        "Planning status: " + _markdown_text(alignment.get("planning_status", "unknown")) + ".",
+    ]
+    plan = alignment.get("plan")
+    if not plan:
+        return lines + [
+            "",
+            "No authored roadmap was recorded; numeric goals do not supply a diagnosis.",
+        ]
+    lines += [
+        "",
+        "Diagnosis: " + _markdown_text(plan["diagnosis"]),
+        "",
+        "Target state: " + _markdown_text(plan["target_state"]),
+    ]
+    for item in plan["initiatives"]:
+        lines += ["", "### " + _markdown_text(item["title"]), ""]
+        for label, value in (
+            ("Priority", item["priority"]),
+            ("Root cause", item["root_cause"]),
+            ("Full scope", item["scope"]),
+            ("Burden effect", item["burden_effect"]),
+            ("Dependencies", ", ".join(item["depends_on"]) or "None"),
+            ("Evidence", ", ".join(item["evidence_ids"])),
+        ):
+            lines.append(label + ": " + _markdown_text(value))
+        lines += ["", "Dimension impacts:", ""]
+        lines.extend(
+            "- " + _markdown_text(key) + ": " + _markdown_text(value)
+            for key, value in item["dimension_impacts"].items()
+        )
+        lines += [
+            "",
+            "Acceptance:",
+            "",
+            *["- " + _markdown_text(value) for value in item["acceptance"]],
+        ]
+        lines += ["", "First implementation slice: " + _markdown_text(item["first_slice"])]
+    return lines
 
 
 def markdown_report(report):
@@ -1124,6 +1903,7 @@ def markdown_report(report):
         lines.append(
             f"- {finding.get('severity', 'unknown')}: {finding.get('title', finding.get('message', 'Finding'))}"
         )
+    lines += _planning_markdown(report.get("goal_alignment", {}))
     lines += [
         "",
         "## Goals and progress",

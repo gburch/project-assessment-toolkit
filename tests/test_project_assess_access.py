@@ -67,7 +67,18 @@ def test_review_replay_cannot_substitute_an_authorized_assessment(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "operation", ["report", "badge", "evidence", "history", "history_summary", "progress"]
+    "operation",
+    [
+        "report",
+        "badge",
+        "evidence",
+        "evidence_query",
+        "overview",
+        "source_context",
+        "history",
+        "history_summary",
+        "progress",
+    ],
 )
 @pytest.mark.parametrize("report_kind", ["junit", "test-value"])
 def test_revoked_imported_report_authority_is_rechecked_on_saved_reads(
@@ -89,6 +100,11 @@ def test_revoked_imported_report_authority_is_rechecked_on_saved_reads(
         "report": lambda: restricted.get_report(snapshot["id"]),
         "badge": lambda: restricted.get_badge(snapshot["id"]),
         "evidence": lambda: restricted.evidence(snapshot["id"]),
+        "evidence_query": lambda: restricted.query_evidence(snapshot["id"], view="provenance"),
+        "overview": lambda: restricted.overview(snapshot["id"]),
+        "source_context": lambda: restricted.source_context(
+            snapshot["id"], snapshot["evidence"][0]["id"]
+        ),
         "history": lambda: restricted.history(snapshot["project_id"]),
         "history_summary": lambda: restricted.history(snapshot["project_id"], summary=True),
         "progress": lambda: restricted.progress(snapshot["project_id"]),

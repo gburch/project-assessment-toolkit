@@ -101,7 +101,13 @@ def test_type_only_imports_do_not_make_a_runtime_cycle():
         "src/pkg/a.py", "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from . import b\n"
     )
     b = record("src/pkg/b.py", "from . import a\n")
-    assert candidates(summary(a, b), "dependency_cycle") == []
+    result = summary(a, b)
+    assert candidates(result, "dependency_cycle") == []
+    assert result["topology"]["edges"] == [
+        {"source": "src/pkg/a.py", "target": "src/pkg/b.py", "phase": "type_checking", "line": 3},
+        {"source": "src/pkg/b.py", "target": "src/pkg/a.py", "phase": "eager", "line": 1},
+    ]
+    assert result["topology"]["complete"]
 
 
 def test_type_checking_else_keeps_its_runtime_dependency():
@@ -161,7 +167,9 @@ def test_collection_caps_total_static_symbols(tmp_path, monkeypatch):
     assert result["facts"]["python"]["functions"] == 3
     assert analysis["summary"]["functions"] == 1
     assert analysis["status"] == "partial"
-    assert any("symbol limit" in gap for gap in analysis["gaps"])
+    assert any("detail limit" in gap for gap in analysis["gaps"])
+    assert analysis["coverage"]["overview_files"] == 2
+    assert analysis["coverage"]["functions_total"] == 3
 
 
 def test_ruff_arrays_share_the_cumulative_import_limit(tmp_path, monkeypatch):
@@ -223,13 +231,13 @@ def test_retained_leads_share_budget_across_kinds_areas_and_files(monkeypatch):
             "tools/read.py", "def read(paths):\n    for path in paths:\n        path.read_text()\n"
         ),
     ]
-    monkeypatch.setattr(static_analysis, "MAX_CANDIDATES", 8)
+    monkeypatch.setattr(static_analysis, "MAX_CANDIDATES", 12)
 
     result = summary(*records)
 
     assert result == summary(*reversed(records))
-    assert len(result["candidates"]) == 8
-    assert {row["kind"] for row in result["candidates"]} == {
+    assert len(result["candidates"]) == 12
+    assert {row["kind"] for row in result["candidates"]} >= {
         "complex_function",
         "duplicate_function",
         "dependency_cycle",

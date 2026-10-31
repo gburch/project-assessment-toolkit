@@ -582,7 +582,7 @@ def test_new_source_files_during_collection_are_detected(tmp_path, monkeypatch):
 
 def test_bounds_are_explicit_and_do_not_report_successful_empty_collection(tmp_path, monkeypatch):
     write(tmp_path, "app.py", "value = 1\n")
-    monkeypatch.setattr(collector, "MAX_FILE_BYTES", 4)
+    monkeypatch.setattr(collector, "MAX_SOURCE_FILE_BYTES", 4)
     result = collector.collect(tmp_path)
     assert not result["complete"]
     assert result["facts"]["inventory"]["files"] == 0
@@ -660,3 +660,168 @@ def test_useful_injection_has_same_hints_without_automatic_burden_judgment(tmp_p
     assert "Useful delegation and dependency injection" in hints["caveat"]
     assert "burden" not in hints
     assert result["findings"] == []
+
+
+def test_byte_budget_captures_application_before_tooling_and_lists_omitted_paths(
+    tmp_path, monkeypatch
+):
+    source = "def run(value):\n    return value + 1\n"
+    write(tmp_path, "src/service.py", source)
+    write(tmp_path, ".agents/tool.py", "# tool\n" * 50)
+    write(tmp_path, "tests/test_service.py", "# test\n" * 50)
+    monkeypatch.setattr(collector, "MAX_TOTAL_BYTES", len(source.encode()) + 10)
+    result = collector.collect(tmp_path)
+    paths = {row["path"] for row in result["evidence"] if row["kind"] == "python"}
+    assert paths == {"src/service.py"}
+    collection = result["facts"]["collection"]
+    assert collection["eligible_files_seen"] == 3
+    assert collection["captured_files"] == 1
+    assert collection["skipped_by_reason"] == {"total-byte-limit": 2}
+    assert collection["skipped_by_role"] == {"test": 1, "tooling": 1}
+    assert {row["path"] for row in collection["skipped_inputs"]} == {
+        ".agents/tool.py",
+        "tests/test_service.py",
+    }
+    assert result["facts"]["inventory"]["roles"]["production"]["files"] == 1
+    assert not result["complete"] and result["findings"] == []
+
+
+def test_detail_budget_keeps_every_module_and_does_not_count_imports_against_functions(
+    tmp_path, monkeypatch
+):
+    for name, peer in (("a", "b"), ("b", "a")):
+        write(
+            tmp_path,
+            f"src/pkg/{name}.py",
+            f"from . import {peer}\n"
+            + "".join(f"def function_{number}():\n    return {number}\n" for number in range(5)),
+        )
+    monkeypatch.setattr(collector, "MAX_STATIC_SYMBOLS", 2)
+    result = collector.collect(tmp_path)
+    facts = result["facts"]["static_analysis"]
+    captured = next(row["stats"] for row in result["evidence"] if row["id"] == facts["evidence_id"])
+    assert facts["coverage"]["functions_total"] == 10
+    assert facts["coverage"]["functions_analyzed"] == 2
+    assert facts["coverage"]["overview_files"] == 2
+    assert {row["path"] for row in captured["modules"]} == {"src/pkg/a.py", "src/pkg/b.py"}
+    assert len(captured["topology"]["edges"]) == 2
+    assert {row["path"] for row in captured["hotspots"]} == {"src/pkg/a.py", "src/pkg/b.py"}
+    assert all(key not in facts for key in ("candidate_index", "modules", "topology", "hotspots"))
+
+
+def test_candidate_context_uses_captured_lines_beyond_the_initial_excerpt_and_redacts(tmp_path):
+    text = "# introductory context that is deliberately long\n" * 100
+    text += "def complex(value):\n    api_key = 'private-source-value'\n"
+    text += "".join(f"    if value == {number}:\n        value += 1\n" for number in range(11))
+    text += "    return value\n"
+    write(tmp_path, "src/service.py", text)
+    result = collector.collect(tmp_path)
+    source = next(row for row in result["evidence"] if row["path"] == "src/service.py")
+    analysis = next(row["stats"] for row in result["evidence"] if row["kind"] == "static-analysis")
+    candidate = next(row for row in analysis["candidates"] if row["kind"] == "complex_function")
+    window = candidate["snippets"][0]
+    assert window["candidate_line"] == 101 and window["line"] <= 101 <= window["end_line"]
+    assert window["digest"] == source["digest"]
+    assert window["evidence_id"] == source["id"]
+    assert window["source_identity"] == "captured_snapshot"
+    assert "if value == 0" in window["excerpt"]
+    assert "complex" not in source["excerpt"]
+    assert source["stats"]["source_windows"]
+    assert "private-source-value" not in json.dumps(result)
+    assert all("snippets" not in row for row in analysis["candidate_index"])
+
+
+def test_source_context_budget_and_multiline_redaction_are_explicit():
+    from project_assess.capture_context import attach_source_windows
+
+    source = (
+        "-----BEGIN PRIVATE KEY-----\n" + "private-key-line\n" * 20 + "-----END PRIVATE KEY-----\n"
+    )
+    candidate = {"locations": [{"path": "app.py", "line": 15, "end_line": 15}]}
+    entries = [{"id": "e-fixture", "path": "app.py", "digest": "sha256:fixture", "stats": {}}]
+    analysis = {"candidates": [candidate], "candidate_index": [candidate], "gaps": []}
+    attach_source_windows([analysis], {"app.py": source}, entries, collector._redact, 4000)
+    assert "private-key-line" not in json.dumps(analysis)
+    assert "private-key-line" not in json.dumps(entries)
+    assert candidate["snippets"][0]["line"] > 1
+    assert analysis["source_context"]["retained_bytes"] <= 4000
+    tiny = {"candidates": [{"locations": candidate["locations"]}], "gaps": []}
+    attach_source_windows(
+        [tiny],
+        {"app.py": source},
+        [{"id": "e-fixture", "path": "app.py", "digest": "x", "stats": {}}],
+        collector._redact,
+        1,
+    )
+    assert tiny["source_context"]["omitted_locations"] == 1
+    assert tiny["source_context"]["partial"]
+    assert "snippets" not in tiny["candidates"][0]
+
+
+def test_priority_capture_reopens_parents_without_following_a_swapped_symlink(
+    tmp_path, monkeypatch
+):
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    write(root, "src/app.py", "value = 1\n")
+    write(outside, "app.py", "private = 'outside-value'\n")
+    original = collector._parent_at
+    swapped = False
+
+    def swap(descriptor, path):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            (root / "src").rename(root / "held")
+            (root / "src").symlink_to(outside, target_is_directory=True)
+        return original(descriptor, path)
+
+    monkeypatch.setattr(collector, "_parent_at", swap)
+    result = collector.collect(root)
+    assert not result["complete"]
+    assert "outside-value" not in json.dumps(result)
+    assert not any(row["path"] == "src/app.py" for row in result["evidence"])
+    assert result["facts"]["collection"]["skipped_by_reason"] == {
+        "parent-changed-or-inaccessible": 1
+    }
+
+
+def test_javascript_analysis_is_captured_separately_and_tool_identity_is_saved(tmp_path):
+    write(tmp_path, "frontend/app.ts", "export function add(value: number) { return value + 1; }\n")
+    result = collector.collect(tmp_path)
+    facts = result["facts"]["javascript_analysis"]
+    entry = next(row for row in result["evidence"] if row["id"] == facts["evidence_id"])
+    assert entry["kind"] == "javascript-analysis"
+    assert entry["stats"]["schema_version"] == 1
+    assert "modules" in entry["stats"] and "modules" not in facts
+    assert entry["digest"] == collector._bytes_digest(
+        json.dumps(entry["stats"], sort_keys=True).encode()
+    )
+    assert result["tool_provenance"]["name"] == "PAT"
+    assert result["tool_provenance"]["code_digest"].startswith("sha256:")
+
+
+def test_optional_parser_identity_changes_collection_scope(tmp_path, monkeypatch):
+    write(tmp_path, "app.py", "value = 1\n")
+    first = collector.collect(tmp_path)
+    monkeypatch.setattr(
+        collector,
+        "javascript_analyzer_identity",
+        lambda: {"available": False, "name": "synthetic-absent"},
+    )
+    second = collector.collect(tmp_path)
+    assert first["source"]["manifest_digest"] == second["source"]["manifest_digest"]
+    assert first["scope_digest"] != second["scope_digest"]
+
+
+def test_large_application_module_exceeds_document_limit_without_losing_source_overview(tmp_path):
+    text = "# bounded application context\n" * 37_000
+    text += "def run(value):\n    return value + 1\n"
+    assert collector.MAX_FILE_BYTES < len(text.encode()) < collector.MAX_SOURCE_FILE_BYTES
+    write(tmp_path, "src/projects/integration.py", text)
+    result = collector.collect(tmp_path)
+    assert result["facts"]["static_analysis"]["coverage"]["overview_files"] == 1
+    assert result["facts"]["static_analysis"]["coverage"]["functions_total"] == 1
+    assert result["facts"]["collection"]["skipped_files"] == 0
+    entry = next(row for row in result["evidence"] if row["path"] == "src/projects/integration.py")
+    assert entry["lines"] > 37_000
+    assert result["complete"]

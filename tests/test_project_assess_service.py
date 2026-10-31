@@ -632,7 +632,7 @@ def test_ecosystem_doctor_keeps_source_leads_visible_among_many_test_signals(tmp
         for row in service.doctor(captured["id"])["groups"]["reuse"]
         if row["kind"] == "ecosystem_fit_review"
     ]
-    assert len(candidates) == 10
+    assert len(candidates) == 16
     assert candidates[0]["locations"][0]["path"] == "z_app.py"
     assert candidates[0]["metrics"]["scope"] == "source"
 
@@ -700,7 +700,7 @@ def test_ecosystem_fit_refuses_unsupported_or_missing_captured_evidence(assessed
         )
 
 
-def test_ecosystem_candidates_respect_both_their_bound_and_prior_doctor_leads(tmp_path):
+def test_doctor_shares_candidate_budget_with_ecosystem_and_reports_omissions(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     for number in range(12):
@@ -709,8 +709,12 @@ def test_ecosystem_candidates_respect_both_their_bound_and_prior_doctor_leads(tm
     captured = service.scan(root)
     diagnosis = service.doctor(captured["id"])
     assert diagnosis["ecosystem_fit"]["signal_count"] == 12
-    assert sum(row["kind"] == "ecosystem_fit_review" for row in diagnosis["groups"]["reuse"]) == 10
-    assert any("at most 10 ecosystem" in gap for gap in diagnosis["gaps"])
+    assert sum(row["kind"] == "ecosystem_fit_review" for row in diagnosis["groups"]["reuse"]) == 12
+    assert diagnosis["selection"]["families"]["ecosystem"] == {
+        "captured": 12,
+        "returned": 12,
+        "omitted": 0,
+    }
 
     report = tmp_path / "ruff.json"
     report.write_text(
@@ -732,7 +736,18 @@ def test_ecosystem_candidates_respect_both_their_bound_and_prior_doctor_leads(tm
     diagnosis = service.doctor(current["id"])
     rows = [row for group in diagnosis["groups"].values() for row in group]
     assert len(rows) == 100
-    assert all(row["kind"] == "ruff_diagnostic" for row in rows)
+    assert {row["family"] for row in rows} == {"ruff", "ecosystem"}
+    assert diagnosis["selection"]["families"]["ecosystem"]["returned"] == 12
+    assert diagnosis["selection"]["families"]["ruff"] == {
+        "captured": 100,
+        "returned": 88,
+        "omitted": 12,
+    }
+    assert diagnosis["selection"]["captured"] == 112
+    assert diagnosis["selection"]["returned"] == 100
+    assert diagnosis["selection"]["omitted"] == 12
+    assert all(row["candidate_confidence"]["defect_established"] is False for row in rows)
+    assert diagnosis["status"] == "partial"
     assert diagnosis["ecosystem_fit"]["signal_count"] == 12
     assert any("candidate limit reached" in gap for gap in diagnosis["gaps"])
 
@@ -875,6 +890,16 @@ def test_doctor_combines_test_static_and_ruff_evidence_with_one_candidate_bound(
             for number in range(60)
         )
     )
+    (root / "app.py").write_text(
+        "import sqlite3\n"
+        + "".join(
+            f"def classify_{number}(value):\n    result = 0\n"
+            + "".join(f"    if value > {branch}:\n        result += 1\n" for branch in range(11))
+            + "    return result\n    unreachable = 2\n\n"
+            for number in range(70)
+        )
+        + "def stop():\n    return 1\n    unreachable = 2\n"
+    )
     report = tmp_path / "ruff.json"
     report.write_text(
         json.dumps(
@@ -900,5 +925,216 @@ def test_doctor_combines_test_static_and_ruff_evidence_with_one_candidate_bound(
     assert len(candidates) == 100
     assert any(row["kind"] == "test-static-lead" for row in candidates)
     assert any(row["kind"] == "ruff_diagnostic" for row in candidates)
+    assert {row["family"] for row in candidates} == {
+        "python_ast",
+        "tests",
+        "ruff",
+        "ecosystem",
+        "dead_code",
+    }
+    unreachable = next(row for row in candidates if row["kind"] == "unreachable_statement")
+    assert unreachable["candidate_confidence"]["level"] == "high"
+    assert unreachable["candidate_confidence"]["change_safety"] == "requires_review"
+    assert all(row["omitted"] >= 0 for row in diagnosis["selection"]["families"].values())
+    assert diagnosis["selection"]["omitted"] > 0
+    smaller = service.doctor(captured["id"], limit=5)
+    assert smaller["selection"]["returned"] == smaller["selection"]["limit"] == 5
+    assert {row["family"] for rows in smaller["groups"].values() for row in rows} == {
+        "python_ast",
+        "tests",
+        "ruff",
+        "ecosystem",
+        "dead_code",
+    }
     assert any("candidate limit" in gap.lower() for gap in diagnosis["gaps"])
     assert service.history(captured["project_id"])["reviews"] == []
+
+
+def test_evidence_query_pages_filters_and_preserves_captured_state(tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    (root / "tests").mkdir(parents=True)
+    (root / "src").mkdir()
+    (root / "src/app.py").write_text(
+        "import sqlite3\ndef transform(value):\n    return value + 1\n"
+    )
+    (root / "tests/test_app.py").write_text("def test_result():\n    assert 2 == 2\n")
+    service = AssessmentService(tmp_path / "state", [root])
+    snapshot = service.scan(root)
+    before = service.history(snapshot["project_id"])
+    (root / "src/app.py").write_text("raise RuntimeError('must never run or be reread')\n")
+    monkeypatch.setattr(
+        "project_assess.service.collect", lambda *_args, **_kwargs: pytest.fail("query rescanned")
+    )
+    first = service.query_evidence(snapshot["id"], limit=1)
+    found = list(first["items"])
+    page = first
+    while page["next_offset"] is not None:
+        page = service.query_evidence(snapshot["id"], offset=page["next_offset"], limit=1)
+        found.extend(page["items"])
+    assert [row["id"] for row in found] == [row["id"] for row in snapshot["evidence"]]
+    assert len({row["id"] for row in found}) == first["matched"]
+    assert all("stats" not in row and "excerpt" not in row for row in found)
+    production = service.query_evidence(
+        snapshot["id"], kind="python", path="app.py", role="production"
+    )
+    assert [row["path"] for row in production["items"]] == ["src/app.py"]
+    tests = service.query_evidence(snapshot["id"], kind="python", role="test")
+    assert [row["path"] for row in tests["items"]] == ["tests/test_app.py"]
+    assert first["source"] == snapshot["source"]
+    assert service.overview(snapshot["id"])["review_id"] is None
+    assert "evidence" not in service.overview(snapshot["id"])
+    assert service.history(snapshot["project_id"]) == before
+
+
+def test_evidence_query_exposes_captured_graph_hotspots_and_whole_scope(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "a.py").write_text(
+        "import b\ndef choose(value):\n    result = 0\n"
+        + "".join(f"    if value > {number}:\n        result += 1\n" for number in range(11))
+        + "    return result\n"
+    )
+    (root / "b.py").write_text("import a\n")
+    service = AssessmentService(tmp_path / "state")
+    snapshot = service.scan(root)
+    graph = service.query_evidence(snapshot["id"], view="graph")
+    assert any(
+        row.get("source") == "a.py" and row.get("target") == "b.py" for row in graph["items"]
+    )
+    assert {row["path"] for row in graph["items"] if row["record_type"] == "module"} == {
+        "a.py",
+        "b.py",
+    }
+    hotspots = service.query_evidence(snapshot["id"], view="hotspots", path="a.py")
+    assert any(
+        row["name"] == "choose" and row["decision_points"] >= 10 for row in hotspots["items"]
+    )
+    candidates = service.query_evidence(
+        snapshot["id"], view="candidates", candidate_kind="complex_function", role="unknown"
+    )
+    assert candidates["items"] and {row["kind"] for row in candidates["items"]} == {
+        "complex_function"
+    }
+    assert candidates["items"][0]["locations"][0]["path"] == "a.py"
+    coverage = service.query_evidence(snapshot["id"], view="coverage")
+    assert any(row.get("coverage", {}).get("python_files") == 2 for row in coverage["items"])
+    assert coverage["collection_gap_count"] == len(snapshot["gaps"])
+    provenance = service.query_evidence(snapshot["id"], view="provenance")
+    assert provenance["items"][0]["source"] == snapshot["source"]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"offset": -1},
+        {"limit": True},
+        {"limit": 101},
+        {"max_chars": 1999},
+        {"view": "shell"},
+        {"path": "x" * 257},
+        {"line": 0},
+    ],
+)
+def test_evidence_query_rejects_unbounded_or_invalid_requests(assessed, options):
+    service, _, snapshot = assessed
+    with pytest.raises(ValueError):
+        service.query_evidence(snapshot["id"], **options)
+
+
+def test_evidence_query_budget_is_explicit_and_pagination_does_not_stall(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "app.py").write_text(
+        "".join(
+            f"def function_{number}(value):\n    return value + {number}\n" for number in range(30)
+        )
+    )
+    service = AssessmentService(tmp_path / "state")
+    snapshot = service.scan(root)
+    result = service.query_evidence(
+        snapshot["id"], view="details", kind="static-analysis", max_chars=2000
+    )
+    assert len(json.dumps(result, indent=2)) <= 2000
+    assert result["oversized_rows"] == 1
+    assert result["items"][0]["omitted"] and result["next_offset"] is None
+    assert service.query_evidence(snapshot["id"], view="graph", limit=1, max_chars=2000)["items"]
+
+
+def test_snippet_query_is_candidate_centered_and_bound_to_captured_bytes(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    source = root / "app.py"
+    source.write_text(
+        "# padding keeps the lead beyond the file-prefix excerpt\n" * 100
+        + "def context_signal(value):\n    result = 0\n"
+        + "".join(f"    if value > {number}:\n        result += 1\n" for number in range(11))
+        + "    return result\n"
+    )
+    service = AssessmentService(tmp_path / "state")
+    snapshot = service.scan(root)
+    captured_source = next(entry for entry in snapshot["evidence"] if entry["path"] == "app.py")
+    assert "context_signal" not in captured_source["excerpt"]
+    source.write_text("raise RuntimeError('changed live file')\n")
+    snippet = service.query_evidence(
+        snapshot["id"], view="snippets", path="app.py", line=101, candidate_kind="complex_function"
+    )
+    assert snippet["items"]
+    assert len(snippet["items"]) == 1
+    row = snippet["items"][0]
+    assert "context_signal" in row["excerpt"] and "changed live file" not in row["excerpt"]
+    assert row["line"] <= 101 <= row["end_line"]
+    assert row["digest"] == captured_source["digest"]
+    assert row["evidence_id"] == captured_source["id"]
+    assert snippet["source"] == snapshot["source"]
+    missing = service.query_evidence(snapshot["id"], view="snippets", path="app.py", line=10000)
+    assert not missing["items"] and missing["gap"]
+
+
+def test_source_context_checks_snapshot_digest_and_never_updates_history(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    source = root / "app.py"
+    source.write_text("# outside the prefix excerpt\n" * 100 + "value = 'captured context'\n")
+    service = AssessmentService(tmp_path / "state", [root])
+    snapshot = service.scan(root)
+    evidence = next(row for row in snapshot["evidence"] if row["path"] == "app.py")
+    before = service.history(snapshot["project_id"])
+    context = service.source_context(snapshot["id"], evidence["id"], line=101, end_line=101)
+    assert context["source_identity"] == "snapshot_matched_live_bytes"
+    assert context["assessment_id"] == snapshot["id"] and context["source"] == snapshot["source"]
+    assert context["digest"] == evidence["digest"] and "captured context" in context["excerpt"]
+    assert context["line"] == context["end_line"] == 101
+    source.write_text("value = 'changed since assessment'\n")
+    with pytest.raises(ValueError, match="changed|digest|stale|match"):
+        service.source_context(snapshot["id"], evidence["id"], line=1)
+    with pytest.raises(ValueError, match="Unknown evidence"):
+        service.source_context(snapshot["id"], "foreign-evidence")
+    assert service.history(snapshot["project_id"]) == before
+
+
+def test_javascript_doctor_and_query_share_source_bound_native_leads(tmp_path):
+    pytest.importorskip("tree_sitter", reason="Native JavaScript analysis is an optional extra")
+    pytest.importorskip("tree_sitter_typescript", reason="Native TypeScript grammar is optional")
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    (root / "src/app.ts").write_text(
+        "export function classify(value: number) {\n  let total = 0;\n"
+        + "".join(f"  if (value > {number}) {{ total += 1; }}\n" for number in range(11))
+        + "  return total;\n  const unreachable = 2;\n}\n"
+    )
+    service = AssessmentService(tmp_path / "state")
+    snapshot = service.scan(root)
+    diagnosis = service.doctor(snapshot["id"], limit=2)
+    candidates = [row for rows in diagnosis["groups"].values() for row in rows]
+    assert {row["family"] for row in candidates} == {"javascript_ast", "dead_code"}
+    assert all(row["source_identity"] == "captured_snapshot" for row in candidates)
+    queried = service.query_evidence(
+        snapshot["id"],
+        view="candidates",
+        kind="javascript-analysis",
+        candidate_kind="complex_function",
+        role="production",
+    )
+    assert queried["items"] and queried["items"][0]["locations"][0]["path"] == "src/app.ts"
+    snippet = service.query_evidence(snapshot["id"], view="snippets", path="src/app.ts", line=1)
+    assert any("classify" in row["excerpt"] for row in snippet["items"])

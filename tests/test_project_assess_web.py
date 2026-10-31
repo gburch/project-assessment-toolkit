@@ -21,6 +21,8 @@ class Service:
         self.targets = None
         self.history_calls = []
         self.reviews = []
+        self.queries = []
+        self.contexts = []
 
     def list_projects(self):
         return [
@@ -67,6 +69,18 @@ class Service:
     def submit_review(self, **document):
         self.reviews.append(deepcopy(document))
         return {"id": "r1", **document["review"]}
+
+    def evolve(self, assessment_id):
+        self.get_report(assessment_id)
+        return {"assessment_id": assessment_id, "goal_alignment": {"planning_status": "no_review"}}
+
+    def query_evidence(self, **parameters):
+        self.queries.append(parameters)
+        return {"items": [], "next_offset": None}
+
+    def source_context(self, **parameters):
+        self.contexts.append(parameters)
+        return {"source_identity": "snapshot_matched_live_bytes"}
 
 
 @pytest.fixture
@@ -208,6 +222,131 @@ def test_query_contract_and_method_rejection(running_report):
     assert service.history_calls == [("p1", True)]
     assert request(server, path="/api/progress?project_id=p1")[0] == 200
     assert request(server, "PUT", "/api/targets")[0] == 405
+
+
+def test_read_only_inspection_routes_delegate_bounded_typed_queries(running_report):
+    service, server = running_report
+    assert request(server, path="/api/evolve?assessment_id=a1")[0] == 200
+    assert request(server, path="/api/evolve?assessment_id=a1&project_id=p1")[0] == 400
+    assert (
+        request(
+            server,
+            path="/api/evidence-query?assessment_id=a1&view=candidates&candidate_kind=unreachable_statement&role=production&path=app&offset=20&limit=10",
+        )[0]
+        == 200
+    )
+    assert service.queries == [
+        {
+            "assessment_id": "a1",
+            "view": "candidates",
+            "candidate_kind": "unreachable_statement",
+            "role": "production",
+            "path": "app",
+            "offset": 20,
+            "limit": 10,
+            "max_chars": 16000,
+        }
+    ]
+    assert (
+        request(
+            server,
+            path="/api/source-context?assessment_id=a1&evidence_id=e1&line=2&end_line=5&max_chars=2000",
+        )[0]
+        == 200
+    )
+    assert service.contexts == [
+        {"assessment_id": "a1", "evidence_id": "e1", "line": 2, "end_line": 5, "max_chars": 2000}
+    ]
+    assert service.calls == service.scans == service.reviews == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/evidence-query?assessment_id=a1&root=/etc",
+        "/api/evidence-query?assessment_id=a1&offset=1&offset=2",
+        "/api/evidence-query?assessment_id=a1&limit=1.5",
+        "/api/evidence-query?assessment_id=a1&line=-1",
+        "/api/evidence-query?assessment_id=a1&max_chars=16001",
+        "/api/evidence-query?assessment_id=a1&path=",
+        "/api/source-context?assessment_id=a1&path=/etc/passwd",
+        "/api/source-context?assessment_id=a1&evidence_id=e1&line=NaN",
+        "/api/source-context?assessment_id=a1&evidence_id=e1&evidence_id=e2",
+    ],
+)
+def test_inspection_query_rejects_unknown_duplicate_and_noninteger_parameters(running_report, path):
+    service, server = running_report
+    assert request(server, path=path)[0] == 400
+    assert service.queries == service.contexts == []
+
+
+def test_real_evidence_query_and_context_reject_stale_bytes_and_preserve_state(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    source = root / "app.py"
+    source.write_text("def run():\n    return 1\n    print('unreachable')\n")
+    (root / ".env").write_text("PRIVATE_WEB_CONTEXT_MARKER=never-return-this-value\n")
+    service = AssessmentService(tmp_path / "state", [root])
+    snapshot = service.scan(root)
+    evidence_id = next(row["id"] for row in snapshot["evidence"] if row["path"] == "app.py")
+    analysis_id = next(
+        row["id"] for row in snapshot["evidence"] if row["kind"] == "static-analysis"
+    )
+    before = service.history(snapshot["project_id"])
+    prefix = "assessment_id=" + snapshot["id"]
+    with create_server(service) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            status, _, body = request(
+                server,
+                path="/api/evidence-query?"
+                + prefix
+                + "&view=candidates&candidate_kind=unreachable_statement&limit=1",
+            )
+            assert status == 200
+            result = json.loads(body)
+            assert result["matched"] == 1 and result["items"][0]["kind"] == "unreachable_statement"
+            context = (
+                "/api/source-context?"
+                + prefix
+                + "&evidence_id="
+                + evidence_id
+                + "&line=2&end_line=3"
+            )
+            status, _, body = request(server, path=context)
+            assert status == 200
+            assert json.loads(body)["source_identity"] == "snapshot_matched_live_bytes"
+            assert "unreachable" in json.loads(body)["excerpt"]
+            assert (
+                request(server, path=context, headers={"Origin": "https://attacker.example"})[0]
+                == 403
+            )
+            assert (
+                request(
+                    server, path="/api/source-context?" + prefix + "&evidence_id=" + analysis_id
+                )[0]
+                == 400
+            )
+            assert (
+                request(server, path="/api/evidence-query?" + prefix + "&view=unsupported")[0]
+                == 400
+            )
+            assert request(server, path="/api/evidence-query?" + prefix + "&limit=101")[0] == 400
+            assert (
+                b"never-return-this-value"
+                not in request(server, path="/api/evidence-query?" + prefix + "&view=index")[2]
+            )
+            source.write_text("value = 2\n")
+            status, _, body = request(server, path=context)
+            assert status == 400 and "changed since capture" in json.loads(body)["error"]
+            assert b"value = 2" not in body
+            assert service.history(snapshot["project_id"]) == before
+            service.allowed_roots = (tmp_path / "other",)
+            assert request(server, path=context)[0] == 403
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
 
 
 @pytest.mark.parametrize(
