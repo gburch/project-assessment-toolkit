@@ -52,11 +52,11 @@ Follow the [local workflow](docs/PROJECT_ASSESS.md#local-workflow) to fill a `re
 ## PAT's own assessment
 
 <p>
-  <a href="docs/badges/README.md"><img src="docs/badges/summary.svg?v=2" alt="PAT assessment snapshot"></a>
-  <a href="docs/badges/README.md"><img src="docs/badges/testing.svg?v=2" alt="PAT testing snapshot"></a>
+  <a href="docs/badges/README.md"><img src="docs/badges/summary.svg?v=3" alt="PAT assessment snapshot"></a>
+  <a href="docs/badges/README.md"><img src="docs/badges/testing.svg?v=3" alt="PAT testing snapshot"></a>
   <br>
-  <a href="docs/badges/README.md"><img src="docs/badges/maintainability.svg?v=2" alt="PAT maintainability snapshot"></a>
-  <a href="docs/badges/README.md"><img src="docs/badges/extensibility.svg?v=2" alt="PAT extensibility snapshot"></a>
+  <a href="docs/badges/README.md"><img src="docs/badges/maintainability.svg?v=3" alt="PAT maintainability snapshot"></a>
+  <a href="docs/badges/README.md"><img src="docs/badges/extensibility.svg?v=3" alt="PAT extensibility snapshot"></a>
 </p>
 
 These are saved snapshots, not live status or a security certification. [Read the self-assessment](docs/badges/README.md). Capability and upkeep burden stay separate; `?` means unknown.
