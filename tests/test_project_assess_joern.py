@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -46,6 +47,10 @@ def raw_result(path):
         "has_body": True,
         "read_count": 0,
         "reference_count": 0,
+        "cleanup_status": "review_candidate",
+        "capture_status": "not_captured",
+        "signature_status": "private_direct_only",
+        "basis": "identifier_REF_reads_with_capture_and_function_escape_checks",
     }
 
     def section(rows):
@@ -53,7 +58,7 @@ def raw_result(path):
 
     return {
         "schema_version": 1,
-        "query_version": "1",
+        "query_version": "2",
         "dataflow": "not_run",
         "errors": [],
         "gaps": [],
@@ -72,7 +77,7 @@ def raw_result(path):
             "edge_counts": {"CFG": 8, "REF": 6, "CALL": 1, "CDG": 0},
         },
         "source_files": section([{"path": path}]),
-        "methods": section([method]),
+        "methods": {**section([method]), "external_models": 17, "unlocated_models": 2},
         "calls": section(
             [
                 {
@@ -84,16 +89,34 @@ def raw_result(path):
                     "target_name": "call",
                     "target_full_name": "call",
                     "resolution": "internal",
+                    "dependency_status": "source_supported",
+                    "dependency_basis": "captured_named_call",
                 }
             ]
         ),
         "module_edges": {
             **section([{"source": path, "target": path, "count": 7}]),
             "count_is_lower_bound": False,
+            "occurrences": 7,
+            "omitted_occurrences": 0,
         },
-        "unread_bindings": section(
-            [binding, {**binding, "line": 2, "symbol": "unused", "binding_kind": "local"}]
-        ),
+        "inferred_module_edges": {**section([]), "count_is_lower_bound": False},
+        "unread_bindings": {
+            **section(
+                [
+                    binding,
+                    {
+                        **binding,
+                        "line": 2,
+                        "symbol": "unused",
+                        "binding_kind": "local",
+                        "signature_status": "not_applicable",
+                    },
+                ]
+            ),
+            "suppressed": {"captured_binding": 3},
+            "captured_declarations": 3,
+        },
     }
 
 
@@ -137,12 +160,218 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("metadata launched Java"))
     info = analysis.joern_info()
     assert info["available"] and info["version"] == "4.0.669"
-    assert info["query_version"] == "1" and info["dataflow"] == "not_run"
+    assert info["query_version"] == "2" and info["dataflow"] == "not_run"
     assert qualified["root"] not in json.dumps(info)
     deep = analysis.joern_limits("deep")
     assert deep["seconds"] == 1800 and deep["heap_gib"] == 8
     deep["seconds"] = 0
     assert analysis.joern_limits("deep")["seconds"] == 1800
+    assert info["javascript_transport"]["type_maps"] == "not_run"
+    assert (
+        info["javascript_transport"]["sha256"]
+        == hashlib.sha256(analysis._ASTGEN_TRANSPORT.encode()).hexdigest()
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [
+        (b"x" * 10_000, None),
+        (b"x" * 10_001, "javascript_frontend_line_byte_limit"),
+        (b"\n" * 49_999, None),
+        (b"\n" * 50_000, "javascript_frontend_line_limit"),
+        (b"x" * (5 * 1024**2 + 1), "javascript_frontend_file_byte_limit"),
+        (b"// EMSCRIPTEN_START_ASM", "javascript_frontend_emscripten"),
+    ],
+)
+def test_javascript_guards_are_explicit_bounded_input_limits(raw, reason):
+    assert analysis._javascript_guard(raw) == reason
+
+
+def test_captured_js_names_are_not_filtered_and_guarded_inputs_keep_coverage_rows(
+    qualified, monkeypatch
+):
+    names = [
+        "tests/unit.test.ts",
+        ".hidden/example.jsx",
+        "src/View.test.tsx",
+        "src/types.d.ts",
+        "src/module.mts",
+        "src/module.cts",
+    ]
+    inputs = [source(path, "export const kept = 1;\n") for path in names]
+    inputs.append(source("src/generated.js", "x" * 10_001))
+
+    def run(argv, *, cwd, output=None, env, **kwargs):
+        if output:
+            raw = raw_result(names[0])
+            for section in ("methods", "calls", "unread_bindings", "module_edges"):
+                raw[section].update(rows=[], count=0)
+            raw["source_files"].update(rows=[{"path": path} for path in names], count=len(names))
+            output.write_text(json.dumps(raw))
+        else:
+            assert "--no-tsTypes" in argv
+            script = Path(env["ASTGEN_BIN"])
+            assert script.name == "astgen-transport" and script.is_file()
+            settings = json.loads(script.with_suffix(".json").read_text())
+            assert {row["path"] for row in settings["files"]} == set(names)
+            for row in settings["files"]:
+                assert not row["alias"].startswith(".") and ".test." not in row["alias"]
+                expected = Path(row["path"]).suffix
+                if expected in {".mts", ".cts"}:
+                    expected = ".ts"
+                assert row["alias"].endswith(expected)
+                assert (cwd / "transport" / row["alias"]).read_bytes() == (
+                    cwd / "source" / row["path"]
+                ).read_bytes()
+            assert not (cwd / "source/src/generated.js").exists()
+        return "complete"
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern(inputs, snapshot=qualified)
+    assert result["coverage"]["eligible_files"] == 7
+    assert result["coverage"]["staged_files"] == result["coverage"]["modeled_files"] == 6
+    assert result["coverage"]["omissions"] == {"javascript_frontend_line_byte_limit": 1}
+    modules = {row["path"]: row for row in result["modules"]}
+    assert set(modules) == {*names, "src/generated.js"}
+    assert modules["src/generated.js"]["skip_reason"] == "javascript_frontend_line_byte_limit"
+    assert modules["src/generated.js"]["staged"] is False
+    assert result["status"] == "partial"
+
+
+def test_ast_transport_restores_only_headers_and_preserves_original_import_bytes(tmp_path):
+    workspace = tmp_path / "workspace with spaces"
+    stage = workspace / "javascript/source"
+    stage.mkdir(parents=True)
+    text = "import { useful } from '../src/library';\nexport const kept = useful();\n"
+    record = source(".hidden/view.test.tsx", text)
+    original = stage / record["path"]
+    original.parent.mkdir()
+    original.write_text(text)
+    binary = workspace / "synthetic-astgen"
+    binary.write_text(
+        "#!" + str(Path(sys.executable).resolve()) + "\n"
+        "import json,sys\nfrom pathlib import Path\n"
+        "args=sys.argv[1:]\n"
+        "assert args[-3:]==['--type','ts','--no-tsTypes']\n"
+        "root=Path(args[1]);output=Path(args[3]);output.mkdir()\n"
+        "for source in root.iterdir():\n"
+        " ast={'literal':source.read_text(),'producerPathLiteral':str(source),'padding':'x'*100000}\n"
+        " row={'fullName':str(source),'relativeName':source.name,'ast':ast}\n"
+        " (output/(source.name+'.json')).write_text(json.dumps(row,separators=(',',':')))\n"
+    )
+    binary.chmod(0o500)
+    launcher = analysis._javascript_transport(
+        workspace,
+        stage,
+        {record["path"]: record},
+        {"astgen": binary},
+        analysis.joern_limits("standard"),
+    )
+    output = workspace / "output"
+    completed = subprocess.run(
+        [str(launcher), "--no-tsTypes", "-t", "ts", "-o", str(output)],
+        cwd=stage,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr.decode()
+    result = json.loads(next(output.glob("*.json")).read_text())
+    assert result["relativeName"] == record["path"] and result["fullName"] == str(original)
+    assert result["ast"]["literal"] == text
+    assert "/transport/unit00000.tsx" in result["ast"]["producerPathLiteral"]
+    assert len(result["ast"]["padding"]) == 100_000
+    assert analysis._hash_file(original) == record["digest"]
+    rejected = subprocess.run(
+        [str(launcher), "--script", str(original)], cwd=stage, capture_output=True, check=False
+    )
+    assert rejected.returncode != 0
+
+
+def test_model_proof_and_inferred_edges_are_not_promoted_to_cleanup_or_primary_topology(
+    qualified, monkeypatch
+):
+    def run(argv, *, output=None, **kwargs):
+        if output:
+            raw = raw_result("src/app.py")
+            for row in raw["unread_bindings"]["rows"]:
+                row.pop("capture_status")
+            call = raw["calls"]["rows"][0]
+            raw["calls"]["rows"] += [
+                {**call, "dependency_status": "producer_inferred"},
+                {**call, "dependency_status": "rejected"},
+                {**call, "dependency_status": "unknown"},
+            ]
+            raw["calls"]["classifications"] = {"source_supported": 7, "producer_inferred": 11}
+            raw["inferred_module_edges"].update(
+                rows=[{"source": "src/app.py", "target": "src/app.py", "count": 11}], count=1
+            )
+            output.write_text(json.dumps(raw))
+        return "complete"
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified)
+    assert result["candidate_index"] == []
+    assert result["coverage"]["omissions"] == {
+        "unqualified_binding_contract": 2,
+        "rejected_call_target": 1,
+        "unqualified_call_target": 1,
+    }
+    assert result["topology"]["edges"] == [
+        {
+            "source": "src/app.py",
+            "target": "src/app.py",
+            "kind": "source_supported_method_call",
+            "count": 7,
+        }
+    ]
+    assert result["topology"]["inferred_edges"][0]["count"] == 11
+    calls = result["topology"]["calls"]
+    assert len(calls) == 2 and {row["dependency_status"] for row in calls} == {
+        "source_supported",
+        "producer_inferred",
+    }
+    assert (
+        next(row for row in calls if row["dependency_status"] == "producer_inferred")["resolution"]
+        != "internal"
+    )
+    section = result["coverage"]["batches"][0]["model_sections"]["unread_bindings"]
+    assert (
+        section["suppressed"] == {"captured_binding": 3} and section["captured_declarations"] == 3
+    )
+    sections = result["coverage"]["batches"][0]["model_sections"]
+    assert sections["methods"]["external_models"] == 17
+    assert sections["methods"]["unlocated_models"] == 2
+    assert sections["module_edges"]["occurrences"] == 7
+    assert sections["module_edges"]["omitted_occurrences"] == 0
+    assert sections["inferred_module_edges"]["count"] == 1
+    assert sections["calls"]["classifications"] == {"source_supported": 7, "producer_inferred": 11}
+
+
+@pytest.mark.parametrize(
+    "section,field,value",
+    [
+        ("unread_bindings", "suppressed", {"captured_binding": True}),
+        ("unread_bindings", "captured_declarations", -1),
+        ("methods", "external_models", True),
+        ("calls", "classifications", {"producer_inferred": False}),
+        ("module_edges", "count_is_lower_bound", "yes"),
+    ],
+)
+def test_invalid_model_suppression_counts_do_not_become_validated_output(
+    qualified, monkeypatch, section, field, value
+):
+    def run(argv, *, output=None, **kwargs):
+        if output:
+            raw = raw_result("src/app.py")
+            raw[section][field] = value
+            output.write_text(json.dumps(raw))
+        return "complete"
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified)
+    assert result["summary"]["methods"] is None and result["candidate_index"] == []
+    assert result["coverage"]["batches"][0]["status"] == "unvalidated_output_or_source"
 
 
 @pytest.mark.parametrize("config", [{"script": "project.sc"}, {"argv": []}, False])
@@ -384,9 +613,9 @@ def test_process_runner_enforces_timeout_and_discards_sensitive_logs(tmp_path, c
 @pytest.mark.parametrize(
     "payload",
     [
-        '{"schema_version":1,"query_version":"1","schema_version":1}',
-        '{"schema_version":true,"query_version":"1","dataflow":"not_run"}',
-        '{"schema_version":1,"query_version":"1","dataflow":"run"}',
+        '{"schema_version":1,"query_version":"2","schema_version":1}',
+        '{"schema_version":true,"query_version":"2","dataflow":"not_run"}',
+        '{"schema_version":1,"query_version":"2","dataflow":"run"}',
     ],
 )
 def test_unqualified_or_ambiguous_query_output_is_rejected(tmp_path, payload):

@@ -115,7 +115,9 @@ def badge_data(report, dimension="summary"):
             }
         )
     else:
-        label = "PAT " + dimension.capitalize()
+        label = "PAT " + (
+            "Performance & Scalability" if dimension == "performance" else dimension.capitalize()
+        )
         rating = ratings[dimension]
         capability, burden = (
             "?" if rating[axis] is None else rating[axis] for axis in ("capability", "burden")
@@ -183,7 +185,11 @@ def badge(report, dimension="summary"):
         text(
             12,
             20,
-            "Assessment" if dimension == "summary" else dimension.capitalize(),
+            "Assessment"
+            if dimension == "summary"
+            else "Performance & Scalability"
+            if dimension == "performance"
+            else dimension.capitalize(),
             color="#f1f5f9",
             size=12,
             weight=600,

@@ -16,7 +16,7 @@
 
 PAT helps you see what works, what costs too much to maintain, and what to improve next. Choose goals that fit your project and track progress toward them.
 
-Assess **security, testing, documentation, maintainability, delivery, operability and extensibility** on two independent 0–5 scales: **capability** and **upkeep burden**. A project can need stronger tests, fewer brittle fixtures, or both. Useful capability has no penalty. Missing evidence stays **unknown**; counts never assign scores.
+Assess **security, testing, documentation, maintainability, delivery, operability, extensibility and performance/scalability** on two independent 0–5 scales: **capability** and **upkeep burden**. A project can need stronger tests, fewer brittle fixtures, or both. Useful capability has no penalty. Missing evidence stays **unknown**; counts never assign scores.
 
 PAT runs locally without an AI service. Scans collect facts; a person or optional agent supplies cited judgment.
 
@@ -55,7 +55,7 @@ Version **0.3.0** adds standard/deep collection budgets, broad complexity metric
 
 Version **0.3.2** rejects unsupported or incomplete state before writing and initializes new state atomically. Static test evidence labels bare `assert` counts separately from recognized unittest-style calls; changed counting semantics start a new comparison scope. Vulture's redundant conditions remain distinct from unreachable statements.
 
-Version **0.4.0** adds an opt-in Joern provider for bounded captured-source method/reference and call evidence across Python, JavaScript/TypeScript and Java. Swift remains explicitly unsupported in this adapter release. It uses trusted preinstalled tools, mandatory sandboxing and a fixed packaged query; deep mode has a separate larger process budget. Partial or unresolved evidence remains explicit, with no automatic scores or safe-deletion claims. See [Joern setup and limits](docs/PROJECT_ASSESS.md#optional-joern-analysis).
+Version **0.5.0** adds a tunable Performance & Scalability dimension and separates source-supported Joern calls from inferred targets. Existing goals require an explicit new target; earlier history remains unchanged. The opt-in Joern provider supplies bounded captured-source method/reference and call evidence across Python, JavaScript/TypeScript and Java. Swift remains explicitly unsupported in this adapter release. It uses trusted preinstalled tools, mandatory sandboxing and a fixed packaged query; deep mode has a separate larger process budget. Partial or unresolved evidence remains explicit, with no automatic scores or safe-deletion claims. See [Joern setup and limits](docs/PROJECT_ASSESS.md#optional-joern-analysis).
 
 ## PAT's own assessment
 

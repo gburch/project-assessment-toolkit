@@ -75,7 +75,7 @@ def test_every_profile_covers_all_dimensions_with_bounded_independent_goals():
 
 def test_extensibility_is_an_independent_dimension_and_rigidity_stays_a_named_check():
     exported = rubric()
-    assert len(DIMENSIONS) == 7
+    assert len(DIMENSIONS) == 8
     assert "extensibility" in exported["dimensions"]
     assert "rigidity" not in DIMENSIONS
     assert "rigidity" in exported["dimensions"]["maintainability"]["checks"]
@@ -108,7 +108,7 @@ def test_stack_declarations_do_not_assign_ratings_or_select_goals(tmp_path, depe
         rating["capability"] is None and rating["burden"] is None for rating in ratings.values()
     )
     exported = service.rubric()
-    assert exported["version"] == "4" and len(exported["dimensions"]) == 7
+    assert exported["version"] == "5" and len(exported["dimensions"]) == 8
     assert exported["dimensions"]["maintainability"]["checks"]["ecosystem_fit"]["version"] == 1
     assert all(
         "ecosystem_fit" not in profile["targets"] for profile in exported["profiles"].values()
@@ -147,3 +147,14 @@ def test_architecture_candidates_alone_do_not_establish_maintenance_burden(tmp_p
     assert template["ratings"]["maintainability"]["burden"] is None
     assert template["ratings"]["extensibility"]["capability"] is None
     assert template["ratings"]["extensibility"]["burden"] is None
+
+
+def test_performance_is_tunable_and_does_not_inherit_security_sensitivity():
+    performance = rubric()["dimensions"]["performance"]
+    assert len(performance["capability"]) == len(performance["burden"]) == 6
+    assert PROFILES["local-experiment"]["targets"]["performance"] == {
+        "capability_min": 1,
+        "burden_max": 1,
+    }
+    assert PROFILES["sensitive-critical"]["targets"]["performance"]["capability_min"] == 3
+    assert PROFILES["sensitive-critical"]["targets"]["security"]["capability_min"] == 4

@@ -122,6 +122,7 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
         "delivery": "Show source-linked evidence for the required build and release boundaries in scope, including applicable failure and recovery paths, without assuming a green run proves delivery.",
         "operability": "Demonstrate the needed detection and recovery scenarios in scope and verify that operators can use the evidence and recovery steps; retain explicit gaps for unverified scenarios.",
         "extensibility": "Demonstrate the actual variations and supported authors in scope through adequate seams, including compatibility and failure behavior; a plugin framework is not required by the score.",
+        "performance": "State the intended workload and resource objectives, inspect query and concurrency controls, and obtain source-linked measurements for the selected level; retain explicit capacity gaps and account for tuning and operating upkeep separately.",
     }
     dimensions = {}
     for dimension in DIMENSIONS:
@@ -861,6 +862,10 @@ class AssessmentService:
                 rows.extend(
                     {**edge, "path": edge["source"], "record_type": "edge", **common}
                     for edge in stats.get("topology", {}).get("edges", [])
+                )
+                rows.extend(
+                    {**edge, "path": edge["source"], "record_type": "inferred_edge", **common}
+                    for edge in stats.get("topology", {}).get("inferred_edges", [])
                 )
                 rows.extend(
                     {**module, "record_type": "module", **common}

@@ -9,6 +9,7 @@ import os
 import platform
 import re
 import selectors
+import shlex
 import shutil
 import signal
 import stat
@@ -21,8 +22,8 @@ from pathlib import Path, PurePosixPath
 
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "1"
-QUERY_VERSION = "1"
+VERSION = "2"
+QUERY_VERSION = "2"
 JOERN_VERSION = "4.0.669"
 QUERY_PATH = Path(__file__).parent / "resources" / "joern.sc"
 MAX_INPUT_RECORDS = 20_000
@@ -41,6 +42,8 @@ _LANGUAGES = {
     ".cjs": "javascript",
     ".ts": "javascript",
     ".tsx": "javascript",
+    ".mts": "javascript",
+    ".cts": "javascript",
     ".java": "java",
     ".swift": "swift",
 }
@@ -68,6 +71,62 @@ _CAVEAT = (
 )
 _clock = time.monotonic
 
+# Fixed transport only: Babel receives original bytes; Joern receives original
+# source identities. No project configuration or TypeScript typemap is loaded.
+_ASTGEN_TRANSPORT = r"""import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+manifest = Path(__file__).with_suffix(".json")
+if manifest.stat().st_size > 32 * 1024**2:
+    raise ValueError("Oversized transport manifest")
+settings = json.loads(manifest.read_text())
+binary = settings["binary"]
+args = sys.argv[1:]
+if args == ["--version"]:
+    os.execv(binary, [binary, "--version"])
+args = [arg for arg in args if arg != "--no-tsTypes"]
+if len(args) != 4 or args[:3] != ["-t", "ts", "-o"]:
+    raise ValueError("Unsupported AST transport arguments")
+workspace, source = Path(settings["workspace"]), Path(settings["source"])
+output = Path(args[3]).resolve()
+if Path.cwd().resolve() != source or not output.is_relative_to(workspace):
+    raise ValueError("AST transport escaped its workspace")
+transport = Path(settings["transport"])
+completed = subprocess.run(
+    [binary, "--src", str(transport), "--output", str(output), "--type", "ts", "--no-tsTypes"],
+    cwd=transport, stdin=subprocess.DEVNULL, check=False,
+)
+if completed.returncode:
+    raise SystemExit(completed.returncode)
+prefix = re.compile(rb'^\{"fullName":("(?:\\.|[^"\\])*"),"relativeName":("(?:\\.|[^"\\])*"),"ast":')
+for row in settings["files"]:
+    alias = transport / row["alias"]
+    if hashlib.sha256(alias.read_bytes()).hexdigest() != row["sha256"]:
+        raise ValueError("AST transport source changed")
+    ast = output / (row["alias"] + ".json")
+    if not ast.exists():
+        continue
+    if ast.is_symlink() or ast.stat().st_size > settings["max_ast_bytes"]:
+        raise ValueError("Invalid AST transport output")
+    temporary = ast.with_suffix(".pat-restored")
+    with ast.open("rb") as original, temporary.open("xb") as restored:
+        header = original.read(64 * 1024)
+        match = prefix.match(header)
+        if not match or json.loads(match[1]) != str(alias) or json.loads(match[2]) != row["alias"]:
+            raise ValueError("Unexpected pinned AST header")
+        identity = {"fullName": str(source / row["path"]), "relativeName": row["path"]}
+        restored.write(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode()[:-1] + b',"ast":')
+        restored.write(header[match.end():])
+        shutil.copyfileobj(original, restored, 1024 * 1024)
+    temporary.replace(ast)
+"""
+
 
 def joern_limits(analysis_profile):
     if not isinstance(analysis_profile, str) or analysis_profile not in _PROFILES:
@@ -81,6 +140,12 @@ def joern_limits(analysis_profile):
         "candidates": MAX_CANDIDATES,
         "candidate_index": MAX_INDEX,
         "input_records": MAX_INPUT_RECORDS,
+        "javascript_frontend": {
+            "bytes_per_file": 5 * 1024**2,
+            "lines_per_file": 50_000,
+            "bytes_per_line": 10_000,
+            "emscripten": "unsupported",
+        },
         "deadline_mode": "dedicated hard subprocess deadline; bounded normalization",
     }
 
@@ -167,6 +232,13 @@ def joern_info():
         "version": JOERN_VERSION,
         "adapter_version": VERSION,
         "query_version": QUERY_VERSION,
+        "javascript_transport": {
+            "version": "1",
+            "sha256": hashlib.sha256(_ASTGEN_TRANSPORT.encode()).hexdigest(),
+            "source_identity": "original_captured_paths",
+            "type_maps": "not_run",
+            "module_mode": "Babel unambiguous syntax; .mts/.cts host module-resolution parity is unverified",
+        },
         "available": False,
         "optional": True,
         "languages": ["python", "javascript", "typescript", "java"],
@@ -206,6 +278,62 @@ def _relative(value):
     return path.as_posix()
 
 
+def _javascript_guard(raw):
+    # These are the pinned astgen's bounded-input guards, not quality findings.
+    if len(raw) > 5 * 1024**2:
+        return "javascript_frontend_file_byte_limit"
+    if b"// EMSCRIPTEN_START_ASM" in raw:
+        return "javascript_frontend_emscripten"
+    lines = raw.split(b"\n")
+    if len(lines) > 50_000:
+        return "javascript_frontend_line_limit"
+    if any(len(line) > 10_000 for line in lines):
+        return "javascript_frontend_line_byte_limit"
+    return None
+
+
+def _javascript_transport(workspace, stage, batch, paths, limits):
+    transport = stage.parent / "transport"
+    transport.mkdir()
+    rows = []
+    for index, (path, source) in enumerate(sorted(batch.items())):
+        suffix = PurePosixPath(path).suffix.lower()
+        if suffix in {".mts", ".cts"}:
+            suffix = ".ts"
+        alias = f"unit{index:05d}{suffix}"
+        target = transport / alias
+        target.write_text(source["text"], encoding="utf-8")
+        target.chmod(0o400)
+        rows.append(
+            {"alias": alias, "path": path, "sha256": source["digest"].removeprefix("sha256:")}
+        )
+    script = workspace / "astgen-transport.py"
+    script.write_text(_ASTGEN_TRANSPORT)
+    script.with_suffix(".json").write_text(
+        json.dumps(
+            {
+                "binary": str(paths["astgen"]),
+                "workspace": str(workspace),
+                "source": str(stage),
+                "transport": str(transport),
+                "files": rows,
+                "max_ast_bytes": limits["workspace_bytes"],
+            }
+        )
+    )
+    runtime = Path(sys.executable).resolve(strict=True)
+    launcher = workspace / "astgen-transport"
+    launcher.write_text(
+        "#!/bin/sh\nexec "
+        + shlex.quote(str(runtime))
+        + " -I -S "
+        + shlex.quote(str(script))
+        + ' "$@"\n'
+    )
+    launcher.chmod(0o500)
+    return launcher
+
+
 def _environment(paths, java, workspace, limits):
     home, temporary = workspace / "home", workspace / "tmp"
     home.mkdir()
@@ -243,8 +371,9 @@ def _contained_command(argv, workspace, original_root, containment, binary, cwd)
             f"(deny file-read* (subpath {quote(original_root)}))"
         )
         policy += " ".join(
-            f"(deny file-write* (subpath {quote(workspace / language / 'source')}))"
+            f"(deny file-write* (subpath {quote(workspace / language / name)}))"
             for language in _FRONTENDS
+            for name in ("source", "transport")
         )
         return [binary, "-p", policy, *argv]
     hidden = workspace / "hidden-original"
@@ -265,9 +394,10 @@ def _contained_command(argv, workspace, original_root, containment, binary, cwd)
         str(original_root),
     ]
     for language in _FRONTENDS:
-        stage = workspace / language / "source"
-        if stage.is_dir():
-            command.extend(["--ro-bind", str(stage), str(stage)])
+        for name in ("source", "transport"):
+            stage = workspace / language / name
+            if stage.is_dir():
+                command.extend(["--ro-bind", str(stage), str(stage)])
     return [*command, "--chdir", str(cwd), "--", *argv]
 
 
@@ -486,6 +616,15 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
         )
     for path, line, row in rows("calls"):
         target = _source_path(row.get("target_path"), stage, sources)
+        dependency = row.get("dependency_status")
+        if dependency not in {"source_supported", "producer_inferred", "unresolved", "rejected"}:
+            omissions["unqualified_call_target"] += 1
+            continue
+        if dependency == "rejected":
+            omissions["rejected_call_target"] += 1
+            continue
+        if target is None:
+            dependency = "unresolved"
         calls.append(
             {
                 "path": path,
@@ -496,12 +635,24 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
                 "target_name": text(row.get("target_name", "")),
                 "target_full_name": text(row.get("target_full_name", "")),
                 "resolution": "internal"
-                if target and row.get("resolution") == "internal"
+                if dependency == "source_supported"
                 else "external_or_unresolved",
+                "dependency_status": dependency,
+                "dependency_basis": text(row.get("dependency_basis", "unknown")),
+                "confidence": "medium" if dependency == "source_supported" else "low",
             }
         )
     for path, line, row in rows("unread_bindings"):
         symbol, kind = row.get("symbol"), row.get("binding_kind")
+        if (
+            row.get("cleanup_status") != "review_candidate"
+            or row.get("capture_status") != "not_captured"
+            or row.get("signature_status")
+            != ("private_direct_only" if kind == "parameter" else "not_applicable")
+            or row.get("basis") != "identifier_REF_reads_with_capture_and_function_escape_checks"
+        ):
+            omissions["unqualified_binding_contract"] += 1
+            continue
         if (
             not isinstance(symbol, str)
             or len(symbol) > 256
@@ -544,6 +695,9 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
                 "reference_count": row.get("reference_count")
                 if _integer(row.get("reference_count"))
                 else None,
+                "capture_status": row["capture_status"],
+                "signature_status": row["signature_status"],
+                "basis": row["basis"],
                 "source_digest": sources[path]["digest"],
             },
             "role": sources[path]["role"],
@@ -568,14 +722,20 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
         gaps.add(
             "Joern generated, unlocated or unsupported declaration models were excluded; absence is unknown"
         )
-    module_edges = raw.get("module_edges")
-    edges = Counter()
-    if (
-        isinstance(module_edges, dict)
-        and isinstance(module_edges.get("rows"), list)
-        and len(module_edges["rows"]) <= 100_000
+    edge_sets = []
+    for section, status in (
+        ("module_edges", "source_supported"),
+        ("inferred_module_edges", "producer_inferred"),
     ):
-        for row in module_edges["rows"]:
+        aggregate = raw.get(section)
+        edges = Counter()
+        if (
+            not isinstance(aggregate, dict)
+            or not isinstance(aggregate.get("rows"), list)
+            or len(aggregate["rows"]) > 100_000
+        ):
+            raise ValueError("Missing or invalid qualified module edges")
+        for row in aggregate["rows"]:
             if not isinstance(row, dict):
                 raise ValueError("Invalid module edge")
             if row.get("identity_truncated"):
@@ -583,18 +743,14 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
                 continue
             source = _source_path(row.get("source"), stage, sources)
             target = _source_path(row.get("target"), stage, sources)
-            if source and target and _integer(row.get("count")):
+            if source and target and _integer(row.get("count")) and row["count"] > 0:
                 edges[(source, target)] += row["count"]
             else:
                 omissions["unlocated_module_edge"] += 1
-        if module_edges.get("count_is_lower_bound"):
-            gaps.add("Joern aggregate method-call edges are bounded lower limits")
-    else:
-        edges.update(
-            (row["path"], row["target_path"]) for row in calls if row["resolution"] == "internal"
-        )
-        gaps.add("Joern module edges use retained call rows; the complete aggregate is unavailable")
-    return methods, calls, candidates, modeled, omissions, gaps, edges
+        if aggregate.get("count_is_lower_bound") or aggregate.get("omitted"):
+            gaps.add(f"Joern {status} aggregate method-call edges are bounded lower limits")
+        edge_sets.append(edges)
+    return methods, calls, candidates, modeled, omissions, gaps, *edge_sets
 
 
 def _model_metadata(raw, limits):
@@ -692,6 +848,7 @@ def analyze_joern(
             "dependency_fetch": False,
             "build": False,
             "dataflow": "not_run",
+            "javascript_type_maps": "not_run",
         },
         "provenance": {
             "snapshot": {
@@ -742,7 +899,7 @@ def analyze_joern(
         result.update(
             status="unsupported",
             gaps=[
-                "No qualified captured Python, JS/TS or Java source was supplied; Swift and .mts/.cts are unsupported"
+                "No qualified captured Python, JS/TS or Java source was supplied; Swift is unsupported"
             ],
         )
         return result
@@ -762,14 +919,15 @@ def analyze_joern(
         else began + limits["seconds"]
     )
     omissions, gaps, all_candidates, all_methods, all_calls = Counter(), set(), [], [], []
+    skipped = {}
     if len(sources) != len(selected):
         gaps.add(
-            "Joern excludes unsupported captured source types, including .mts/.cts; this is not whole-project semantic coverage"
+            "Joern excludes unsupported captured source types; this is not whole-project semantic coverage"
         )
     if unqualified:
         gaps.add(identity["unqualified_reason"])
     modeled, batches, successful = set(), [], 0
-    edges = Counter()
+    edges, inferred_edges = Counter(), Counter()
     clean = redact or (lambda value: value)
     try:
         home, java, paths, _, hashes = _tools()
@@ -779,6 +937,14 @@ def analyze_joern(
         if home.is_relative_to(original) or java.is_relative_to(original):
             result.update(
                 status="unsupported", gaps=["Operator tool homes must be outside the assessed root"]
+            )
+            return result
+        if any(source["language"] == "javascript" for source in selected) and Path(
+            sys.executable
+        ).resolve().is_relative_to(original):
+            result.update(
+                status="unsupported",
+                gaps=["Trusted AST transport runtime must be outside the assessed root"],
             )
             return result
         temporary = Path(tempfile.gettempdir()).resolve()
@@ -816,10 +982,13 @@ def analyze_joern(
                     if result["coverage"]["input_bytes"] + len(raw) > limits["bytes"]
                     else "source_digest_mismatch"
                     if "sha256:" + hashlib.sha256(raw).hexdigest() != source["digest"]
+                    else _javascript_guard(raw)
+                    if source["language"] == "javascript"
                     else None
                 )
                 if reason:
                     omissions[reason] += 1
+                    skipped[source["path"]] = reason
                     continue
                 stage = workspace / source["language"] / "source"
                 path = stage / source["path"]
@@ -855,6 +1024,11 @@ def analyze_joern(
                 parser = [str(paths[language]), *flags, str(stage), "--output", str(cpg)]
                 if language == "java":
                     parser.extend(["--delombok-mode", "no-delombok"])
+                if language == "javascript":
+                    env["ASTGEN_BIN"] = str(
+                        _javascript_transport(workspace, stage, batch, paths, limits)
+                    )
+                    parser.append("--no-tsTypes")
                 status = _run(
                     _contained_command(parser, workspace, original, containment, binary, cwd),
                     workspace=workspace,
@@ -897,9 +1071,16 @@ def analyze_joern(
                                 raise ValueError("Staged source identity changed")
                         raw = _read_result(output, limits["query_json_bytes"])
                         metadata, metrics = _model_metadata(raw, limits)
-                        methods, calls, candidates, files, dropped, model_gaps, module_edges = (
-                            _normalize(raw, stage, batch, workspace, clean, stop)
-                        )
+                        (
+                            methods,
+                            calls,
+                            candidates,
+                            files,
+                            dropped,
+                            model_gaps,
+                            module_edges,
+                            inferred_module_edges,
+                        ) = _normalize(raw, stage, batch, workspace, clean, stop)
                         counts = {
                             section: {
                                 key: raw.get(section, {}).get(key) for key in ("count", "omitted")
@@ -910,8 +1091,62 @@ def analyze_joern(
                                 "unread_bindings",
                                 "source_files",
                                 "module_edges",
+                                "inferred_module_edges",
                             )
                         }
+                        for section, fields in (
+                            ("methods", ("external_models", "unlocated_models")),
+                            ("module_edges", ("occurrences", "omitted_occurrences")),
+                            ("inferred_module_edges", ("occurrences", "omitted_occurrences")),
+                        ):
+                            value = raw.get(section, {})
+                            for field in fields:
+                                if field in value:
+                                    if not _integer(value[field]):
+                                        raise ValueError("Invalid model section count")
+                                    counts[section][field] = value[field]
+                            if "count_is_lower_bound" in value:
+                                if type(value["count_is_lower_bound"]) is not bool:
+                                    raise ValueError("Invalid model section bound")
+                                counts[section]["count_is_lower_bound"] = value[
+                                    "count_is_lower_bound"
+                                ]
+                        classifications = raw.get("calls", {}).get("classifications")
+                        if classifications is not None:
+                            if not isinstance(classifications, dict) or any(
+                                key
+                                not in {
+                                    "source_supported",
+                                    "producer_inferred",
+                                    "unresolved",
+                                    "rejected",
+                                }
+                                or not _integer(value)
+                                for key, value in classifications.items()
+                            ):
+                                raise ValueError("Invalid call classification counts")
+                            counts["calls"]["classifications"] = classifications
+                        unread = raw.get("unread_bindings", {})
+                        if "suppressed" in unread:
+                            suppressed = unread["suppressed"]
+                            if (
+                                not isinstance(suppressed, dict)
+                                or len(suppressed) > 64
+                                or any(
+                                    not isinstance(reason, str)
+                                    or re.fullmatch(r"[a-z_]{1,100}", reason) is None
+                                    or not _integer(count)
+                                    for reason, count in suppressed.items()
+                                )
+                            ):
+                                raise ValueError("Invalid model suppression counts")
+                            counts["unread_bindings"]["suppressed"] = suppressed
+                        if "captured_declarations" in unread:
+                            if not _integer(unread["captured_declarations"]):
+                                raise ValueError("Invalid captured declaration count")
+                            counts["unread_bindings"]["captured_declarations"] = unread[
+                                "captured_declarations"
+                            ]
                         all_methods.extend(methods)
                         all_calls.extend(calls)
                         all_candidates.extend(candidates)
@@ -921,6 +1156,7 @@ def analyze_joern(
                         omissions.update(dropped)
                         gaps.update(model_gaps)
                         edges.update(module_edges)
+                        inferred_edges.update(inferred_module_edges)
                         successful += bool(files)
                     except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
                         status = "unvalidated_output_or_source"
@@ -954,12 +1190,20 @@ def analyze_joern(
                 )
             result["modules"] = [
                 {
-                    "path": path,
+                    "path": source["path"],
                     "role": source["role"],
                     "language": source["language"],
-                    "modeled": path in modeled,
+                    "staged": source["path"] in staged,
+                    "modeled": source["path"] in modeled,
                 }
-                for path, source in sorted(staged.items())
+                | (
+                    {"skip_reason": skipped[source["path"]]}
+                    if source["path"] in skipped
+                    else {"skip_reason": "unsupported_language"}
+                    if source["language"] not in _FRONTENDS
+                    else {}
+                )
+                for source in sorted(selected, key=lambda row: row["path"])
             ]
     except (
         OSError,
@@ -987,8 +1231,23 @@ def analyze_joern(
             all_calls, key=lambda row: (row["path"], row["line"], row["target_full_name"])
         ),
         edges=[
-            {"source": source, "target": target, "kind": "resolved_method_call", "count": count}
+            {
+                "source": source,
+                "target": target,
+                "kind": "source_supported_method_call",
+                "count": count,
+            }
             for (source, target), count in sorted(edges.items())
+        ],
+        inferred_edges=[
+            {
+                "source": source,
+                "target": target,
+                "kind": "producer_inferred_method_call",
+                "count": count,
+                "confidence": "low",
+            }
+            for (source, target), count in sorted(inferred_edges.items())
         ],
     )
     result["candidates"] = _retained_candidates(all_candidates, MAX_CANDIDATES)

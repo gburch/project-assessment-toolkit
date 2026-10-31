@@ -12,6 +12,7 @@ Each dimension has two independent integer ratings from 0 to 5:
 | Maintainability | Unpredictable changes → basic organization → clear interfaces → cohesive modules → demonstrated change safety → exceptional adaptability | Unnecessary layers, speculative frameworks, duplicated adapters and coordination |
 | Delivery | No repeatable path → manual instructions → automated packaging → controlled releases → validated release/recovery → adverse-condition assurance | Slow pipelines, fragile steps, repeated handoffs |
 | Operability | No health visibility → logs → useful signals → actionable operation → exercised response → demonstrated resilience | Alert noise, diagnostic complexity and recurring toil |
+| Performance & Scalability (`performance`) | Basic workload controls → deliberate bounds → measured objectives/headroom → exercised growth and recovery → sustained independent capacity evidence | Tuning, cache coordination and capacity machinery dominating ordinary work |
 | Extensibility | Single purpose → local seams → supported APIs/adapters → deliberate extension points → independently authored extensions → sustained external ecosystem | Repeated core edits, brittle contracts, speculative framework machinery and option matrices |
 
 Burden ranges from negligible overhead (0) to practices dominating available engineering effort (5), including justified safeguards. High capability is not penalized. Missing evidence is **unknown**, not zero; a dimension can have known capability and unknown burden. Capability levels 4–5 require validation beyond the presence of configuration files. “Fort Knox ambition” is a rubric label, not a security certification.
@@ -22,11 +23,15 @@ Maintainability review challenges whether the architecture fits demonstrated req
 
 **Rigidity** remains a maintainability check: constraints that obstruct valuable changes without protecting a current important outcome. Trace the change, the obstructing test/rule/process, the value or risk protected, and a proportionate simpler alternative. Examples include implementation-detail assertions, unjustified coverage gates and documentation taxes; inspect actual callers before judging. Earlier AI decisions can be revised while preserving current security, durable-data and integration guarantees. Explain static inferences and confidence in the existing assessment; rule counts alone are insufficient.
 
-**Ecosystem fit** is also a named maintainability check, with no separate score. `facts.ecosystem_fit` and `ecosystem-analysis` evidence collect dependency declarations and narrow Python/DOM leads for review. Compare bespoke HTTP/auth/routing/state/cache/validation work with an appropriate maintained library, and oversized framework setup with a simpler utility implementation. Judge actual requirements, exposure, workload, team, lifecycle, security and compatibility; cite a concrete behavior, migration/upkeep cost and smallest useful experiment preserving contracts. Package presence, count or age does not establish quality. Current support, version currency, licenses and vulnerabilities remain unknown offline; verify official sources when researching alternatives. Stack preferences are descriptive context, not global gates. Existing user-selected maintainability capability/burden goals apply; rubric 4 and its seven score scales are unchanged.
+**Ecosystem fit** is also a named maintainability check, with no separate score. `facts.ecosystem_fit` and `ecosystem-analysis` evidence collect dependency declarations and narrow Python/DOM leads for review. Compare bespoke HTTP/auth/routing/state/cache/validation work with an appropriate maintained library, and oversized framework setup with a simpler utility implementation. Judge actual requirements, exposure, workload, team, lifecycle, security and compatibility; cite a concrete behavior, migration/upkeep cost and smallest useful experiment preserving contracts. Package presence, count or age does not establish quality. Current support, version currency, licenses and vulnerabilities remain unknown offline; verify official sources when researching alternatives. Stack preferences are descriptive context, not global gates. Existing user-selected maintainability capability/burden goals apply; the maintainability goals remain independently tunable.
 
-PAT 0.3.0 uses collector 7 and Python analyzer 3; ecosystem evidence remains version 1 and the seven rubric 4 scales are unchanged. Collection scope records the analysis profile, settings, selected analyzers and optional parser availability/versions. Earlier snapshots remain readable but do not gain new facts; rescan to collect missing evidence. Progress requires compatible scopes, so runs across these changes are not comparable. Existing reviews, goals and baselines remain saved without automatic reset. Newly visible leads, changed judgment or an installation update are not engineering progress.
+PAT 0.3.0 uses collector 7 and Python analyzer 3; ecosystem evidence remains version 1. Collection scope records the analysis profile, settings, selected analyzers and optional parser availability/versions. Earlier snapshots remain readable but do not gain new facts; rescan to collect missing evidence. Progress requires compatible scopes, so runs across these changes are not comparable. Existing reviews, goals and baselines remain saved without automatic reset. Newly visible leads, changed judgment or an installation update are not engineering progress.
 
 Rubric 4 adds **extensibility** as the seventh tunable dimension. Establish the needed variation, frequency and authors, then trace a representative extension through supported contracts. Distinguish a missing seam, brittle contract and speculative framework; recommend the simplest adequate seam with proportionate documentation, tests and isolation. A single-purpose project can appropriately target 0. Capability 4–5 needs demonstrated independent extensions and compatibility, not plugin counts. High extensibility and low rigidity can coexist. Earlier reviews and goals retain unconfigured extensibility rather than a zero. Rubric 4 starts a new comparison series; re-rating old evidence is not engineering progress.
+
+Rubric 5 adds **Performance & Scalability** as the eighth tunable dimension (`performance` in JSON/CLI). State the intended workload, response/resource objectives and growth expectations. Inspect bounded queries, pagination, batching, backpressure and shared-state contention. Source patterns are leads, not proven bottlenecks; capability 3 requires representative source-linked measurements, and higher levels require saturation/recovery evidence. A local utility need not scale horizontally. Rate optimization and capacity upkeep separately from raw resource use. Existing reviews and goals retain unknown/unconfigured performance; no target is silently saved, and rubric 5 starts a new comparison series.
+
+Whole-project maintainability review also traces **systemic debt**: domains, shared stores/transactions, duplicate models, lifecycle ownership, dependency cycles, and the edit/coordination cost of a representative valuable change. Monolithic deployment or size alone does not assign a grade. Prefer the smallest adequate ownership boundary; modularization need not introduce services. Group evidenced symptoms into root-cause initiatives and a target state before choosing the first slice.
 
 ## Local workflow
 
@@ -77,7 +82,7 @@ uv run --locked pat --state-dir /path/outside/repos/pat-state badge ASSESSMENT_I
   --dimension testing > docs/badges/testing.svg
 ```
 
-Use `--dimension summary` or any of the seven dimension names. SVG cards label capability and burden separately on their 0–5 scales; cyan and gold distinguish the axes, not good/bad grades. JSON badges retain `Cx/5` and `Bx/5`. Unknown values display `?`. The summary counts a dimension as known only when both scores are numeric. Reported critical/high finding counts include records in the selected snapshot and saved review; they are not an aggregate quality score or proof of absent risks. Unreviewed assessments and partial scans are labeled.
+Use `--dimension summary` or any of the eight dimension names. SVG cards label capability and burden separately on their 0–5 scales; cyan and gold distinguish the axes, not good/bad grades. JSON badges retain `Cx/5` and `Bx/5`. Unknown values display `?`. The summary counts a dimension as known only when both scores are numeric. Reported critical/high finding counts include records in the selected snapshot and saved review; they are not an aggregate quality score or proof of absent risks. Unreviewed assessments and partial scans are labeled.
 
 Commit the SVGs and reference them relative to the README on GitHub:
 
@@ -132,7 +137,7 @@ PAT uses Vulture's [`scan` and `get_unused_code` API](https://github.com/jendrik
 
 ### Optional Joern analysis
 
-PAT 0.4.0 can explicitly run a fixed [Joern 4.0.669](https://github.com/joernio/joern/releases/tag/v4.0.669) adapter for captured Python, JavaScript/TypeScript and Java source. These languages passed real adapter qualification under containment. Swift is unqualified and unsupported in this adapter release: SwiftAstGen's Foundation atomic file writes failed under containment, and no safe private redirect was established. PAT does not invoke it or weaken the sandbox; metadata reports `unqualified_languages` and scans retain an explicit unsupported gap. Prepare a trusted installation outside the assessed project, with [JDK 21](https://github.com/joernio/joern/blob/v4.0.669/README.md#requirements), then configure its absolute roots in PAT's environment:
+PAT 0.5.0 can explicitly run a fixed [Joern 4.0.669](https://github.com/joernio/joern/releases/tag/v4.0.669) adapter for captured Python, JavaScript/TypeScript and Java source. These languages passed real adapter qualification under containment. Swift is unqualified and unsupported in this adapter release: SwiftAstGen's Foundation atomic file writes failed under containment, and no safe private redirect was established. PAT does not invoke it or weaken the sandbox; metadata reports `unqualified_languages` and scans retain an explicit unsupported gap. Prepare a trusted installation outside the assessed project, with [JDK 21](https://github.com/joernio/joern/blob/v4.0.669/README.md#requirements), then configure its absolute roots in PAT's environment:
 
 ```bash
 export PAT_JOERN_HOME=/absolute/path/to/joern-cli
@@ -147,7 +152,9 @@ The adapter stages only bounded captured source in a private temporary workspace
 
 Joern runs **after core collection**, with a separate hard process budget: 120 seconds / 2 GiB heap for standard, or 1,800 seconds / 8 GiB for deep, with the JVM active-processor count set to two. Deep input is capped at 4,000 files, 128 MiB total and 8 MiB per file. These limits do not expand what core collection captured. Timeouts, omitted inputs, query/model limits and partial results remain visible; deep selects more work, not a different quality scale or complete analysis.
 
-Inspect the provider's coverage and provenance alongside its bounded method/reference, unread-binding and module-call facts. Generated nodes, abstract signatures and constructor parameters need source normalization. Unread parameters can preserve callbacks and public contracts; unresolved calls are not evidence of disuse. Current queries do not promise constant-guard reachability, taint analysis or full OSS dataflow (`dataflow: not_run`). Empty results, graph edges and producer confidence never establish safe deletion, runtime behavior or a score. Selecting Joern records a different evidence scope without resetting goals or turning added evidence into engineering progress.
+The JS/TS adapter uses byte-identical private transport files to bypass upstream test/hidden/declaration filename filters, then restores original captured paths in AST headers before CPG construction. Import literals, source text and offsets are preserved. Type maps and target configuration are disabled; `.mts`/`.cts` use TypeScript grammar. Fixed upstream size, line-count and maximum-line-length guards remain explicit coverage gaps.
+
+Inspect the provider's coverage and provenance alongside its bounded method/reference, unread-binding and module-call facts. Generated nodes, abstract signatures and constructor parameters need source normalization. Captured bindings and required public/callback signatures are suppressed as cleanup leads. Only source-supported method calls enter the primary dependency graph; broad producer-inferred targets remain separately queryable as `inferred_edge` records. Source methods are sampled before external stubs, and partial aggregate bounds remain explicit. Unread parameters can preserve callbacks and public contracts; unresolved calls are not evidence of disuse. Current queries do not promise constant-guard reachability, taint analysis or full OSS dataflow (`dataflow: not_run`). Empty results, graph edges and producer confidence never establish safe deletion, runtime behavior or a score. Selecting Joern records a different evidence scope without resetting goals or turning added evidence into engineering progress.
 
 For review of recent work, focus on the requested changes. Search existing helpers and references before recommending reuse, then propose the smallest useful change and its closest verifier. Assessment produces advice; separately authorized implementation may apply high-confidence behavior-preserving fixes and validate them. Preserve errors, permissions, transactions and concurrency. The [focused skill guidance](../.agents/skills/project-assess/references/simplify-review.md) supplies review detail without adding a required checklist, line-count target or plugin architecture.
 
@@ -264,13 +271,13 @@ assessed project.
 
 Goals use a **capability minimum** and **burden ceiling** per dimension. Select a suggested profile or save custom values; a scan never chooses goals for you.
 
-| Profile | Security | Testing | Documentation | Maintainability | Delivery | Operability | Extensibility | Burden ceiling, all dimensions |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `local-experiment` | 1 | 1 | 1 | 1 | 1 | 0 | 0 | 1 |
-| `internal-service` | 2 | 2 | 2 | 2 | 2 | 2 | 0 | 2 |
-| `public-production` | 3 | 3 | 2 | 3 | 3 | 3 | 0 | 2 |
-| `sensitive-critical` | 4 | 4 | 3 | 3 | 4 | 4 | 0 | 3 |
-| `framework` | 3 | 3 | 3 | 3 | 3 | 2 | 4 | 2 |
+| Profile | Security | Testing | Documentation | Maintainability | Delivery | Operability | Extensibility | Performance | Burden ceiling, all dimensions |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `local-experiment` | 1 | 1 | 1 | 1 | 1 | 0 | 0 | 1 | 1 |
+| `internal-service` | 2 | 2 | 2 | 2 | 2 | 2 | 0 | 2 | 2 |
+| `public-production` | 3 | 3 | 2 | 3 | 3 | 3 | 0 | 3 | 2 |
+| `sensitive-critical` | 4 | 4 | 3 | 3 | 4 | 4 | 0 | 3 | 3 |
+| `framework` | 3 | 3 | 3 | 3 | 3 | 2 | 4 | 2 | 2 |
 
 The framework or library preset is optional and editable. The risk-oriented presets impose no minimum extensibility: choose its target from actual variation needs, independently of security sensitivity. A target of 0 means no minimum requirement, not a claim of zero observed capability. A scan never saves a profile automatically.
 
@@ -281,7 +288,7 @@ uv run --locked pat --state-dir /path/outside/repos/assessment-state targets PRO
 uv run --locked pat --state-dir /path/outside/repos/assessment-state progress PROJECT_ID
 ```
 
-Use the current goal revision returned by the tool for later edits; concurrent stale edits are rejected. Custom `targets --input FILE` supplies all seven dimensions, each with `capability_min` and `burden_max`. Profiles and custom values express user preferences; they never change findings or certify that risk is acceptable.
+Use the current goal revision returned by the tool for later edits; concurrent stale edits are rejected. Custom `targets --input FILE` supplies all eight dimensions, each with `capability_min` and `burden_max`. Profiles and custom values express user preferences; they never change findings or certify that risk is acceptable.
 
 For each known dimension:
 

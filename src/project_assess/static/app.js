@@ -806,7 +806,7 @@ async function init() {
   state.rubric = rubric;
   renderAnalyzers(analyzers);
   dims = Object.keys(rubric.dimensions);
-  titles = Object.fromEntries(dims.map((d) => [d, d[0].toUpperCase() + d.slice(1)]));
+  titles = Object.fromEntries(dims.map((d) => [d, rubric.dimensions[d].title || d[0].toUpperCase() + d.slice(1)]));
   for (const [key, profile] of Object.entries(rubric.profiles || {})) {
     const option = node("option", profile.title);
     option.value = key;

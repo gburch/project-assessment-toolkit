@@ -87,7 +87,7 @@ def test_badges_are_deterministic_shields_data_and_accessible_standalone_svg(rep
 
     assert set(data) == {"schemaVersion", "label", "message", "color", "pat"}
     assert data["schemaVersion"] == 1 and data["label"] == "PAT"
-    assert "7/7 known" in data["message"] and "reported:" in data["message"]
+    assert "8/8 known" in data["message"] and "reported:" in data["message"]
     assert data["pat"]["revision"] == "abcdef0123ab"
     assert data["pat"]["source_digest"] == report["assessment"]["source"]["manifest_digest"]
     assert data["pat"]["reviewed_at"] == report["review"]["created_at"]
@@ -128,7 +128,7 @@ def test_badges_are_deterministic_shields_data_and_accessible_standalone_svg(rep
         assert_readable_text_bounds(card)
         visible = visible_text(card)
         if dimension == "summary":
-            assert "7/7" in visible and "known" in visible.lower()
+            assert "8/8" in visible and "known" in visible.lower()
             assert re.search(r"0\s+critical", visible, re.IGNORECASE)
             assert re.search(r"0\s+high", visible, re.IGNORECASE)
         else:
@@ -146,7 +146,7 @@ def test_summary_counts_both_known_axes_without_averaging_or_treating_zero_as_un
 
     data = badge_data(report)
 
-    assert data["pat"]["known_dimensions"] == 3 and "3/7 known" in data["message"]
+    assert data["pat"]["known_dimensions"] == 4 and "4/8 known" in data["message"]
     assert "C0/5 B0/5" in badge_data(report, "maintainability")["message"]
     assert "C?/5 B2/5" in badge_data(report, "testing")["message"]
     assert "C3/5 B?/5" in badge_data(report, "documentation")["message"]
@@ -251,6 +251,7 @@ def test_mismatched_review_is_rejected_instead_of_badging_a_different_snapshot(r
 def test_same_rubric_historical_review_retains_legacy_unknown_dimension(report):
     report["assessment"]["rubric_version"] = report["review"]["rubric_version"] = "3"
     report["review"]["ratings"].pop("extensibility")
+    report["review"]["ratings"].pop("performance")
 
     data = badge_data(report, "extensibility")
 

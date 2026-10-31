@@ -156,7 +156,7 @@ def test_strengthening_names_full_target_before_optional_first_milestone(project
         assert item["target_anchor"] == anchors[dimension]["capability"][4]
         assert anchors[dimension]["capability"][4] in item["next_step"]
         assert "system changes" in item["next_step"]
-    assert len({item["verification"] for item in alignment["dimensions"].values()}) == 7
+    assert len({item["verification"] for item in alignment["dimensions"].values()}) == 8
 
 
 def test_framework_rebalance_plans_full_extension_goal_with_cost_constraint(project):

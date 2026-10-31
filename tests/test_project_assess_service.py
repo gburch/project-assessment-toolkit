@@ -457,8 +457,10 @@ def legacy_six_dimension_state(assessed):
             elif table == "reviews":
                 document["rubric_version"] = "3"
                 document["ratings"].pop("extensibility")
+                document["ratings"].pop("performance")
             else:
                 document["targets"].pop("extensibility")
+                document["targets"].pop("performance")
             db.execute(f"UPDATE {table} SET data=? WHERE rowid=?", (json.dumps(document), row_id))
             stored[table] = document
     return service, root, stored
@@ -487,7 +489,7 @@ def test_legacy_six_dimension_history_reads_without_inventing_a_seventh_target(
     assert history["assessments"] == [snapshot]
     assert history["reviews"] == [old_review]
     assert history["goals"] == [old_goals]
-    assert progress["missing_targets"] == ["extensibility"]
+    assert progress["missing_targets"] == ["extensibility", "performance"]
     assert not progress["comparable"] and progress["event"] == "not_comparable"
     assert progress["dimensions"]["extensibility"]["capability_gap"] is None
     assert progress["dimensions"]["extensibility"]["burden_gap"] is None
@@ -1312,3 +1314,57 @@ def test_javascript_doctor_and_query_share_source_bound_native_leads(tmp_path):
     assert queried["items"] and queried["items"][0]["locations"][0]["path"] == "src/app.ts"
     snippet = service.query_evidence(snapshot["id"], view="snippets", path="src/app.ts", line=1)
     assert any("classify" in row["excerpt"] for row in snippet["items"])
+
+
+def test_seven_dimension_history_requires_explicit_performance_target(assessed):
+    service, _, snapshot = assessed
+    reviewed(service, snapshot, capability=3, burden=1)
+    service.set_targets(snapshot["project_id"], profile="internal-service", expected_revision=0)
+    original = {}
+    with sqlite3.connect(service.db_path) as db:
+        for table in ("assessments", "reviews", "goals"):
+            row_id, raw = db.execute(f"SELECT rowid,data FROM {table}").fetchone()
+            document = json.loads(raw)
+            if table != "goals":
+                document["rubric_version"] = "4"
+            if table == "reviews":
+                document["ratings"].pop("performance")
+            elif table == "goals":
+                document["targets"].pop("performance")
+            db.execute(f"UPDATE {table} SET data=? WHERE rowid=?", (json.dumps(document), row_id))
+            original[table] = document
+    report = service.get_report(snapshot["id"])
+    assert report["review"] == original["reviews"]
+    assert report["goals"] == original["goals"]
+    progress = service.progress(snapshot["project_id"])
+    assert progress["missing_targets"] == ["performance"]
+    assert progress["dimensions"]["performance"]["capability_gap"] is None
+    assert progress["engineering_progress_steps"] is None
+    with pytest.raises(ValueError, match="performance"):
+        service.set_targets(
+            snapshot["project_id"], original["goals"]["targets"], expected_revision=1
+        )
+    assert service.history(snapshot["project_id"])["goals"] == [original["goals"]]
+    chosen = service.set_targets(
+        snapshot["project_id"], profile="internal-service", expected_revision=1
+    )
+    assert chosen["targets"]["performance"] == {"capability_min": 2, "burden_max": 2}
+    assert service.get_report(snapshot["id"])["review"] == original["reviews"]
+
+
+def test_performance_can_remain_unknown_with_other_dimensions_scored(assessed):
+    service, _, snapshot = assessed
+    template = service.review_template(snapshot["id"])
+    evidence_id = snapshot["evidence"][0]["id"]
+    for dimension, rating in template["ratings"].items():
+        if dimension != "performance":
+            rating.update(capability=3, burden=1, confidence="medium", evidence_ids=[evidence_id])
+    template["ratings"]["performance"]["rationale"] = (
+        "No workload measurements; capacity remains unknown."
+    )
+    saved = service.submit_review(snapshot["id"], template)
+    assert saved["ratings"]["performance"]["capability"] is None
+    service.set_targets(snapshot["project_id"], profile="internal-service", expected_revision=0)
+    progress = service.progress(snapshot["project_id"])
+    assert progress["dimensions"]["performance"]["capability_gap"] is None
+    assert progress["remaining_steps"] is None

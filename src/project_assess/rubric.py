@@ -15,8 +15,9 @@ DIMENSIONS = (
     "delivery",
     "operability",
     "extensibility",
+    "performance",
 )
-RUBRIC_VERSION = "4"
+RUBRIC_VERSION = "5"
 
 _BURDEN_GUIDANCE = {
     "principle": (
@@ -111,6 +112,23 @@ _ANCHORS = {
     },
     "maintainability": {
         "checks": {
+            "system_debt": {
+                "purpose": "Find accumulated change and state-ownership costs across the whole system.",
+                "questions": [
+                    "Which domains share stores, transactions, orchestration or lifecycle ownership?",
+                    "Where do duplicate models, migrations or dependency cycles propagate a representative valuable change?",
+                    "What coordination and failure blast radius result, and what is the smallest adequate boundary?",
+                ],
+                "guardrails": (
+                    "Size and a monolithic deployment are context, not defects by themselves. "
+                    "Trace real edit paths and state ownership; a cohesive in-process module may suffice. "
+                    "Preserve authority, transaction and recovery guarantees."
+                ),
+                "reporting": (
+                    "Group symptoms into evidenced root causes and a right-sized target state, "
+                    "then choose a first slice. Sampling and unexamined domains remain explicit."
+                ),
+            },
             "rigidity": {
                 "purpose": "Find unnecessary resistance to making a valuable change.",
                 "questions": [
@@ -247,6 +265,47 @@ _ANCHORS = {
             "Extension machinery and ecosystem compatibility dominate development of useful behavior.",
         ],
     },
+    "performance": {
+        "title": "Performance & Scalability",
+        "checks": {
+            "workload_fit": {
+                "purpose": "Match response time, capacity and resource use to the intended workload and growth.",
+                "questions": [
+                    "What workload, latency, throughput, memory and I/O expectations matter to users?",
+                    "Do bounded queries, pagination, batching, concurrency and backpressure cover relevant paths?",
+                    "Where can repeated I/O, unbounded materialization, blocking work or shared-state contention amplify load?",
+                    "What measurements demonstrate headroom, saturation behavior and recovery for that workload?",
+                ],
+                "guardrails": (
+                    "A local utility need not scale horizontally. Source patterns are risk leads, "
+                    "not measured bottlenecks. Missing workload or execution evidence stays explicit; "
+                    "load tests and target execution require separate authorization. Raw latency or "
+                    "memory consumption is not upkeep burden."
+                ),
+                "reporting": (
+                    "State workload assumptions, inspected paths, source-supported controls and "
+                    "measurement gaps. Recommend the smallest useful measurement or change; account "
+                    "for tuning, cache invalidation, capacity management and operating upkeep separately."
+                ),
+            }
+        },
+        "capability": [
+            "Observed intended workloads fail basic response or resource expectations without effective controls.",
+            "Basic resource awareness and local bounds support a small stated workload; capacity remains unverified.",
+            "Deliberate query, resource and concurrency controls cover important workload paths with a repeatable measurement approach.",
+            "Representative source-linked measurements demonstrate workload objectives and usable capacity headroom.",
+            "Current load and saturation exercises validate growth, bounded degradation and recovery across applicable paths.",
+            "Repeated independent workload evidence demonstrates sustained efficiency and capacity under demanding growth and adverse conditions.",
+        ],
+        "burden": [
+            "Performance-related upkeep and capacity management are negligible.",
+            "Simple limits and occasional measurement require light upkeep.",
+            "Routine performance checks, tuning and capacity work remain manageable.",
+            "Repeated tuning, contention workarounds or cache coordination materially slow changes or operations.",
+            "Optimization machinery and capacity coordination dominate many ordinary changes.",
+            "Performance and scaling machinery consume most available engineering effort.",
+        ],
+    },
 }
 
 
@@ -261,11 +320,11 @@ def _profile(title: str, minima: tuple[int, ...], burden_max: int) -> dict[str, 
 
 
 PROFILES = {
-    "local-experiment": _profile("Local experiment", (1, 1, 1, 1, 1, 0, 0), 1),
-    "internal-service": _profile("Internal service", (2, 2, 2, 2, 2, 2, 0), 2),
-    "public-production": _profile("Public production", (3, 3, 2, 3, 3, 3, 0), 2),
-    "sensitive-critical": _profile("Sensitive or critical", (4, 4, 3, 3, 4, 4, 0), 3),
-    "framework": _profile("Framework or library", (3, 3, 3, 3, 3, 2, 4), 2),
+    "local-experiment": _profile("Local experiment", (1, 1, 1, 1, 1, 0, 0, 1), 1),
+    "internal-service": _profile("Internal service", (2, 2, 2, 2, 2, 2, 0, 2), 2),
+    "public-production": _profile("Public production", (3, 3, 2, 3, 3, 3, 0, 3), 2),
+    "sensitive-critical": _profile("Sensitive or critical", (4, 4, 3, 3, 4, 4, 0, 3), 3),
+    "framework": _profile("Framework or library", (3, 3, 3, 3, 3, 2, 4, 2), 2),
 }
 
 
