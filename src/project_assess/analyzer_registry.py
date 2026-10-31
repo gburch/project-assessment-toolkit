@@ -1,12 +1,15 @@
-"""Explicit optional analyzers, never project-discovered plugins or command runners."""
+"""Fixed optional analyzers, never project-discovered plugins or arbitrary commands."""
 
 from __future__ import annotations
 
 from types import MappingProxyType
 
+from .joern_analysis import analyze_joern, joern_info, joern_limits
 from .vulture_analysis import analyze_vulture, vulture_info
 
-_BUILTINS = MappingProxyType({"vulture": (vulture_info, analyze_vulture)})
+_BUILTINS = MappingProxyType(
+    {"joern": (joern_info, analyze_joern), "vulture": (vulture_info, analyze_vulture)}
+)
 
 
 def registered_analyzer_names():
@@ -26,6 +29,11 @@ def validate_analyzers(names):
 def list_analyzers():
     """Native collection remains automatic; this list contains opt-in providers only."""
     return [_BUILTINS[name][0]() for name in registered_analyzer_names()]
+
+
+def dedicated_phase_limits(name, analysis_profile):
+    """External Joern work has its own explicit budget after core collection."""
+    return joern_limits(analysis_profile) if name == "joern" else None
 
 
 def run_analyzer(

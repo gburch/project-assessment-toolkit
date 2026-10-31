@@ -29,14 +29,18 @@ def installed():
 
 
 def test_registry_is_small_static_opt_in_and_metadata_listing_does_not_import_provider(monkeypatch):
+    original_import = importlib.import_module
+
     def forbidden_import(name):
-        raise AssertionError("Listing metadata must not import an analyzer")
+        if name == "vulture":
+            raise AssertionError("Listing metadata must not import the producer")
+        return original_import(name)
 
     monkeypatch.setattr(analysis.importlib, "import_module", forbidden_import)
     descriptors = registry.list_analyzers()
-    assert len(descriptors) == 1
-    assert descriptors[0]["name"] == "vulture" and descriptors[0]["optional"]
-    assert descriptors[0]["license"] == "MIT"
+    assert {row["name"] for row in descriptors} == {"joern", "vulture"}
+    vulture = next(row for row in descriptors if row["name"] == "vulture")
+    assert vulture["optional"] and vulture["license"] == "MIT"
     assert registry.validate_analyzers(None) == registry.validate_analyzers([]) == ()
     assert registry.validate_analyzers(["vulture"]) == ("vulture",)
     assert registry.validate_analyzers(("vulture",)) == ("vulture",)

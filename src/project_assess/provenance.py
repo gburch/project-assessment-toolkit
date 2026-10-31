@@ -52,7 +52,7 @@ def tool_info():
         skills = package.parents[1] / ".agents/skills"
     hashes = {}
     for path in sorted(package.rglob("*")):
-        if path.is_file() and path.suffix in {".py", ".js", ".html", ".css"}:
+        if path.is_file() and path.suffix in {".py", ".js", ".html", ".css", ".sc"}:
             hashes[path.relative_to(package).as_posix()] = hashlib.sha256(
                 path.read_bytes()
             ).hexdigest()

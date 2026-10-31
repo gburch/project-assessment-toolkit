@@ -18,7 +18,7 @@ from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
-from .analyzer_registry import run_analyzer, validate_analyzers
+from .analyzer_registry import dedicated_phase_limits, run_analyzer, validate_analyzers
 from .budgets import get_budget, pattern_allocations
 from .capture_context import attach_source_windows
 from .diagnostics import sarif_report
@@ -734,6 +734,13 @@ def collect(
         "max_static_definitions": MAX_STATIC_DEFINITIONS,
         "max_git_output_bytes": MAX_GIT_OUTPUT_BYTES,
     }
+    dedicated = {
+        name: limits
+        for name in analyzers
+        if (limits := dedicated_phase_limits(name, budget.name)) is not None
+    }
+    if dedicated:
+        configured_limits["dedicated_analyzer_phases"] = dedicated
     deadline = time.monotonic() + budget.deadline_seconds
     root = Path(root).expanduser().absolute()
     if root.is_symlink() or not root.is_dir():
@@ -1331,6 +1338,18 @@ def collect(
         )
     )
     optional_analyses = {}
+
+    def add_optional_evidence(name, result):
+        payload = json.dumps(result, sort_keys=True).encode()
+        evidence_id = add_evidence(f"<{name}-analysis>", payload, "analyzer-analysis", "", result)
+        facts.setdefault("optional_analysis", {})[name] = {
+            key: value
+            for key, value in result.items()
+            if key not in {"candidates", "candidate_index", "modules", "topology", "hotspots"}
+        }
+        facts["optional_analysis"][name]["evidence_id"] = evidence_id
+        gaps.extend(f"Optional analyzer {name}: {gap}" for gap in result["gaps"])
+
     if analyzers:
         source_evidence = {
             entry["path"]: entry for entry in evidence if entry["path"] in captured_sources
@@ -1351,6 +1370,8 @@ def collect(
             "manifest_digest": _digest(sorted(manifest, key=lambda item: item["path"])),
         }
         for name in analyzers:
+            if name in dedicated:
+                continue
             optional_analyses[name] = _redact_data(
                 run_analyzer(
                     name,
@@ -1368,6 +1389,7 @@ def collect(
         _redact,
         MAX_STATIC_EVIDENCE_BYTES,
     )
+    context_bytes_used = analysis["source_context"]["retained_bytes"]
     payload = json.dumps(analysis, sort_keys=True).encode()
     evidence_id = add_evidence("<static-analysis>", payload, "static-analysis", "", analysis)
     facts["static_analysis"] = {
@@ -1400,20 +1422,8 @@ def collect(
     }
     facts["source_analysis"]["evidence_id"] = generic_id
     gaps.extend(generic_analysis["gaps"])
-    if optional_analyses:
-        facts["optional_analysis"] = {}
-        for name, result in optional_analyses.items():
-            payload = json.dumps(result, sort_keys=True).encode()
-            evidence_id = add_evidence(
-                f"<{name}-analysis>", payload, "analyzer-analysis", "", result
-            )
-            facts["optional_analysis"][name] = {
-                key: value
-                for key, value in result.items()
-                if key not in {"candidates", "candidate_index", "modules", "topology", "hotspots"}
-            }
-            facts["optional_analysis"][name]["evidence_id"] = evidence_id
-            gaps.extend(f"Optional analyzer {name}: {gap}" for gap in result["gaps"])
+    for name, result in optional_analyses.items():
+        add_optional_evidence(name, result)
     if documentation_texts and expired():
         analysis_omissions.append({"analysis": "documentation", "reason": "deadline"})
     if documentation_texts and not expired():
@@ -1637,6 +1647,30 @@ def collect(
     )
     if facts["javascript"]["files"]:
         gaps.append("JavaScript/TypeScript counts are lexical estimates, not semantic analysis")
+    # Core collection has finished, including documentation, supplied reports and
+    # its cooperative deadline check. Explicit external work cannot consume that
+    # budget or starve another analyzer. Each provider enforces its own hard cap.
+    for name in dedicated:
+        result = _redact_data(
+            run_analyzer(
+                name,
+                captured_rows,
+                snapshot=snapshot_identity,
+                redact=_redact,
+                analysis_profile=budget.name,
+                deadline=None,
+            )
+        )
+        attach_source_windows(
+            [result],
+            captured_sources,
+            evidence,
+            _redact,
+            max(0, MAX_STATIC_EVIDENCE_BYTES - context_bytes_used),
+        )
+        context_bytes_used += result["source_context"]["retained_bytes"]
+        optional_analyses[name] = result
+        add_optional_evidence(name, result)
     scope = {
         "collector_version": 7,
         "rubric_version": RUBRIC_VERSION,

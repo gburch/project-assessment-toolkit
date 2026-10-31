@@ -130,6 +130,25 @@ uv run --extra vulture --locked pat --state-dir /path/outside/repos/assessment-s
 
 PAT uses Vulture's [`scan` and `get_unused_code` API](https://github.com/jendrikseipp/vulture/blob/main/vulture/core.py) on bounded captured strings, not filesystem scavenging, project configuration or whitelist files. Producer confidence is separate from PAT confidence and safe-removal judgment; dynamic uses, public contracts and unreachable generator markers require inspection. Vulture has its own input/work limits and reports omissions. The fixed built-in registry accepts only named trusted adapters; installation does not autorun them or discover project plugins. Vulture remains a separate [MIT-licensed dependency](https://github.com/jendrikseipp/vulture/blob/main/LICENSE.txt); no upstream code is vendored. Optional providers use `analyzer-analysis`; Ruff and SARIF retain their compatible evidence kinds.
 
+### Optional Joern analysis
+
+PAT 0.4.0 can explicitly run a fixed [Joern 4.0.669](https://github.com/joernio/joern/releases/tag/v4.0.669) adapter for captured Python, JavaScript/TypeScript and Java source. These languages passed real adapter qualification under containment. Swift is unqualified and unsupported in this adapter release: SwiftAstGen's Foundation atomic file writes failed under containment, and no safe private redirect was established. PAT does not invoke it or weaken the sandbox; metadata reports `unqualified_languages` and scans retain an explicit unsupported gap. Prepare a trusted installation outside the assessed project, with [JDK 21](https://github.com/joernio/joern/blob/v4.0.669/README.md#requirements), then configure its absolute roots in PAT's environment:
+
+```bash
+export PAT_JOERN_HOME=/absolute/path/to/joern-cli
+export PAT_JOERN_JAVA_HOME=/absolute/path/to/jdk-home
+uv run --locked pat analyzers
+uv run --locked pat --state-dir /path/outside/repos/assessment-state scan /path/to/project --analysis-profile deep --analyzer joern --brief
+```
+
+Repeat `--analyzer vulture` when that separate provider is also wanted and installed. The UI exposes the same registered provider selection. No Python extra installs Joern or its JDK; PAT never downloads them during scanning. Joern remains a separate [Apache-2.0-licensed tool](https://github.com/joernio/joern/blob/v4.0.669/LICENSE), with separate JDK distribution terms.
+
+The adapter stages only bounded captured source in a private temporary workspace and runs PAT's bundled query. It does not run assessed code, builds, dependency installers, project configuration, scripts or plugins. Execution requires a working `sandbox-exec` on macOS or `bwrap` on Linux; missing tools or unavailable sandboxing produce explicit unavailable/unsupported evidence. It does not fall back to unsandboxed execution or arbitrary user queries.
+
+Joern runs **after core collection**, with a separate hard process budget: 120 seconds / 2 GiB heap for standard, or 1,800 seconds / 8 GiB for deep, with the JVM active-processor count set to two. Deep input is capped at 4,000 files, 128 MiB total and 8 MiB per file. These limits do not expand what core collection captured. Timeouts, omitted inputs, query/model limits and partial results remain visible; deep selects more work, not a different quality scale or complete analysis.
+
+Inspect the provider's coverage and provenance alongside its bounded method/reference, unread-binding and module-call facts. Generated nodes, abstract signatures and constructor parameters need source normalization. Unread parameters can preserve callbacks and public contracts; unresolved calls are not evidence of disuse. Current queries do not promise constant-guard reachability, taint analysis or full OSS dataflow (`dataflow: not_run`). Empty results, graph edges and producer confidence never establish safe deletion, runtime behavior or a score. Selecting Joern records a different evidence scope without resetting goals or turning added evidence into engineering progress.
+
 For review of recent work, focus on the requested changes. Search existing helpers and references before recommending reuse, then propose the smallest useful change and its closest verifier. Assessment produces advice; separately authorized implementation may apply high-confidence behavior-preserving fixes and validate them. Preserve errors, permissions, transactions and concurrency. The [focused skill guidance](../.agents/skills/project-assess/references/simplify-review.md) supplies review detail without adding a required checklist, line-count target or plugin architecture.
 
 For an owner-requested Python lint pass, run Ruff separately from the PAT checkout and import its JSON afterward:

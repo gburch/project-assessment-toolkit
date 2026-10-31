@@ -4,6 +4,8 @@ import sys
 
 import pytest
 
+from project_assess.analyzer_registry import registered_analyzer_names
+
 mcp = pytest.importorskip("mcp", reason="Run with --extra mcp for protocol integration tests")
 from mcp.client.stdio import stdio_client  # noqa: E402
 
@@ -103,7 +105,9 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 ]
                 available = await session.call_tool("list_analyzers", {})
                 assert not available.is_error
-                assert available.structured_content["analyzers"][0]["name"] == "vulture"
+                assert {
+                    entry["name"] for entry in available.structured_content["analyzers"]
+                } == set(registered_analyzer_names())
                 deep = await session.call_tool(
                     "start_assessment",
                     {"root": str(root), "reports": [str(supplied)], "analysis_profile": "deep"},

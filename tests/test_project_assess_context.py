@@ -115,6 +115,21 @@ def test_tool_identity_separates_available_instructions_from_read_claims():
     assert all(len(row["sha256"]) == 64 for row in first["available_instructions"])
 
 
+def test_executable_query_changes_tool_identity(tmp_path, monkeypatch):
+    from project_assess import provenance
+
+    package = tmp_path / "package"
+    (package / "resources").mkdir(parents=True)
+    module = package / "provenance.py"
+    module.write_text("# Synthetic installed package\n")
+    query = package / "resources/joern.sc"
+    query.write_text("// First trusted query\n")
+    monkeypatch.setattr(provenance, "__file__", str(module))
+    before = tool_info()["code_digest"]
+    query.write_text("// Changed analysis behavior\n")
+    assert tool_info()["code_digest"] != before
+
+
 def test_source_critical_findings_survive_evolve_without_review_or_goals(tmp_path):
     _, _, _, snapshot, entry = fixture(tmp_path, "value = 1\n")
     snapshot = deepcopy(snapshot)

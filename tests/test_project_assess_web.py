@@ -9,6 +9,7 @@ from copy import deepcopy
 
 import pytest
 
+from project_assess.analyzer_registry import registered_analyzer_names
 from project_assess.service import AssessmentService, ConflictError
 from project_assess.web import MAX_BODY, create_server
 
@@ -134,8 +135,8 @@ def test_report_bootstrap_assets_and_session(running_report):
     projects = json.loads(request(server, path="/api/projects")[2])
     assert projects[0]["name"].startswith("<script>")
     analyzers = json.loads(request(server, path="/api/analyzers")[2])
-    assert [entry["name"] for entry in analyzers] == ["vulture"]
-    assert type(analyzers[0]["available"]) is bool and analyzers[0]["optional"]
+    assert [entry["name"] for entry in analyzers] == list(registered_analyzer_names())
+    assert all(type(entry["available"]) is bool and entry["optional"] for entry in analyzers)
     assert request(server, path="/api/analyzers?path=/etc/passwd")[0] == 404
 
 
@@ -512,7 +513,11 @@ def test_deep_optional_analysis_and_generic_source_sarif_inspection_preserve_goa
             assert current["facts"]["collection"]["analysis_profile"] == "deep"
             assert current["facts"]["collection"]["analyzers"] == ["vulture"]
             optional = current["facts"]["optional_analysis"]["vulture"]
-            available = json.loads(request(server, path="/api/analyzers")[2])[0]["available"]
+            available = next(
+                entry["available"]
+                for entry in json.loads(request(server, path="/api/analyzers")[2])
+                if entry["name"] == "vulture"
+            )
             assert optional["status"] == ("complete" if available else "unavailable")
             assert optional["configuration"]["analysis_profile"] == "deep"
             assert service.history(initial["project_id"])["goals"] == [goals]

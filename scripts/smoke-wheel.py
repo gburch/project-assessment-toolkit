@@ -15,17 +15,20 @@ from project_assess.collector import _redact, collect
 
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = r"""
-import importlib.metadata as metadata, importlib.util, json, re, sys
+import hashlib, importlib.metadata as metadata, importlib.util, json, re, sys
 from pathlib import Path
 import project_assess.cli as cli
+from project_assess.analyzer_registry import list_analyzers
 base = Path(cli.__file__).resolve().parent
 assert base.is_relative_to(Path(sys.prefix).resolve())
 assert not base.is_relative_to(Path(sys.argv[1]).resolve())
 assert importlib.util.find_spec('mcp') is None
 assert importlib.util.find_spec('tree_sitter') is None
 assert importlib.util.find_spec('vulture') is None
-for name in ('static/index.html', 'static/app.js', 'static/style.css', 'docs/PROJECT_ASSESS.md'):
+for name in ('static/index.html', 'static/app.js', 'static/style.css', 'docs/PROJECT_ASSESS.md', 'resources/joern.sc'):
     assert (base / name).is_file() and (base / name).read_bytes()
+joern = next(row for row in list_analyzers() if row['name'] == 'joern')
+assert not joern['available']
 for name in ('project-assess', 'doc-value', 'test-value'):
     skill = base / '.agents/skills' / name / 'SKILL.md'
     assert skill.is_file()
@@ -35,7 +38,9 @@ for name in ('project-assess', 'doc-value', 'test-value'):
             assert resource.is_relative_to(base) and resource.is_file()
 print(json.dumps({'version': metadata.version('pat-assess'), 'python': sys.version.split()[0],
                   'origin': str(base.relative_to(sys.prefix)), 'mcp_installed': False,
-                  'analysis_installed': False, 'vulture_installed': False}))
+                  'analysis_installed': False, 'vulture_installed': False,
+                  'joern_available': False,
+                  'joern_query_sha256': hashlib.sha256((base / 'resources/joern.sc').read_bytes()).hexdigest()}))
 """
 
 
@@ -58,7 +63,8 @@ def main():
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("PYTHON", "UV_")) and key != "VIRTUAL_ENV"
+        if not key.startswith(("PYTHON", "UV_"))
+        and key not in {"VIRTUAL_ENV", "PAT_JOERN_HOME", "PAT_JOERN_JAVA_HOME"}
     }
     env.update(UV_OFFLINE="1", UV_PYTHON_DOWNLOADS="never")
     if "UV_CACHE_DIR" in os.environ:
@@ -152,7 +158,9 @@ def main():
             ]
         )
         receipt["installation"] = json.loads(run([python, "-I", "-c", PROBE, ROOT]))
-        receipt["checks"].append("isolated wheel origins, bundled resources and core without MCP")
+        receipt["checks"].append(
+            "isolated wheel origins, bundled query/resources and core without optional tools"
+        )
         project, state = output / "project", output / "state"
         project.mkdir()
         (project / "app.py").write_text("def add(a, b):\n    return a + b\n")
@@ -191,11 +199,21 @@ def main():
             "deep",
             "--analyzer",
             "vulture",
+            "--analyzer",
+            "joern",
             state_dir=output / "optional-state",
         )
         check(
             optional["facts"]["optional_analysis"]["vulture"]["status"] == "unavailable",
             "core scan preserves explicit unavailable optional-analyzer evidence",
+        )
+        joern = optional["facts"]["optional_analysis"]["joern"]
+        check(
+            not joern["available"]
+            and joern["status"] in {"unavailable", "unsupported"}
+            and joern["gaps"]
+            and optional["facts"]["python"]["files"] == 1,
+            "core scan preserves facts and explicit unavailable Joern evidence without external tools",
         )
         review = cli("review-template", snapshot["id"])
         for rating in review["ratings"].values():

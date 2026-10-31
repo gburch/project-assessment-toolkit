@@ -228,3 +228,58 @@ def test_another_trusted_provider_uses_registry_and_existing_interfaces_without_
     diagnosis = service.doctor(snapshot["id"])
     assert diagnosis["selection"]["families"]["analyzer:synthetic_java"]["returned"] == 1
     assert len(calls) == 1 and calls[0]["analysis_profile"] == "standard"
+
+
+def test_dedicated_joern_phase_preserves_core_reports_and_other_analyzer_budget(
+    tmp_path, monkeypatch
+):
+    from project_assess import collector
+
+    root, service = project(tmp_path)
+    (root / "README.md").write_text("# Setup\nUse the documented command.\n")
+    report = tmp_path / "junit.xml"
+    report.write_text('<testsuite><testcase name="boundary"/></testsuite>')
+    clock, events = [0.0], []
+    monkeypatch.setattr(collector.time, "monotonic", lambda: clock[0])
+    original_report = collector._report
+
+    def imported(payload):
+        events.append("junit")
+        return original_report(payload)
+
+    def analyze(name, sources, **options):
+        events.append(name)
+        assert sources and options["snapshot"]["manifest_digest"]
+        if name == "joern":
+            assert events == ["vulture", "junit", "joern"]
+            assert options["deadline"] is None
+            clock[0] += 600  # Longer than core collection; bounded by the provider itself.
+        else:
+            assert options["deadline"] > clock[0]
+        return {
+            "schema_version": 1,
+            "analyzer": {"name": name, "version": "synthetic"},
+            "configuration": {},
+            "limits": {},
+            "coverage": {"files": len(sources)},
+            "status": "complete",
+            "gaps": [],
+            "candidates": [],
+            "candidate_index": [],
+            "modules": [],
+            "summary": {"candidate_count": 0},
+        }
+
+    monkeypatch.setattr(collector, "_report", imported)
+    monkeypatch.setattr(collector, "run_analyzer", analyze)
+    snapshot = service.scan(
+        root, reports=[report], analysis_profile="deep", analyzers=["joern", "vulture"]
+    )
+    assert events == ["vulture", "junit", "joern"]
+    assert snapshot["facts"]["reports"]["junit"]["tests"] == 1
+    assert any(row["kind"] == "documentation-analysis" for row in snapshot["evidence"])
+    assert not snapshot["facts"]["collection"]["deadline_exceeded"]
+    assert snapshot["facts"]["collection"]["unprocessed_reports"] == []
+    limits = snapshot["facts"]["collection"]["limits"]["dedicated_analyzer_phases"]
+    assert limits["joern"]["seconds"] == 1800
+    assert snapshot["facts"]["optional_analysis"].keys() == {"joern", "vulture"}

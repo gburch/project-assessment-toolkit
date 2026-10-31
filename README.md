@@ -55,6 +55,8 @@ Version **0.3.0** adds standard/deep collection budgets, broad complexity metric
 
 Version **0.3.2** rejects unsupported or incomplete state before writing and initializes new state atomically. Static test evidence labels bare `assert` counts separately from recognized unittest-style calls; changed counting semantics start a new comparison scope. Vulture's redundant conditions remain distinct from unreachable statements.
 
+Version **0.4.0** adds an opt-in Joern provider for bounded captured-source method/reference and call evidence across Python, JavaScript/TypeScript and Java. Swift remains explicitly unsupported in this adapter release. It uses trusted preinstalled tools, mandatory sandboxing and a fixed packaged query; deep mode has a separate larger process budget. Partial or unresolved evidence remains explicit, with no automatic scores or safe-deletion claims. See [Joern setup and limits](docs/PROJECT_ASSESS.md#optional-joern-analysis).
+
 ## PAT's own assessment
 
 <p>
