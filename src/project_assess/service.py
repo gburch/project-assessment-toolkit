@@ -86,6 +86,51 @@ def _gap(score, target, axis):
     return max(target - score if axis == "capability" else score - target, 0)
 
 
+def _coverage_summary(coverage):
+    """Keep coverage totals visible without copying per-file evidence into summaries."""
+    if not isinstance(coverage, dict) or not isinstance(coverage.get("batches"), list):
+        return coverage
+
+    def detail_table(value, field, path):
+        if not isinstance(value, dict) or not isinstance(value.get(field), list):
+            return value
+        return {
+            **{key: item for key, item in value.items() if key != field},
+            field + "_retained_in_evidence": len(value[field]),
+            "details_available": True,
+            "details_path": path,
+        }
+
+    batches = []
+    for index, batch in enumerate(coverage["batches"]):
+        if not isinstance(batch, dict):
+            batches.append(batch)
+            continue
+        projected = dict(batch)
+        sections = batch.get("model_sections", {})
+        methods = sections.get("methods", {}) if isinstance(sections, dict) else {}
+        if isinstance(methods, dict) and "file_coverage" in methods:
+            projected["model_sections"] = {
+                **sections,
+                "methods": {
+                    **methods,
+                    "file_coverage": detail_table(
+                        methods["file_coverage"],
+                        "rows",
+                        f"stats.coverage.batches[{index}].model_sections.methods.file_coverage.rows",
+                    ),
+                },
+            }
+        if "ast_compatibility" in batch:
+            projected["ast_compatibility"] = detail_table(
+                batch["ast_compatibility"],
+                "files",
+                f"stats.coverage.batches[{index}].ast_compatibility.files",
+            )
+        batches.append(projected)
+    return {**coverage, "batches": batches}
+
+
 def _review_coverage(review):
     """Summarize authored breadth without upgrading missing historical declarations."""
     coverage = (review or {}).get("coverage", {})
@@ -718,7 +763,12 @@ class AssessmentService:
             },
             "javascript_analysis": facts.get("javascript_analysis", {}),
             "source_analysis": facts.get("source_analysis", {}),
-            "optional_analysis": facts.get("optional_analysis", {}),
+            "optional_analysis": {
+                name: {**provider, "coverage": _coverage_summary(provider["coverage"])}
+                if isinstance(provider, dict) and "coverage" in provider
+                else provider
+                for name, provider in facts.get("optional_analysis", {}).items()
+            },
             "collection_scope": {
                 key: value
                 for key, value in facts.get("collection", {}).items()
@@ -952,7 +1002,7 @@ class AssessmentService:
             elif view == "coverage" and "coverage" in stats:
                 rows.append(
                     {
-                        "coverage": stats["coverage"],
+                        "coverage": _coverage_summary(stats["coverage"]),
                         "status": stats.get("status"),
                         "limits": stats.get("limits", {}),
                         "candidate_counts": stats.get("candidate_counts", {}),
@@ -1480,14 +1530,14 @@ class AssessmentService:
             "method": "captured_static_analysis",
             "groups": groups,
             "analysis_scope": {
-                "coverage": (analysis or {}).get("coverage", {}),
+                "coverage": _coverage_summary((analysis or {}).get("coverage", {})),
                 "candidate_counts": (analysis or {}).get("candidate_counts", {}),
                 "summary": (analysis or {}).get("summary", {}),
                 "analyses": [
                     {
                         "evidence_id": entry["id"],
                         "kind": entry["kind"],
-                        "coverage": entry["stats"].get("coverage", {}),
+                        "coverage": _coverage_summary(entry["stats"].get("coverage", {})),
                         "candidate_counts": entry["stats"].get("candidate_counts", {}),
                     }
                     for entry in analyses
