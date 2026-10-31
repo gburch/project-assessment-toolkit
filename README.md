@@ -53,6 +53,8 @@ Follow the [local workflow](docs/PROJECT_ASSESS.md#local-workflow) to fill a `re
 
 Version **0.3.0** adds standard/deep collection budgets, broad complexity metrics separate from sampled pattern work, cached import resolution and optional Vulture analysis. Swift, Java and other source also receive text inventory and exact-reuse leads, with syntax support reported separately. Coverage, role labels and omissions remain visible; similarity or an absent reference never proves safe deletion. Collector 7 / Python analyzer 3 starts a new collection scope: old snapshots and goals remain saved, and newly visible evidence is not engineering progress. See [analysis profiles and limits](docs/PROJECT_ASSESS.md#doctor-and-evolve).
 
+Version **0.3.1** distinguishes Vulture's redundant conditions from unreachable statements. Doctor preserves the reachable body and condition effects; adapter 2 records the corrected interpretation in selected-Vulture assessment scopes.
+
 ## PAT's own assessment
 
 <p>

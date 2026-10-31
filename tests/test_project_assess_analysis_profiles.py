@@ -101,6 +101,7 @@ def test_optional_vulture_is_explicit_shared_evidence_with_independent_confidenc
     root, service = project(tmp_path)
     (root / "src/app.py").write_text(
         'def public_api(unused_argument):\n    return 1\n    print("unreachable")\n'
+        '\ndef live_body():\n    if True:\n        print("reachable")\nlive_body()\n'
     )
     first = service.scan(root)
     assert not first["facts"].get("optional_analysis")
@@ -120,6 +121,15 @@ def test_optional_vulture_is_explicit_shared_evidence_with_independent_confidenc
     assert all(row["confidence"] == "low" for row in query["items"])
     diagnosis = service.doctor(second["id"])
     assert diagnosis["selection"]["families"]["analyzer:vulture"]["returned"]
+    redundant = next(
+        row
+        for rows in diagnosis["groups"].values()
+        for row in rows
+        if row["kind"] == "redundant_condition"
+    )
+    assert "reachable body" in redundant["smallest_fix"]
+    assert "body still executes" in redundant["verification"]
+    assert redundant["family"] == "analyzer:vulture"
     assert all(
         row["candidate_confidence"]["basis"] == "captured_source_producer"
         for rows in diagnosis["groups"].values()

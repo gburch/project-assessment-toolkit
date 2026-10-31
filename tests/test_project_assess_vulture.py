@@ -125,6 +125,31 @@ def test_unreachable_async_generator_yield_is_retained_with_counterevidence(inst
     assert record["text"].endswith("yield None\n")
 
 
+def test_redundant_condition_preserves_reachable_body_and_distinct_unreachable_lead(installed):
+    record = source(
+        "src/conditions.py",
+        "def run():\n    if True:\n        record_event()\nrun()\n"
+        "def stopped():\n    return 1\n    ignored_event()\nstopped()\n",
+    )
+    result = registry.run_analyzer("vulture", [record])
+    redundant = next(row for row in result["candidates"] if row["kind"] == "redundant_condition")
+    unreachable = next(
+        row for row in result["candidates"] if row["kind"] == "unreachable_statement"
+    )
+
+    assert redundant["metrics"]["producer_kind"] == "unreachable_code"
+    assert redundant["metrics"]["message"] == "redundant if-condition"
+    assert redundant["metrics"]["diagnostic_subtype"] == "redundant_condition"
+    assert redundant["locations"] == [{"path": record["path"], "line": 2, "end_line": 3}]
+    assert redundant["confidence"] == "low"
+    assert redundant["source_evidence_ids"] == [record["evidence_id"]]
+    assert any("body remains reachable" in text for text in redundant["counterevidence"])
+    assert "retention_hint" not in redundant["metrics"]
+    assert unreachable["locations"] == [{"path": record["path"], "line": 7, "end_line": 7}]
+    assert unreachable["metrics"]["message"] == "unreachable code after 'return'"
+    assert len(result["candidates"]) == 2
+
+
 def test_public_exports_source_noqa_and_cross_file_uses_follow_explicit_producer_scope(installed):
     first = source(
         "src/library.py",

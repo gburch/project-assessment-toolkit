@@ -16,7 +16,7 @@ from pathlib import PurePosixPath
 
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "1"
+VERSION = "2"
 MAX_CANDIDATES = 100
 MAX_INDEX = 20_000
 MAX_INPUT_RECORDS = 20_000
@@ -360,7 +360,12 @@ def analyze_vulture(
                 omission_counts["invalid_producer_location"] += 1
                 partial = True
                 continue
-            kind = "unreachable_statement" if item.typ == "unreachable_code" else "unused_symbol"
+            if item.typ != "unreachable_code":
+                kind = "unused_symbol"
+            elif item.message == "redundant if-condition":
+                kind = "redundant_condition"
+            else:
+                kind = "unreachable_statement"
             metrics = {
                 "producer_kind": item.typ,
                 "code_type": item.typ,
@@ -370,6 +375,8 @@ def analyze_vulture(
                 "producer_confidence_scale": "0..100 heuristic, separate from PAT confidence",
                 "source_digest": source["digest"],
             }
+            if kind == "redundant_condition":
+                metrics["diagnostic_subtype"] = "redundant_condition"
             marker = kind == "unreachable_statement" and any(
                 item.first_lineno <= line <= item.last_lineno
                 for line in yielded_lines[source["path"]]
@@ -391,6 +398,10 @@ def analyze_vulture(
                     "Inspect exports, actual callers and dynamic dispatch before removal."
                 ],
             }
+            if kind == "redundant_condition":
+                candidate["counterevidence"].append(
+                    "The reported body remains reachable; preserve its execution and any condition-evaluation side effects."
+                )
             if marker:
                 candidate["counterevidence"].append(
                     "This reported range contains a yield; removing it can change generator/async-generator shape even when the branch cannot execute."

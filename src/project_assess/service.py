@@ -1087,6 +1087,10 @@ class AssessmentService:
                     "Inspect reachability and binding/compiler effects before removal, including async-generator shape and hoisted declarations.",
                     "Preserve public contracts, generator/coroutine classification, cleanup and important outcomes; unreachable does not mean safe to delete.",
                 ),
+                "redundant_condition": (
+                    "Inspect the redundant guard while preserving its reachable body and any condition-evaluation effects.",
+                    "Verify the body still executes with the same outputs, side effects and public contracts.",
+                ),
                 "unused_symbol": (
                     "Trace local references, public exports, decorators and reflection before changing the symbol.",
                     "Check supported callers and entrypoints; absence of static references alone does not justify deletion.",
