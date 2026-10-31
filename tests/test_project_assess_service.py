@@ -2,6 +2,7 @@ import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from threading import Barrier
 
 import pytest
 
@@ -278,6 +279,130 @@ def test_transactions_roll_back_interrupted_save_and_survive_reopen(assessed, mo
     reopened = AssessmentService(service.state_dir)
     assert reopened.history(snapshot["project_id"])["goals"] == []
     reopened.set_targets(snapshot["project_id"], profile="internal-service", expected_revision=0)
+
+
+@pytest.mark.parametrize("schema_version", ["2", None, "1"])
+def test_rejected_unknown_or_partial_state_preserves_schema_data_and_bytes(
+    tmp_path, schema_version
+):
+    state = tmp_path / "state"
+    state.mkdir()
+    database = state / "project-assess.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE sentinel (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO sentinel VALUES ('keep this data')")
+        if schema_version is not None:
+            connection.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            connection.execute(
+                "INSERT INTO metadata VALUES ('schema_version', ?)", (schema_version,)
+            )
+        before_schema = connection.execute(
+            "SELECT type,name,sql FROM sqlite_master ORDER BY name"
+        ).fetchall()
+    before = database.read_bytes()
+
+    with pytest.raises(ValueError, match="schema|state"):
+        AssessmentService(state)
+
+    assert database.read_bytes() == before
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall()
+            == before_schema
+        )
+        assert connection.execute("SELECT value FROM sentinel").fetchall() == [("keep this data",)]
+
+
+def test_interrupted_initialization_rolls_back_every_table_and_reopens(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    original_connect = sqlite3.connect
+
+    def interrupted_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connection.set_authorizer(
+            lambda action, name, *_: (
+                sqlite3.SQLITE_DENY
+                if action == sqlite3.SQLITE_CREATE_TABLE and name == "reviews"
+                else sqlite3.SQLITE_OK
+            )
+        )
+        return connection
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3, "connect", interrupted_connect)
+        with pytest.raises(sqlite3.DatabaseError):
+            AssessmentService(state)
+
+    with original_connect(state / "project-assess.sqlite3") as connection:
+        assert connection.execute("SELECT name FROM sqlite_master").fetchall() == []
+    reopened = AssessmentService(state)
+    assert reopened.list_projects() == []
+    with original_connect(reopened.db_path) as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchall() == [("1",)]
+
+
+def test_fresh_state_initialization_is_safe_for_concurrent_constructors(tmp_path):
+    state = tmp_path / "state"
+    ready = Barrier(2)
+
+    def open_state(_):
+        ready.wait(timeout=5)
+        return AssessmentService(state)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        services = list(pool.map(open_state, range(2)))
+    assert all(service.list_projects() == [] for service in services)
+    with sqlite3.connect(services[0].db_path) as connection:
+        assert connection.execute("SELECT key,value FROM metadata").fetchall() == [
+            ("schema_version", "1")
+        ]
+        assert {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        } == {"metadata", "projects", "assessments", "reviews", "goals", "requests"}
+
+
+def test_compatible_state_reopens_without_schema_or_data_writes(assessed, monkeypatch):
+    service, root, snapshot = assessed
+    before = service.db_path.read_bytes()
+    original_connect = sqlite3.connect
+
+    def no_mutation_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connection.set_authorizer(
+            lambda action, *_: (
+                sqlite3.SQLITE_DENY
+                if action
+                in {
+                    sqlite3.SQLITE_CREATE_TABLE,
+                    sqlite3.SQLITE_DROP_TABLE,
+                    sqlite3.SQLITE_INSERT,
+                    sqlite3.SQLITE_UPDATE,
+                    sqlite3.SQLITE_DELETE,
+                }
+                else sqlite3.SQLITE_OK
+            )
+        )
+        return connection
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3, "connect", no_mutation_connect)
+        reopened = AssessmentService(service.state_dir)
+        assert reopened.get_report(snapshot["id"])["assessment"] == snapshot
+    assert service.db_path.read_bytes() == before
+
+    # A copied valid state cannot be opened from inside one of its registered roots.
+    nested = root / "restored-state"
+    nested.mkdir()
+    database = nested / service.db_path.name
+    database.write_bytes(before)
+    with pytest.raises(ValueError, match="outside assessed projects"):
+        AssessmentService(nested)
+    assert database.read_bytes() == before
 
 
 def test_state_and_allowed_roots_are_enforced_before_access(assessed, tmp_path):
@@ -865,10 +990,33 @@ def test_doctor_uses_older_test_static_inventory_without_generic_ast_evidence(tm
     root = tmp_path / "project"
     root.mkdir()
     (root / "test_values.py").write_text(
-        '@pytest.mark.parametrize("value", [1, 2])\ndef test_value(value):\n    assert value > 0\n'
+        '@pytest.mark.parametrize("value", [1, 2])\n'
+        "def test_value(self, value):\n"
+        "    assert value > 0\n"
+        "    self.assertEqual(value, 1)\n"
+        "    self.assertTrue(value)\n"
     )
     service = AssessmentService(tmp_path / "state")
     captured = service.scan(root)
+    current = service.doctor(captured["id"])
+    checks = next(
+        row["metrics"]["assertions"]
+        for row in current["groups"]["quality"]
+        if row["kind"] == "test-static-lead"
+    )
+    assert checks["count"] == 1
+    assert checks["countBasis"] == "bare_ast_assert"
+    assert checks["unittestStyleCallCount"] == 2
+    static = next(
+        row for row in captured["evidence"] if row["kind"] == "test-value-static-analysis"
+    )["stats"]
+    static["tool"].pop("adapterVersion")
+    for definition in static["definitions"]:
+        definition["assertions"] = {
+            key: value
+            for key, value in definition["assertions"].items()
+            if key in {"count", "shapes", "implementationHeavyLead"}
+        }
     captured["evidence"] = [
         entry
         for entry in captured["evidence"]
@@ -887,6 +1035,21 @@ def test_doctor_uses_older_test_static_inventory_without_generic_ast_evidence(tm
     assert any(row["kind"] == "test-static-lead" for row in diagnosis["groups"]["quality"])
     assert diagnosis["test_value_static"]["schema"] == "test-value-static.v1"
     assert any("rescan" in gap.lower() for gap in diagnosis["gaps"])
+    legacy = next(
+        row["metrics"]["assertions"]
+        for row in diagnosis["groups"]["quality"]
+        if row["kind"] == "test-static-lead"
+    )
+    assert legacy["count"] == 1
+    assert legacy["countBasis"] == "legacy_bare_ast_assert"
+    assert legacy["attribution"] == "legacy_scope_unspecified"
+    assert legacy["unittestStyleCallCount"] is None
+    assert legacy["unittestStyleCallBasis"] == "not_collected"
+    with sqlite3.connect(service.db_path) as db:
+        persisted = db.execute(
+            "SELECT data FROM assessments WHERE id=?", (captured["id"],)
+        ).fetchone()[0]
+    assert json.loads(persisted) == captured
 
 
 def test_doctor_combines_test_static_and_ruff_evidence_with_one_candidate_bound(tmp_path):

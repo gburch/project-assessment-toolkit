@@ -206,6 +206,20 @@ The separate `test-value` and `test-value-js` commands collect explicitly select
 tests using the project's environment and analyze their value and overlap. They
 run tests only when the owner requests and explicitly invokes collection; `pat scan` remains read-only.
 
+Captured Python test inventory keeps `assertions.count` as the number of bare
+`assert` statements, labeled `countBasis: bare_ast_assert`. Adapter 2 separately
+reports recognized `self.assertEqual(...)`, `self.assertRaises(...)` and other
+known unittest-style calls. Both counts exclude nested function/class/lambda
+scopes from the enclosing function. Calls are syntax observations: binding,
+execution and custom assertion helpers remain unverified. The aggregate
+`facts.python.assertions` also counts only bare `assert` statements and labels
+that basis. Counts do not establish test effectiveness or justify pruning.
+
+Older snapshots retain their original data. Doctor labels their bare counts as
+legacy and leaves uncollected unittest-style counts unknown. Adapter 2 is part
+of collection scope, so rescanning cannot present a counting change as
+engineering progress against an older scope.
+
 ```bash
 uv run --locked test-value collect --python /project/.venv/bin/python --root /project --source src --output /outside/test-run -- tests/test_feature.py
 uv run --extra test-value --locked test-value compare --root /project --output /outside/comparison --evidence /outside/js-run/evidence.json --pytest-report /outside/test-run/report.json --pytest-coverage /outside/test-run/.coverage
@@ -289,7 +303,13 @@ Update to the intended application revision and its locked dependencies, then us
 
 For the 0.3.0 source update, select the intended revision, run `uv sync --locked` (add optional `--extra analysis`, `--extra vulture` or `--extra mcp` when wanted), and check `uv run --locked pat info` / `pat analyzers`. Existing snapshots, reviews and goals are retained. Rescan and review to use collector 7 / analyzer 3; a profile/analyzer scope mismatch prevents a before/after engineering-progress claim, and does not silently reset goals or rewrite the baseline.
 
-There is no automatic state-schema migration. If a version rejects the state schema, use the application version that created it or restore a compatible backup. Do not hand-edit schema metadata or delete history to bypass the check.
+There is no automatic state-schema migration. Startup validates existing state
+before writing, rejects unsupported, unversioned or incomplete schemas, and
+initializes empty state in one transaction. An interrupted initialization rolls
+back; compatible version 1 state reopens without schema changes. If a version
+rejects the state schema, use the application version that created it or restore
+a compatible backup. Do not hand-edit schema metadata or delete history to
+bypass the check.
 
 ### Local delivery and rollback proof
 

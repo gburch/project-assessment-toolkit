@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "test-value-static.v1"
+VERSION = "2"
 MAX_FILES = 2_000
 MAX_FILE_BYTES = 1_000_000
 MAX_TOTAL_BYTES = 64_000_000
@@ -58,6 +59,43 @@ _CALLS = {
     "requests",
     "git",
 }
+_UNITTEST_METHODS = frozenset(
+    {
+        "assertAlmostEqual",
+        "assertCountEqual",
+        "assertDictEqual",
+        "assertEqual",
+        "assertFalse",
+        "assertGreater",
+        "assertGreaterEqual",
+        "assertIn",
+        "assertIs",
+        "assertIsInstance",
+        "assertIsNone",
+        "assertIsNot",
+        "assertIsNotNone",
+        "assertLess",
+        "assertLessEqual",
+        "assertListEqual",
+        "assertLogs",
+        "assertMultiLineEqual",
+        "assertNoLogs",
+        "assertNotAlmostEqual",
+        "assertNotEqual",
+        "assertNotIn",
+        "assertNotIsInstance",
+        "assertNotRegex",
+        "assertRaises",
+        "assertRaisesRegex",
+        "assertRegex",
+        "assertSequenceEqual",
+        "assertSetEqual",
+        "assertTrue",
+        "assertTupleEqual",
+        "assertWarns",
+        "assertWarnsRegex",
+    }
+)
 
 
 def _digest_bytes(data: bytes) -> str:
@@ -273,6 +311,17 @@ def _python_file(
     return python_rows(path, root, tree)
 
 
+def _assertion_nodes(function: ast.FunctionDef | ast.AsyncFunctionDef):
+    """Attribute check syntax to its own body, excluding nested callable/class scopes."""
+    pending = list(reversed(function.body))
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        yield node
+        pending.extend(reversed(list(ast.iter_child_nodes(node))))
+
+
 def python_rows(
     path: Path, root: Path, tree: ast.Module
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], dict[str, list[str]]]:
@@ -300,7 +349,18 @@ def python_rows(
             qualified = "::".join([relative, *self.parents, node.name])
             case_count, dynamic, decorators = _decorator_info(node)
             assertions = list(ast.walk(node))
-            assert_nodes = [item for item in assertions if isinstance(item, ast.Assert)]
+            assert_nodes, unittest_methods = [], []
+            for item in _assertion_nodes(node):
+                if isinstance(item, ast.Assert):
+                    assert_nodes.append(item)
+                elif (
+                    isinstance(item, ast.Call)
+                    and isinstance(item.func, ast.Attribute)
+                    and isinstance(item.func.value, ast.Name)
+                    and item.func.value.id == "self"
+                    and item.func.attr in _UNITTEST_METHODS
+                ):
+                    unittest_methods.append(item.func.attr)
             setup_leads: list[dict[str, Any]] = []
             for item in assertions:
                 if isinstance(item, (ast.For, ast.AsyncFor)):
@@ -354,6 +414,12 @@ def python_rows(
                 },
                 "assertions": {
                     "count": len(assert_nodes),
+                    "countBasis": "bare_ast_assert",
+                    "attribution": "own_function_body_excluding_nested_scopes",
+                    "unittestStyleCallCount": len(unittest_methods),
+                    "unittestStyleMethods": sorted(set(unittest_methods)),
+                    "unittestStyleCallBasis": "known_self_method_syntax_binding_and_execution_unverified",
+                    "otherCheckStyles": "unknown",
                     "shapes": shapes,
                     "implementationHeavyLead": implementation_heavy,
                 },
@@ -621,6 +687,7 @@ def analyze(root: Path, scopes: list[str]) -> dict[str, Any]:
         "generatedAt": datetime.now(UTC).isoformat(),
         "tool": {
             "module": "project_assess.test_value.static",
+            "adapterVersion": VERSION,
             "moduleDigest": _module_digest(),
             "python": sys.version.split()[0],
         },

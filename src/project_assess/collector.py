@@ -391,6 +391,7 @@ def _static_value_analysis(root, source_rows, manifest, revision):
         "schema": static_tool.SCHEMA,
         "tool": {
             "module": "project_assess.test_value.static",
+            "adapterVersion": static_tool.VERSION,
             "moduleDigest": static_tool._module_digest(),
         },
         "provenance": {
@@ -705,6 +706,8 @@ def collect(
     ``complete`` means collection finished within its declared scope. It does not
     certify runtime behavior; excluded and unsupported inputs remain visible gaps.
     """
+    from .test_value import static as static_tool
+
     budget = get_budget(analysis_profile)
     # Compatibility aliases remain useful for bounded tests; production profile
     # values have one immutable definition in budgets.py.
@@ -756,6 +759,7 @@ def collect(
             "classes": 0,
             "branches": 0,
             "assertions": 0,
+            "assertions_basis": "bare_ast_assert",
             "test_functions": 0,
             "imports": 0,
             "forwarding_functions": 0,
@@ -1671,6 +1675,7 @@ def collect(
             "version": STATIC_VERSION,
             "limits": facts["static_analysis"]["limits"],
         },
+        "test_value_static": {"schema": static_tool.SCHEMA, "version": static_tool.VERSION},
         "javascript": "lexical",
         "javascript_analysis": javascript_analyzer_identity(),
         "source_analysis": {

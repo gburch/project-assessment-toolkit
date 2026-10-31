@@ -154,6 +154,95 @@ def test_captured_python_tree_matches_text_adapter_without_reparsing(tmp_path, m
     assert not path.exists(), "the pure adapter must not need source files on disk"
 
 
+def test_unittest_checks_are_separate_syntax_facts_not_a_zero_assertion_claim(tmp_path):
+    from project_assess.test_value import static
+
+    source = (
+        "import unittest\n"
+        "class Cases(unittest.TestCase):\n"
+        "    def test_result(self):\n"
+        "        self.assertEqual(result(), 4)\n"
+        "        self.assertEqual(other_result(), 5)\n"
+        "        with self.assertRaises(ValueError):\n"
+        "            fail_operation()\n"
+    )
+    rows, gaps, _ = static._python_file(tmp_path / "test_cases.py", tmp_path, source)
+    assert not gaps
+    facts = rows[0]["assertions"]
+    assert facts["count"] == 0 and facts["countBasis"] == "bare_ast_assert"
+    assert facts["unittestStyleCallCount"] == 3
+    assert facts["unittestStyleMethods"] == ["assertEqual", "assertRaises"]
+    assert facts["unittestStyleCallBasis"] == (
+        "known_self_method_syntax_binding_and_execution_unverified"
+    )
+    assert facts["otherCheckStyles"] == "unknown"
+
+
+def test_custom_checks_and_unittest_overrides_remain_semantically_unknown(tmp_path):
+    from project_assess.test_value import static
+
+    source = (
+        "def test_custom(self, mock):\n"
+        "    verify_result()\n"
+        "    self.assertCustom(result())\n"
+        "    mock.assert_called_once()\n"
+        "class Custom:\n"
+        "    def assertEqual(self, left, right):\n"
+        "        record(left, right)\n"
+        "    def test_style(self):\n"
+        "        self.assertEqual(1, 2)\n"
+    )
+    rows, gaps, _ = static._python_file(tmp_path / "test_custom.py", tmp_path, source)
+    assert not gaps
+    custom, _, style = rows
+    assert custom["assertions"]["count"] == 0
+    assert custom["assertions"]["unittestStyleCallCount"] == 0
+    assert custom["assertions"]["otherCheckStyles"] == "unknown"
+    assert style["assertions"]["unittestStyleCallCount"] == 1
+    assert "unverified" in style["assertions"]["unittestStyleCallBasis"]
+    assert style["assertions"]["otherCheckStyles"] == "unknown"
+
+
+def test_nested_checks_belong_to_the_nested_definition(tmp_path):
+    from project_assess.test_value import static
+
+    source = (
+        "def test_outer(self):\n"
+        "    assert outer_result()\n"
+        "    def helper():\n"
+        "        assert inner_result()\n"
+        "        self.assertTrue(inner_result())\n"
+        "    class Inner:\n"
+        "        def test_nested(self):\n"
+        "            assert nested_result()\n"
+        "            self.assertEqual(nested_result(), 3)\n"
+        "    check = lambda: self.assertFalse(False)\n"
+    )
+    rows, gaps, _ = static._python_file(tmp_path / "test_nested.py", tmp_path, source)
+    assert not gaps
+    outer, helper, nested = rows
+    assert [row["assertions"]["count"] for row in rows] == [1, 1, 1]
+    assert [row["assertions"]["unittestStyleCallCount"] for row in rows] == [0, 1, 1]
+    assert outer["assertions"]["shapes"] == ["Call"]
+    assert all(
+        row["assertions"]["attribution"] == "own_function_body_excluding_nested_scopes"
+        for row in rows
+    )
+    assert helper["id"].endswith("::test_outer::helper")
+    assert nested["id"].endswith("::test_outer::Inner::test_nested")
+
+
+def test_static_receipt_versions_additive_assertion_facts(tmp_path):
+    from project_assess.test_value import static
+
+    (tmp_path / "test_one.py").write_text("def test_one():\n    assert True\n")
+    report = static.analyze(tmp_path, ["test_one.py"])
+    assert report["schema"] == "test-value-static.v1"
+    assert report["tool"]["adapterVersion"] == static.VERSION == "2"
+    assert report["tool"]["moduleDigest"] == static._module_digest()
+    assert report["definitions"][0]["assertions"]["countBasis"] == "bare_ast_assert"
+
+
 def test_dynamic_decorator_receivers_never_emit_source_literals(tmp_path):
     from project_assess.test_value import static
 

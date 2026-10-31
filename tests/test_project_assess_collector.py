@@ -221,6 +221,57 @@ def test_static_value_leads_use_captured_source_and_do_not_change_doc_facts(tmp_
     assert not sentinel.exists()
 
 
+def test_captured_unittest_check_basis_and_adapter_identity_do_not_execute_source(tmp_path):
+    from project_assess.test_value import static
+
+    root = tmp_path / "project"
+    sentinel = tmp_path / "executed"
+    write(
+        root,
+        "tests/test_checks.py",
+        "import unittest\nfrom pathlib import Path\n"
+        f"Path({str(sentinel)!r}).touch()\n"
+        "class Checks(unittest.TestCase):\n"
+        "    def test_result(self):\n"
+        "        self.assertEqual(result(), 4)\n"
+        "        with self.assertRaises(ValueError):\n"
+        "            operation()\n"
+        "def test_bare():\n    assert result()\n",
+    )
+    snapshot = collector.collect(root)
+    summary = snapshot["facts"]["test_value_static"]
+    evidence = next(row for row in snapshot["evidence"] if row["id"] == summary["evidence_id"])
+    analysis = evidence["stats"]
+    assert analysis["tool"]["adapterVersion"] == static.VERSION == "2"
+    assert analysis["tool"]["moduleDigest"] == static._module_digest()
+    unittest_row = next(row for row in analysis["definitions"] if row["id"].endswith("test_result"))
+    assert unittest_row["assertions"]["count"] == 0
+    assert unittest_row["assertions"]["countBasis"] == "bare_ast_assert"
+    assert unittest_row["assertions"]["unittestStyleCallCount"] == 2
+    assert unittest_row["assertions"]["unittestStyleMethods"] == ["assertEqual", "assertRaises"]
+    assert unittest_row["assertions"]["otherCheckStyles"] == "unknown"
+    assert snapshot["facts"]["python"]["assertions"] == 1
+    assert snapshot["facts"]["python"]["assertions_basis"] == "bare_ast_assert"
+    assert not sentinel.exists()
+
+
+def test_static_value_adapter_version_changes_scope_without_changing_source(tmp_path, monkeypatch):
+    from project_assess.test_value import static
+
+    write(tmp_path, "test_one.py", "def test_one():\n    assert True\n")
+    first = collector.collect(tmp_path)
+    monkeypatch.setattr(static, "VERSION", "synthetic-next")
+    second = collector.collect(tmp_path)
+    assert first["source"] == second["source"]
+    assert first["scope_digest"] != second["scope_digest"]
+    second_summary = second["facts"]["test_value_static"]
+    evidence = next(row for row in second["evidence"] if row["id"] == second_summary["evidence_id"])
+    assert evidence["stats"]["tool"]["adapterVersion"] == "synthetic-next"
+    source_before = next(row for row in first["evidence"] if row["path"] == "test_one.py")
+    source_after = next(row for row in second["evidence"] if row["path"] == "test_one.py")
+    assert source_before["digest"] == source_after["digest"]
+
+
 def test_content_identity_changes_while_collection_scope_remains_comparable(tmp_path):
     path = write(tmp_path, "app.py", "value = 1\n")
     first = collector.collect(tmp_path)

@@ -408,32 +408,62 @@ class AssessmentService:
         self.db_path = self.state_dir / "project-assess.sqlite3"
         if self.db_path.is_symlink():
             raise ValueError("State database must not be a symlink")
-        with self._db() as db:
-            db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS projects (
-                    id TEXT PRIMARY KEY, root TEXT UNIQUE NOT NULL, name TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS assessments (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-                    project_id TEXT NOT NULL REFERENCES projects(id), data TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS reviews (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-                    assessment_id TEXT NOT NULL REFERENCES assessments(id), data TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS goals (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL REFERENCES projects(id),
-                    revision INTEGER NOT NULL, data TEXT NOT NULL, UNIQUE(project_id, revision));
-                CREATE TABLE IF NOT EXISTS requests (
-                    id TEXT PRIMARY KEY, operation TEXT NOT NULL, payload TEXT NOT NULL, result TEXT NOT NULL);
-                """
+        schema = {
+            "metadata": (
+                ("key", "value"),
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            ),
+            "projects": (
+                ("id", "root", "name"),
+                "CREATE TABLE projects (id TEXT PRIMARY KEY, root TEXT UNIQUE NOT NULL, name TEXT NOT NULL)",
+            ),
+            "assessments": (
+                ("seq", "id", "project_id", "data"),
+                "CREATE TABLE assessments (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id), data TEXT NOT NULL)",
+            ),
+            "reviews": (
+                ("seq", "id", "assessment_id", "data"),
+                "CREATE TABLE reviews (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, assessment_id TEXT NOT NULL REFERENCES assessments(id), data TEXT NOT NULL)",
+            ),
+            "goals": (
+                ("seq", "project_id", "revision", "data"),
+                "CREATE TABLE goals (seq INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL REFERENCES projects(id), revision INTEGER NOT NULL, data TEXT NOT NULL, UNIQUE(project_id, revision))",
+            ),
+            "requests": (
+                ("id", "operation", "payload", "result"),
+                "CREATE TABLE requests (id TEXT PRIMARY KEY, operation TEXT NOT NULL, payload TEXT NOT NULL, result TEXT NOT NULL)",
+            ),
+        }
+        # Serialize first creation with other constructors. Individual statements
+        # retain this transaction; executescript would implicitly commit it.
+        with self._db(write=True) as db:
+            objects = set(
+                db.execute("SELECT name,type FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'")
             )
-            version = db.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
-            if version and version[0] != "1":
-                raise ValueError("Unsupported assessment state schema version")
-            db.execute("INSERT OR IGNORE INTO metadata VALUES ('schema_version', '1')")
-            for (root,) in db.execute("SELECT root FROM projects"):
-                if self.state_dir.is_relative_to(Path(root)):
-                    raise ValueError("State directory must be outside assessed projects")
+            if objects:
+                if ("metadata", "table") not in objects:
+                    raise ValueError("Unversioned or incomplete assessment state schema")
+                try:
+                    version = db.execute(
+                        "SELECT value FROM metadata WHERE key='schema_version'"
+                    ).fetchone()
+                except sqlite3.DatabaseError:
+                    raise ValueError("Incomplete assessment state schema") from None
+                if version is None:
+                    raise ValueError("Unversioned assessment state schema")
+                if version[0] != "1":
+                    raise ValueError("Unsupported assessment state schema version")
+                for name, (columns, _) in schema.items():
+                    actual = tuple(row[1] for row in db.execute(f"PRAGMA table_info({name})"))
+                    if (name, "table") not in objects or actual != columns:
+                        raise ValueError("Incomplete or incompatible assessment state schema")
+                for (root,) in db.execute("SELECT root FROM projects"):
+                    if self.state_dir.is_relative_to(Path(root)):
+                        raise ValueError("State directory must be outside assessed projects")
+            else:
+                for _, statement in schema.values():
+                    db.execute(statement)
+                db.execute("INSERT INTO metadata VALUES ('schema_version', '1')")
         os.chmod(self.db_path, 0o600)
 
     @contextmanager
@@ -1225,7 +1255,15 @@ class AssessmentService:
                     metrics = (
                         {
                             "parameterization": definition["parameterization"],
-                            "assertions": definition["assertions"],
+                            "assertions": {
+                                "countBasis": "legacy_bare_ast_assert",
+                                "attribution": "legacy_scope_unspecified",
+                                "unittestStyleCallCount": None,
+                                "unittestStyleMethods": None,
+                                "unittestStyleCallBasis": "not_collected",
+                                "otherCheckStyles": "unknown",
+                                **definition["assertions"],
+                            },
                             "setup_leads": len(definition["setupLeads"]),
                         }
                         if candidate["kind"] == "test-static-lead"
