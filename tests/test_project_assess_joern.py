@@ -58,7 +58,7 @@ def raw_result(path):
 
     return {
         "schema_version": 1,
-        "query_version": "2",
+        "query_version": "3",
         "dataflow": "not_run",
         "errors": [],
         "gaps": [],
@@ -77,7 +77,25 @@ def raw_result(path):
             "edge_counts": {"CFG": 8, "REF": 6, "CALL": 1, "CDG": 0},
         },
         "source_files": section([{"path": path}]),
-        "methods": {**section([method]), "external_models": 17, "unlocated_models": 2},
+        "methods": {
+            **section([method]),
+            "external_models": 17,
+            "unlocated_models": 2,
+            "sampling": "max_min_per_file_then_round_robin",
+            "source_files": 1,
+            "retained_files": 1,
+            "omitted_files": 0,
+            "row_byte_limit": 6 * 1024**2 - 256 * 1024 - 4096,
+            "byte_omissions": 0,
+            "file_coverage": {
+                "status": "complete",
+                "count": 1,
+                "omitted": 0,
+                "limit": 1,
+                "byte_limit": 256 * 1024,
+                "rows": [{"path": path, "count": 1, "retained": 1, "identity_truncated": False}],
+            },
+        },
         "calls": section(
             [
                 {
@@ -138,6 +156,10 @@ def qualified(tmp_path, monkeypatch):
 
 
 def fake_run(argv, *, cwd, output=None, **kwargs):
+    if not output and "ASTGEN_BIN" in kwargs.get("env", {}):
+        (kwargs["workspace"] / "ast-compatibility.json").write_text(
+            json.dumps({"schema_version": 1, "files": []})
+        )
     if output:
         path = next((cwd / "source").rglob("*.*")).relative_to(cwd / "source").as_posix()
         output.write_text(json.dumps(raw_result(path)))
@@ -160,7 +182,7 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("metadata launched Java"))
     info = analysis.joern_info()
     assert info["available"] and info["version"] == "4.0.669"
-    assert info["query_version"] == "2" and info["dataflow"] == "not_run"
+    assert info["query_version"] == "3" and info["dataflow"] == "not_run"
     assert qualified["root"] not in json.dumps(info)
     deep = analysis.joern_limits("deep")
     assert deep["seconds"] == 1800 and deep["heap_gib"] == 8
@@ -208,6 +230,19 @@ def test_captured_js_names_are_not_filtered_and_guarded_inputs_keep_coverage_row
             for section in ("methods", "calls", "unread_bindings", "module_edges"):
                 raw[section].update(rows=[], count=0)
             raw["source_files"].update(rows=[{"path": path} for path in names], count=len(names))
+            raw["methods"].update(
+                source_files=0,
+                retained_files=0,
+                omitted_files=0,
+                file_coverage={
+                    "status": "complete",
+                    "count": 0,
+                    "omitted": 0,
+                    "limit": 0,
+                    "byte_limit": 256 * 1024,
+                    "rows": [],
+                },
+            )
             output.write_text(json.dumps(raw))
         else:
             assert "--no-tsTypes" in argv
@@ -225,6 +260,9 @@ def test_captured_js_names_are_not_filtered_and_guarded_inputs_keep_coverage_row
                     cwd / "source" / row["path"]
                 ).read_bytes()
             assert not (cwd / "source/src/generated.js").exists()
+            (kwargs["workspace"] / "ast-compatibility.json").write_text(
+                json.dumps({"schema_version": 1, "files": []})
+            )
         return "complete"
 
     monkeypatch.setattr(analysis, "_run", run)
@@ -613,9 +651,9 @@ def test_process_runner_enforces_timeout_and_discards_sensitive_logs(tmp_path, c
 @pytest.mark.parametrize(
     "payload",
     [
-        '{"schema_version":1,"query_version":"2","schema_version":1}',
-        '{"schema_version":true,"query_version":"2","dataflow":"not_run"}',
-        '{"schema_version":1,"query_version":"2","dataflow":"run"}',
+        '{"schema_version":1,"query_version":"3","schema_version":1}',
+        '{"schema_version":true,"query_version":"3","dataflow":"not_run"}',
+        '{"schema_version":1,"query_version":"3","dataflow":"run"}',
     ],
 )
 def test_unqualified_or_ambiguous_query_output_is_rejected(tmp_path, payload):
@@ -681,3 +719,321 @@ def test_mixed_input_retains_qualified_facts_with_an_explicit_unexecuted_swift_g
         "eligible_files": 1,
     }
     assert all(row["locations"][0]["path"] == "src/app.py" for row in result["candidates"])
+
+
+def transport_ast(tmp_path, ast):
+    workspace = tmp_path / "private workspace"
+    stage = workspace / "javascript/source"
+    stage.mkdir(parents=True)
+    record = source(".hidden/typed.test.ts", "interface IndexedRecord { readonly 0: string; }\n")
+    original = stage / record["path"]
+    original.parent.mkdir()
+    original.write_text(record["text"])
+    ast_file = workspace / "producer-ast.json"
+    ast_file.write_bytes(
+        ast
+        if isinstance(ast, bytes)
+        else json.dumps(ast, ensure_ascii=False, separators=(",", ":")).encode()
+    )
+    binary = workspace / "synthetic-astgen"
+    binary.write_text(
+        "#!" + str(Path(sys.executable).resolve()) + "\n"
+        "import json,sys\nfrom pathlib import Path\n"
+        f"ast=Path({str(ast_file)!r}).read_bytes()\n"
+        "args=sys.argv[1:];root=Path(args[1]);output=Path(args[3]);output.mkdir()\n"
+        "assert args[-3:]==['--type','ts','--no-tsTypes']\n"
+        "for source in root.iterdir():\n"
+        " row={'fullName':str(source),'relativeName':source.name}\n"
+        " (output/(source.name+'.json')).write_bytes(json.dumps(row,ensure_ascii=False,separators=(',',':')).encode()[:-1]+b',\"ast\":'+ast+b'}')\n"
+    )
+    binary.chmod(0o500)
+    launcher = analysis._javascript_transport(
+        workspace,
+        stage,
+        {record["path"]: record},
+        {"astgen": binary},
+        analysis.joern_limits("standard"),
+    )
+    output = workspace / "output"
+    completed = subprocess.run(
+        [str(launcher), "--no-tsTypes", "-t", "ts", "-o", str(output)],
+        cwd=stage,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr.decode()
+    consumer = next(output.glob("*.json"))
+    payload = consumer.read_bytes()
+    header = payload.split(b',"ast":', 1)
+    result = json.loads(header[0] + b"}")
+    body = header[1][:-1] if isinstance(ast, bytes) else json.loads(header[1][:-1])
+    receipt = analysis._javascript_compatibility(workspace, stage, {record["path"]: record})
+    assert result["relativeName"] == record["path"] and result["fullName"] == str(original)
+    assert analysis._hash_file(original) == record["digest"]
+    return body, receipt, workspace, consumer
+
+
+def interface_ast(members, **extra):
+    return {
+        "type": "TSInterfaceDeclaration",
+        "id": {"name": "IndexedRecord"},
+        "body": {"type": "TSInterfaceBody", "body": members},
+        **extra,
+    }
+
+
+def property_ast(value, *, kind="NumericLiteral", computed=False, member="TSPropertySignature"):
+    return {
+        "type": member,
+        "readonly": True,
+        "computed": computed,
+        "start": 12,
+        "end": 34,
+        "key": {
+            "type": kind,
+            "value": value,
+            "start": 21,
+            "end": 22,
+            "loc": {"start": {"line": 2, "column": 11}, "end": {"line": 2, "column": 12}},
+            "extra": {"raw": "0x10" if value == 16 else str(value), "rawValue": value},
+        },
+    }
+
+
+@pytest.mark.parametrize("padding", [0, 65_499, 131_030])
+def test_ast_compatibility_changes_only_safe_interface_property_names(tmp_path, padding):
+    from copy import deepcopy
+
+    members = [property_ast(value) for value in (0, 1, 16, 9007199254740991)]
+    members += [
+        property_ast("named", kind="StringLiteral"),
+        property_ast(2, computed=True),
+        property_ast(3, member="TSMethodSignature"),
+    ]
+    runtime = {"type": "ObjectExpression", "properties": [property_ast(0, member="ObjectProperty")]}
+    literal = {"type": "NumericLiteral", "value": 0, "start": 80, "end": 81}
+    ast = {
+        "padding": "x" * padding,
+        "string": '{"type":"TSInterfaceDeclaration","body":null}',
+        "body": [
+            interface_ast(members),
+            runtime,
+            literal,
+            {"type": "CallExpression", "callee": {"name": "kept"}},
+        ],
+    }
+    expected = deepcopy(ast)
+    for member, name in zip(
+        expected["body"][0]["body"]["body"][:4], ("0", "1", "16", "9007199254740991"), strict=True
+    ):
+        member["key"]["value"] = name
+    result, receipt, _, consumer = transport_ast(tmp_path, ast)
+    assert result == expected
+    assert receipt["adjusted_files"] == 1 and receipt["numeric_keys"] == 4
+    assert (
+        receipt["bounded_interfaces"]
+        == receipt["unexpected_interfaces"]
+        == receipt["unsupported_numeric_keys"]
+        == 0
+    )
+    row = receipt["files"][0]
+    assert row["consumer_ast_digest"] == analysis._hash_file(consumer)
+    assert row["producer_ast_digest"] != row["consumer_ast_digest"]
+
+
+def test_ast_compatibility_leaves_unsupported_keys_and_shapes_explicit(tmp_path):
+    ast = {
+        "body": [
+            interface_ast(
+                [property_ast(value) for value in (-1, 0.5, 9007199254740992, True, None)]
+            ),
+            {"type": "TSInterfaceDeclaration", "body": {"type": "TSInterfaceBody", "body": False}},
+        ]
+    }
+    result, receipt, _, _ = transport_ast(tmp_path, ast)
+    assert result == ast
+    assert receipt["adjusted_files"] == receipt["numeric_keys"] == 0
+    assert receipt["unsupported_numeric_keys"] == 5 and receipt["unexpected_interfaces"] == 1
+
+
+def test_ast_compatibility_bounds_large_interfaces_without_dropping_later_source(tmp_path):
+    from copy import deepcopy
+
+    large = interface_ast([property_ast(0)], padding="x" * (2 * 1024**2 + 65_536))
+    small = interface_ast([property_ast(1)])
+    ast = {"body": [large, small]}
+    expected = deepcopy(ast)
+    expected["body"][1]["body"]["body"][0]["key"]["value"] = "1"
+    result, receipt, _, _ = transport_ast(tmp_path, ast)
+    assert result == expected
+    assert receipt["bounded_interfaces"] == 1 and receipt["numeric_keys"] == 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "boolean_schema",
+        "outside_path",
+        "source_digest",
+        "boolean_count",
+        "bad_ast_digest",
+        "duplicate",
+    ],
+)
+def test_ast_compatibility_receipts_reject_unbound_or_malformed_claims(tmp_path, mutation):
+    _, _, workspace, _ = transport_ast(tmp_path, {"body": [interface_ast([property_ast(0)])]})
+    path = workspace / "ast-compatibility.json"
+    value = json.loads(path.read_text())
+    if mutation == "boolean_schema":
+        value["schema_version"] = True
+    elif mutation == "outside_path":
+        value["files"][0]["path"] = "../escaped.ts"
+    elif mutation == "source_digest":
+        value["files"][0]["source_digest"] = "sha256:" + "f" * 64
+    elif mutation == "boolean_count":
+        value["files"][0]["numeric_keys"] = True
+    elif mutation == "bad_ast_digest":
+        value["files"][0]["producer_ast_digest"] = "unverified"
+    else:
+        value["files"] *= 2
+    path.write_text(json.dumps(value))
+    record = source(".hidden/typed.test.ts", "interface IndexedRecord { readonly 0: string; }\n")
+    with pytest.raises(ValueError):
+        analysis._javascript_compatibility(
+            workspace, workspace / "javascript/source", {record["path"]: record}
+        )
+
+
+def test_ast_compatibility_preserves_utf8_values_across_stream_boundaries(tmp_path):
+    from copy import deepcopy
+
+    ast = {"body": [interface_ast([property_ast(0)], description="é😀" * 20_000)]}
+    expected = deepcopy(ast)
+    expected["body"][0]["body"]["body"][0]["key"]["value"] = "0"
+    result, receipt, _, _ = transport_ast(tmp_path, ast)
+    assert result == expected and receipt["numeric_keys"] == 1
+    assert receipt["unexpected_interfaces"] == 0
+
+
+@pytest.mark.parametrize("shape", ["deep", "malformed"])
+def test_ast_compatibility_preserves_unreadable_nodes_as_explicit_unknowns(tmp_path, shape):
+    if shape == "deep":
+        annotation = (
+            b'{"type":"TSArrayType","elementType":' * 12_000
+            + b'{"type":"TSStringKeyword"}'
+            + b"}" * 12_000
+        )
+        ast = (
+            b'{"type":"TSInterfaceDeclaration","body":{"type":"TSInterfaceBody","body":'
+            b'[{"type":"TSPropertySignature","key":{"type":"NumericLiteral","value":0},"typeAnnotation":'
+            + annotation
+            + b"}]}}"
+        )
+    else:
+        ast = b'{"type":"TSInterfaceDeclaration","body":'
+    result, receipt, _, _ = transport_ast(tmp_path, ast)
+    assert result == ast and receipt["unexpected_interfaces"] == 1
+    assert receipt["numeric_keys"] == 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "boolean_count",
+        "bad_sampling",
+        "file_totals",
+        "outside_path",
+        "retained_exceeds_count",
+        "bad_byte_limit",
+        "boolean_truncation",
+        "count_sum",
+        "retained_sum",
+        "duplicate_path",
+    ],
+)
+def test_method_sampling_metadata_rejects_unbound_or_inconsistent_counts(
+    qualified, monkeypatch, mutation
+):
+    def run(argv, *, output=None, **kwargs):
+        if output:
+            raw = raw_result("src/app.py")
+            value = raw["methods"]
+            row = value["file_coverage"]["rows"][0]
+            if mutation == "boolean_count":
+                value["source_files"] = True
+            elif mutation == "bad_sampling":
+                value["sampling"] = "unspecified"
+            elif mutation == "file_totals":
+                value["omitted_files"] = 1
+            elif mutation == "outside_path":
+                row["path"] = "../escaped.py"
+            elif mutation == "retained_exceeds_count":
+                row["retained"] = 2
+            elif mutation == "bad_byte_limit":
+                value["row_byte_limit"] += 1
+            elif mutation == "boolean_truncation":
+                row["identity_truncated"] = "false"
+            elif mutation == "count_sum":
+                value["count"] = 2
+            elif mutation == "retained_sum":
+                row["retained"] = 0
+            else:
+                value["file_coverage"]["rows"].append(dict(row))
+            output.write_text(json.dumps(raw))
+        return "complete"
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified)
+    assert result["summary"]["methods"] is None
+    assert result["coverage"]["batches"][0]["status"] == "unvalidated_output_or_source"
+
+
+def test_partial_method_file_metadata_keeps_counts_unknown_without_losing_rows(
+    qualified, monkeypatch
+):
+    def run(argv, *, output=None, **kwargs):
+        if output:
+            raw = raw_result("src/app.py")
+            raw["source_files"].update(rows=[{"path": "src/app.py"}, {"path": "src/z.py"}], count=2)
+            methods = raw["methods"]
+            methods["rows"].append({**methods["rows"][0], "path": "src/z.py"})
+            methods.update(count=2, source_files=2, retained_files=2)
+            methods["file_coverage"].update(status="partial", count=2, limit=2, omitted=1)
+            output.write_text(json.dumps(raw))
+        return "complete"
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source(), source("src/z.py")], snapshot=qualified)
+    modules = {row["path"]: row for row in result["modules"]}
+    assert result["summary"]["methods"] == 2 and result["status"] == "partial"
+    assert modules["src/app.py"]["method_rows_retained"] == 1
+    assert modules["src/app.py"]["method_model_count"] == 1
+    assert modules["src/z.py"]["method_rows_retained"] is None
+    assert modules["src/z.py"]["method_model_count"] is None
+    sections = result["coverage"]["batches"][0]["model_sections"]
+    assert sections["methods"]["retained_files"] == 2
+    assert sections["methods"]["file_coverage"]["omitted"] == 1
+
+
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
+def test_ast_compatibility_preserves_escaped_surrogates_and_unicode_values(tmp_path, surrogate):
+    from copy import deepcopy
+
+    ast = {
+        "body": [
+            interface_ast(
+                [property_ast(0)],
+                annotation={
+                    "type": "TSLiteralType",
+                    "literal": {"type": "StringLiteral", "value": surrogate},
+                },
+                description="é😀",
+            )
+        ]
+    }
+    expected = deepcopy(ast)
+    expected["body"][0]["body"]["body"][0]["key"]["value"] = "0"
+    payload = json.dumps(ast, ensure_ascii=True, separators=(",", ":")).encode()
+    result, receipt, _, _ = transport_ast(tmp_path, payload)
+    assert json.loads(result) == expected
+    assert receipt["numeric_keys"] == 1 and receipt["unexpected_interfaces"] == 0

@@ -22,8 +22,8 @@ from pathlib import Path, PurePosixPath
 
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "2"
-QUERY_VERSION = "2"
+VERSION = "3"
+QUERY_VERSION = "3"
 JOERN_VERSION = "4.0.669"
 QUERY_PATH = Path(__file__).parent / "resources" / "joern.sc"
 MAX_INPUT_RECORDS = 20_000
@@ -78,14 +78,91 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
+
+INTERFACE = b'{"type":"TSInterfaceDeclaration",'
+
+
+def interface_names(payload, counts):
+    node = json.loads(payload)
+    if not isinstance(node, dict) or node.get("type") != "TSInterfaceDeclaration":
+        raise ValueError("Unexpected interface node")
+    body = node.get("body", {})
+    if not isinstance(body, dict) or body.get("type") != "TSInterfaceBody" or not isinstance(body.get("body"), list):
+        counts["unexpected_interfaces"] += 1
+        return payload
+    changed = 0
+    for member in body["body"]:
+        if not isinstance(member, dict):
+            counts["unexpected_interfaces"] += 1
+            continue
+        if member.get("type") != "TSPropertySignature" or member.get("computed") is True:
+            continue
+        key = member.get("key", {})
+        if not isinstance(key, dict) or key.get("type") != "NumericLiteral":
+            continue
+        value = key.get("value")
+        if type(value) not in (int, float) or not 0 <= value <= 9007199254740991 or int(value) != value:
+            counts["unsupported_numeric_keys"] += 1
+            continue
+        key["value"] = str(int(value))
+        changed += 1
+    counts["numeric_keys"] += changed
+    return json.dumps(node, ensure_ascii=True, separators=(",", ":")).encode() if changed else payload
+
+
+def copy_ast(original, restored, initial, counts):
+    buffer, eof = initial, False
+    decoder = json.JSONDecoder()
+    while buffer or not eof:
+        at = buffer.find(INTERFACE)
+        if at < 0:
+            retained = 0 if eof else min(len(buffer), len(INTERFACE) - 1)
+            restored.write(buffer[:len(buffer) - retained])
+            buffer = buffer[-retained:] if retained else b""
+        else:
+            restored.write(buffer[:at])
+            buffer = buffer[at:]
+            while True:
+                try:
+                    text = buffer.decode("utf-8")
+                    _, end = decoder.raw_decode(text)
+                    end = len(text[:end].encode("utf-8"))
+                    if end > MAX_INTERFACE_BYTES:
+                        counts["bounded_interfaces"] += 1
+                        restored.write(buffer[:end])
+                    else:
+                        restored.write(interface_names(buffer[:end], counts))
+                    buffer = buffer[end:]
+                    break
+                except RecursionError:
+                    counts["unexpected_interfaces"] += 1
+                    restored.write(buffer)
+                    buffer = b""
+                    break
+                except (UnicodeError, json.JSONDecodeError):
+                    if len(buffer) > MAX_INTERFACE_BYTES or eof:
+                        counts["bounded_interfaces" if not eof else "unexpected_interfaces"] += 1
+                        restored.write(buffer)
+                        buffer = b""
+                        break
+                    chunk = original.read(64 * 1024)
+                    buffer += chunk
+                    eof = not chunk
+            continue
+        if not eof:
+            chunk = original.read(64 * 1024)
+            buffer += chunk
+            eof = not chunk
+
 
 manifest = Path(__file__).with_suffix(".json")
 if manifest.stat().st_size > 32 * 1024**2:
     raise ValueError("Oversized transport manifest")
 settings = json.loads(manifest.read_text())
+MAX_INTERFACE_BYTES = settings["max_interface_bytes"]
+compatibility = []
 binary = settings["binary"]
 args = sys.argv[1:]
 if args == ["--version"]:
@@ -115,6 +192,7 @@ for row in settings["files"]:
     if ast.is_symlink() or ast.stat().st_size > settings["max_ast_bytes"]:
         raise ValueError("Invalid AST transport output")
     temporary = ast.with_suffix(".pat-restored")
+    counts = dict(numeric_keys=0, bounded_interfaces=0, unexpected_interfaces=0, unsupported_numeric_keys=0)
     with ast.open("rb") as original, temporary.open("xb") as restored:
         header = original.read(64 * 1024)
         match = prefix.match(header)
@@ -122,9 +200,16 @@ for row in settings["files"]:
             raise ValueError("Unexpected pinned AST header")
         identity = {"fullName": str(source / row["path"]), "relativeName": row["path"]}
         restored.write(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode()[:-1] + b',"ast":')
-        restored.write(header[match.end():])
-        shutil.copyfileobj(original, restored, 1024 * 1024)
+        copy_ast(original, restored, header[match.end():], counts)
+    if any(counts.values()):
+        with ast.open("rb") as stream:
+            producer = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
+        with temporary.open("rb") as stream:
+            consumer = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
+        compatibility.append({"path": row["path"], "source_digest": "sha256:" + row["sha256"],
+            "producer_ast_digest": producer, "consumer_ast_digest": consumer, **counts})
     temporary.replace(ast)
+(workspace / "ast-compatibility.json").write_text(json.dumps({"schema_version": 1, "files": compatibility}))
 """
 
 
@@ -145,6 +230,7 @@ def joern_limits(analysis_profile):
             "lines_per_file": 50_000,
             "bytes_per_line": 10_000,
             "emscripten": "unsupported",
+            "interface_node_bytes": 2 * 1024**2,
         },
         "deadline_mode": "dedicated hard subprocess deadline; bounded normalization",
     }
@@ -233,10 +319,13 @@ def joern_info():
         "adapter_version": VERSION,
         "query_version": QUERY_VERSION,
         "javascript_transport": {
-            "version": "1",
+            "version": "2",
             "sha256": hashlib.sha256(_ASTGEN_TRANSPORT.encode()).hexdigest(),
             "source_identity": "original_captured_paths",
             "type_maps": "not_run",
+            "ast_compatibility": "Direct noncomputed TypeScript interface safe-integer property names for the pinned consumer; source bytes, node kinds and locations are unchanged",
+            "ast_compatibility_version": "1",
+            "ast_digest_scope": "Producer uses transport paths; consumer restores captured paths and applies only the recorded scoped compatibility",
             "module_mode": "Babel unambiguous syntax; .mts/.cts host module-resolution parity is unverified",
         },
         "available": False,
@@ -318,6 +407,7 @@ def _javascript_transport(workspace, stage, batch, paths, limits):
                 "transport": str(transport),
                 "files": rows,
                 "max_ast_bytes": limits["workspace_bytes"],
+                "max_interface_bytes": limits["javascript_frontend"]["interface_node_bytes"],
             }
         )
     )
@@ -332,6 +422,66 @@ def _javascript_transport(workspace, stage, batch, paths, limits):
     )
     launcher.chmod(0o500)
     return launcher
+
+
+def _javascript_compatibility(workspace, stage, batch):
+    """Validate the fixed transport's source-bound AST compatibility receipt."""
+    path = workspace / "ast-compatibility.json"
+    if path.is_symlink() or path.stat().st_size > 32 * 1024**2:
+        raise ValueError("Invalid AST compatibility receipt")
+    value = json.loads(path.read_text())
+    if (
+        not isinstance(value, dict)
+        or type(value.get("schema_version")) is not int
+        or value["schema_version"] != 1
+        or not isinstance(value.get("files"), list)
+        or len(value["files"]) > len(batch)
+    ):
+        raise ValueError("Invalid AST compatibility receipt")
+    fields = (
+        "numeric_keys",
+        "bounded_interfaces",
+        "unexpected_interfaces",
+        "unsupported_numeric_keys",
+    )
+    totals = {field: 0 for field in fields}
+    records, seen = [], set()
+    for row in value["files"]:
+        if not isinstance(row, dict):
+            raise ValueError("Invalid AST compatibility file")
+        source = _source_path(row.get("path"), stage, batch)
+        if source is None or source in seen or row.get("source_digest") != batch[source]["digest"]:
+            raise ValueError("Invalid AST compatibility identity")
+        seen.add(source)
+        if any(not _integer(row.get(field)) for field in fields) or any(
+            not isinstance(row.get(field), str)
+            or re.fullmatch(r"sha256:[a-f0-9]{64}", row[field]) is None
+            for field in ("producer_ast_digest", "consumer_ast_digest")
+        ):
+            raise ValueError("Invalid AST compatibility counts or digests")
+        records.append(
+            {
+                "path": source,
+                **{
+                    field: row[field]
+                    for field in (
+                        *fields,
+                        "source_digest",
+                        "producer_ast_digest",
+                        "consumer_ast_digest",
+                    )
+                },
+            }
+        )
+        for field in fields:
+            totals[field] += row[field]
+    return {
+        "version": "1",
+        "scope": "direct noncomputed TypeScript interface safe-integer property names",
+        "adjusted_files": sum(row["numeric_keys"] > 0 for row in records),
+        **totals,
+        "files": records,
+    }
 
 
 def _environment(paths, java, workspace, limits):
@@ -753,6 +903,81 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
     return methods, calls, candidates, modeled, omissions, gaps, *edge_sets
 
 
+def _method_sampling_metadata(value, stage, sources):
+    """Keep bounded per-file model coverage distinct from retained normalized rows."""
+    fields = ("source_files", "retained_files", "omitted_files", "row_byte_limit", "byte_omissions")
+    if (
+        not isinstance(value, dict)
+        or value.get("sampling") != "max_min_per_file_then_round_robin"
+        or any(not _integer(value.get(field)) for field in (*fields, "count", "omitted"))
+        or value["source_files"] > len(sources)
+        or value["retained_files"] + value["omitted_files"] != value["source_files"]
+        or value["row_byte_limit"] != 6 * 1024**2 - 256 * 1024 - 4096
+        or value["byte_omissions"] > 20_000
+        or value["omitted"] > value["count"]
+    ):
+        raise ValueError("Invalid method sampling metadata")
+    coverage = value.get("file_coverage")
+    if (
+        not isinstance(coverage, dict)
+        or coverage.get("status") not in {"complete", "partial"}
+        or any(
+            not _integer(coverage.get(field))
+            for field in ("count", "omitted", "limit", "byte_limit")
+        )
+        or coverage["count"] != value["source_files"]
+        or coverage["limit"] != coverage["count"]
+        or coverage["byte_limit"] != 256 * 1024
+        or not isinstance(coverage.get("rows"), list)
+        or len(coverage["rows"]) > len(sources)
+        or coverage["omitted"] + len(coverage["rows"]) != coverage["count"]
+        or coverage["status"] == "complete"
+        and coverage["omitted"] != 0
+    ):
+        raise ValueError("Invalid method file coverage")
+    rows, seen, unlocated = [], set(), 0
+    for row in coverage["rows"]:
+        if not isinstance(row, dict) or type(row.get("identity_truncated")) is not bool:
+            raise ValueError("Invalid method file coverage row")
+        if row.get("identity_truncated") is True:
+            unlocated += 1
+            continue
+        path = _source_path(row.get("path"), stage, sources)
+        if (
+            path is None
+            or path in seen
+            or not _integer(row.get("count"))
+            or row["count"] == 0
+            or not _integer(row.get("retained"))
+            or row["retained"] > row["count"]
+        ):
+            raise ValueError("Invalid method file coverage identity or count")
+        seen.add(path)
+        rows.append({"path": path, "count": row["count"], "retained": row["retained"]})
+    if (
+        coverage["status"] == "complete"
+        and not unlocated
+        and (
+            sum(row["count"] for row in rows) != value["count"]
+            or sum(row["retained"] for row in rows) != value["count"] - value["omitted"]
+            or sum(row["retained"] > 0 for row in rows) != value["retained_files"]
+        )
+    ):
+        raise ValueError("Inconsistent complete method sampling counts")
+    return {
+        "sampling": value["sampling"],
+        **{field: value[field] for field in fields},
+        "file_coverage": {
+            "status": "partial" if unlocated else coverage["status"],
+            "count": coverage["count"],
+            "omitted": coverage["omitted"] + unlocated,
+            "limit": coverage["limit"],
+            "byte_limit": coverage["byte_limit"],
+            "rows": rows,
+        },
+    }
+
+
 def _model_metadata(raw, limits):
     metadata, metrics = raw.get("metadata"), raw.get("metrics")
     if not isinstance(metadata, dict) or not isinstance(metrics, dict):
@@ -927,6 +1152,7 @@ def analyze_joern(
     if unqualified:
         gaps.add(identity["unqualified_reason"])
     modeled, batches, successful = set(), [], 0
+    method_file_coverage = {}
     edges, inferred_edges = Counter(), Counter()
     clean = redact or (lambda value: value)
     try:
@@ -1029,6 +1255,7 @@ def analyze_joern(
                         _javascript_transport(workspace, stage, batch, paths, limits)
                     )
                     parser.append("--no-tsTypes")
+                compatibility = None
                 status = _run(
                     _contained_command(parser, workspace, original, containment, binary, cwd),
                     workspace=workspace,
@@ -1037,6 +1264,22 @@ def analyze_joern(
                     stop=stop,
                     limits=limits,
                 )
+                if status == "complete" and language == "javascript":
+                    try:
+                        compatibility = _javascript_compatibility(workspace, stage, batch)
+                        if any(
+                            compatibility[field]
+                            for field in (
+                                "bounded_interfaces",
+                                "unexpected_interfaces",
+                                "unsupported_numeric_keys",
+                            )
+                        ):
+                            gaps.add(
+                                "Pinned JavaScript AST compatibility was bounded or unsupported; inspect the source-bound receipt and model coverage"
+                            )
+                    except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+                        status = "unvalidated_ast_compatibility"
                 if status == "complete":
                     command = [
                         str(paths["repl"]),
@@ -1081,6 +1324,13 @@ def analyze_joern(
                             module_edges,
                             inferred_module_edges,
                         ) = _normalize(raw, stage, batch, workspace, clean, stop)
+                        method_sampling = _method_sampling_metadata(
+                            raw.get("methods"), stage, batch
+                        )
+                        if method_sampling["file_coverage"]["status"] != "complete":
+                            model_gaps.add(
+                                "Joern per-file method coverage metadata is bounded or unlocated; absent file counts remain unknown"
+                            )
                         counts = {
                             section: {
                                 key: raw.get(section, {}).get(key) for key in ("count", "omitted")
@@ -1094,6 +1344,7 @@ def analyze_joern(
                                 "inferred_module_edges",
                             )
                         }
+                        counts["methods"].update(method_sampling)
                         for section, fields in (
                             ("methods", ("external_models", "unlocated_models")),
                             ("module_edges", ("occurrences", "omitted_occurrences")),
@@ -1147,6 +1398,10 @@ def analyze_joern(
                             counts["unread_bindings"]["captured_declarations"] = unread[
                                 "captured_declarations"
                             ]
+                        method_file_coverage.update(
+                            (row["path"], row["count"])
+                            for row in method_sampling["file_coverage"]["rows"]
+                        )
                         all_methods.extend(methods)
                         all_calls.extend(calls)
                         all_candidates.extend(candidates)
@@ -1174,6 +1429,7 @@ def analyze_joern(
                         "model_sections": counts,
                         "model_metadata": metadata,
                         "model_metrics": metrics,
+                        "ast_compatibility": compatibility,
                     }
                 )
                 shutil.rmtree(cwd)
@@ -1188,6 +1444,7 @@ def analyze_joern(
                         "eligible_files": unqualified,
                     }
                 )
+            retained_method_rows = Counter(row["path"] for row in all_methods)
             result["modules"] = [
                 {
                     "path": source["path"],
@@ -1195,6 +1452,10 @@ def analyze_joern(
                     "language": source["language"],
                     "staged": source["path"] in staged,
                     "modeled": source["path"] in modeled,
+                    "method_rows_retained": retained_method_rows[source["path"]]
+                    if source["path"] in method_file_coverage
+                    else None,
+                    "method_model_count": method_file_coverage.get(source["path"]),
                 }
                 | (
                     {"skip_reason": skipped[source["path"]]}
@@ -1226,6 +1487,7 @@ def analyze_joern(
         gaps.add("Joern rich candidate sample is bounded; inspect the compact index")
     all_candidates = list({row["id"]: row for row in all_candidates}.values())
     result["topology"].update(
+        method_sampling_caveat="Per-file counts describe bounded source-located method models, not source functions or proof of absence. Missing file metadata remains unknown.",
         methods=sorted(all_methods, key=lambda row: (row["path"], row["line"], row["full_name"])),
         calls=sorted(
             all_calls, key=lambda row: (row["path"], row["line"], row["target_full_name"])

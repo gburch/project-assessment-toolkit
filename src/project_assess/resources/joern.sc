@@ -15,7 +15,7 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
     "Unread bindings are review leads only; preserve initializer effects and callback, override and public signature contracts.",
     "No dataflow, reachability/dead-method inference or target-code execution is performed."
   )
-  val result = Obj("schema_version" -> 1, "query_version" -> "2", "dataflow" -> "not_run",
+  val result = Obj("schema_version" -> 1, "query_version" -> "3", "dataflow" -> "not_run",
     "errors" -> errors, "gaps" -> gaps, "caveats" -> caveats)
   var truncatedValues = 0L
   def text(value: String, limit: Int = 2048): String = {
@@ -63,6 +63,76 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
         "count" -> Num(count.toDouble), "omitted" -> Num((count - rows.size).toDouble),
         "limit" -> maxRows, "byte_limit" -> Num(maxBytes.toDouble), "rows" -> Arr.from(rows))
     }
+  }
+  // Max-min file quotas keep a large early file from consuming every row.
+  // Only bounded method references are retained; JSON is built during output.
+  // Round-robin byte admission is deterministic and skips a row that cannot fit.
+  class FairRows[A](counts: Map[String, Long], maxRows: Int, maxBytes: Long, metadataBytes: Long) {
+    case class Choice(key: String, value: A)
+    private val paths = counts.keys.toVector.sorted
+    private val caps = mutable.Map.from(paths.map(_ -> 0))
+    private val retained = mutable.Map.empty[String, mutable.PriorityQueue[Choice]]
+    private var remaining = maxRows
+    private var active = paths
+    while (remaining > 0 && active.nonEmpty) {
+      val share = math.max(remaining / active.size, 1)
+      active.foreach { path =>
+        val take = math.min(math.min(counts(path) - caps(path), share.toLong), remaining.toLong).toInt
+        caps(path) += take; remaining -= take
+      }
+      active = active.filter(path => caps(path) < counts(path))
+    }
+    def add(path: String, key: String)(value: => A): Unit = if (caps(path) > 0) {
+      val rows = retained.getOrElseUpdate(path,
+        mutable.PriorityQueue.empty[Choice](using Ordering.by[Choice, String](_.key)))
+      if (rows.size < caps(path)) rows.enqueue(Choice(key, value))
+      else if (key < rows.head.key) { rows.dequeue(); rows.enqueue(Choice(key, value)) }
+    }
+    def output(build: A => Value): Obj = {
+      val choices = retained.view.mapValues(_.iterator.toVector.sortBy(_.key)).toMap
+      val rows = Arr()
+      val accepted = mutable.Map.empty[String, Int].withDefaultValue(0)
+      val rowByteLimit = maxBytes - metadataBytes - 4096
+      var bytes = 0L
+      var byteOmissions = 0L
+      var rank = 0
+      var active = paths.filter(path => choices.get(path).exists(_.nonEmpty))
+      while (active.nonEmpty) {
+        active.foreach { path =>
+          val row = build(choices(path)(rank).value)
+          val size = ujson.write(row).getBytes(UTF_8).length + 1
+          if (bytes + size <= rowByteLimit) {
+            rows.value += row; bytes += size; accepted(path) += 1
+          } else byteOmissions += 1
+        }
+        rank += 1
+        active = active.filter(path => choices(path).size > rank)
+      }
+      val files = new Bounded(paths.size, metadataBytes)
+      paths.foreach(path => files.add(identityRow {
+        Obj("path" -> text(path), "count" -> Num(counts(path).toDouble), "retained" -> accepted(path))
+      }))
+      val count = counts.valuesIterator.sum
+      val represented = accepted.count(_._2 > 0)
+      Obj("status" -> (if (count == rows.value.size) "complete" else "partial"),
+        "count" -> Num(count.toDouble), "omitted" -> Num((count - rows.value.size).toDouble),
+        "limit" -> maxRows, "byte_limit" -> Num(maxBytes.toDouble), "rows" -> rows,
+        "sampling" -> "max_min_per_file_then_round_robin",
+        "source_files" -> paths.size, "retained_files" -> represented,
+        "omitted_files" -> (paths.size - represented), "row_byte_limit" -> Num(rowByteLimit.toDouble),
+        "byte_omissions" -> Num(byteOmissions.toDouble), "file_coverage" -> files.output)
+    }
+  }
+  val samplingDigest = java.security.MessageDigest.getInstance("SHA-256")
+  val samplingHex = java.util.HexFormat.of()
+  def methodSamplingKey(root: String, path: String, start: Int, end: Int,
+      name: String, fullName: String, abstractMethod: Boolean, constructor: Boolean, body: Boolean): String = {
+    def relative(value: String): String = value.replace('\\', '/').replace(root.replace('\\', '/') + "/", "")
+    val file = relative(path)
+    val qualified = if (file.nonEmpty) relative(fullName).replace(file, "<file>") else relative(fullName)
+    val identity = Seq(f"$start%010d", f"$end%010d", name.take(257), qualified.take(4097),
+      abstractMethod.toString, constructor.toString, body.toString).mkString("\u0000")
+    samplingHex.formatHex(samplingDigest.digest(identity.getBytes(UTF_8))) + "\u0000" + identity
   }
   // Separate supported dependencies from broader producer target hypotheses,
   // sharing the previous aggregate byte budget between the two views.
@@ -295,18 +365,31 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
       }
     }
     attempt("methods") {
-      val rows = new Bounded(20000, 6 * 1024 * 1024)
       var external = 0L
       var unlocated = 0L
+      val counts = mutable.Map.empty[String, Long].withDefaultValue(0L)
       cpg.method.foreach { method =>
         if (method.isExternal) external += 1
         else if (!locatedSource(method)) unlocated += 1
-        else rows.add(methodRow(method))
+        else counts(method.filename) += 1
       }
-      val output = rows.output
+      val rows = new FairRows[Method](counts.toMap, 20000, 6 * 1024 * 1024, 256 * 1024)
+      // Adapter contract: captured source is beside cpg.bin in a source directory.
+      // Remove this private root before hashing, even when filename is relative.
+      val sourceRoot = Paths.get(cpgFile).toAbsolutePath.getParent.resolve("source").normalize.toString
+      cpg.method.filter(locatedSource).foreach { method =>
+        val state = flags(method)
+        // Every output field participates in ties, including truncation boundaries;
+        // graph IDs and traversal order never determine which source row survives.
+        val key = methodSamplingKey(sourceRoot, method.filename, method.lineNumber.getOrElse(0),
+          method.lineNumberEnd.getOrElse(0), method.name, method.fullName,
+          state.abstractMethod, state.constructor, state.body)
+        rows.add(method.filename, key)(method)
+      }
+      val output = rows.output(methodRow)
       output("external_models") = Num(external.toDouble)
       output("unlocated_models") = Num(unlocated.toDouble)
-      output("basis") = Str("Located internal source method models only; external/unlocated models do not consume the source-row budget.")
+      output("basis") = Str("Located source methods receive max-min per-file row quotas, SHA-256-ranked source identities within each file, and deterministic round-robin byte admission. Private source roots and graph IDs do not affect ranking. External/unlocated models consume no quota; oversized rows do not block other files. Counts describe model coverage, not absence of source methods.")
       output
     }
     attempt("calls") {
