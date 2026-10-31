@@ -10,7 +10,7 @@ import ast
 import hashlib
 import json
 import re
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from itertools import islice
 from pathlib import Path, PurePosixPath
 
@@ -300,6 +300,38 @@ def _components(paths, edges):
             yield sorted(group)
 
 
+def _round_robin(groups):
+    pending = deque(iter(group) for group in groups)
+    while pending:
+        group = pending.popleft()
+        candidate = next(group, None)
+        if candidate is not None:
+            yield candidate
+            pending.append(group)
+
+
+def _retained_candidates(candidates):
+    """Share the bounded sample across kinds, source areas and individual files."""
+    grouped = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    for row in sorted(
+        candidates,
+        key=lambda item: (item["kind"], item["locations"][0]["path"], item["locations"][0]["line"]),
+    ):
+        path = row["locations"][0]["path"]
+        parts = PurePosixPath(path).parts
+        area = parts[0] if len(parts) > 1 else ""
+        grouped[row["kind"]][area][path].append(row)
+    kinds = []
+    for kind in sorted(grouped):
+        areas = []
+        for area in sorted(grouped[kind]):
+            files = grouped[kind][area]
+            paths = sorted(files, key=lambda path: (hashlib.sha256(path.encode()).digest(), path))
+            areas.append(_round_robin([files[path] for path in paths]))
+        kinds.append(_round_robin(areas))
+    return list(islice(_round_robin(kinds), MAX_CANDIDATES))
+
+
 def summarize(records: list[dict], python_files: int, other_source_files: int) -> dict:
     selected = sorted(records, key=lambda row: row["path"])[:MAX_FILES]
     gaps = sorted({gap for record in selected for gap in record["gaps"]})
@@ -380,9 +412,6 @@ def summarize(records: list[dict], python_files: int, other_source_files: int) -
                 },
             }
         )
-    candidates.sort(
-        key=lambda row: (row["kind"], row["locations"][0]["path"], row["locations"][0]["line"])
-    )
     if len(candidates) > MAX_CANDIDATES:
         gaps.append("Static candidate limit reached; remaining candidates omitted")
     partial = (
@@ -406,7 +435,7 @@ def summarize(records: list[dict], python_files: int, other_source_files: int) -
             "dependency_edges": len(edges),
             "candidate_count": len(candidates),
         },
-        "candidates": candidates[:MAX_CANDIDATES],
+        "candidates": _retained_candidates(candidates),
         "gaps": gaps,
         "limits": {
             "files": MAX_FILES,

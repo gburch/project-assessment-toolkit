@@ -195,6 +195,56 @@ def test_analysis_limits_are_partial_and_do_not_claim_no_risks(monkeypatch):
     assert any("remaining candidates omitted" in gap for gap in result["gaps"])
 
 
+def test_retained_leads_share_budget_across_kinds_areas_and_files(monkeypatch):
+    def complex_functions(count):
+        return "\n".join(
+            f"def function_{number}(value):\n"
+            + "".join(f"    if value == {branch}:\n        value += 1\n" for branch in range(10))
+            + f"    return value + {number}\n"
+            for number in range(count)
+        )
+
+    shared_body = (
+        "def normalize(values):\n"
+        "    total = 0\n"
+        "    for value in values:\n"
+        "        total += value * 3\n"
+        "    return total + 7\n"
+    )
+    records = [
+        record("docs/flood.py", complex_functions(30)),
+        record("docs/other.py", complex_functions(1)),
+        record("services/workflow.py", complex_functions(1)),
+        record("services/a.py", "from . import b\n"),
+        record("services/b.py", "from . import a\n"),
+        record("services/clone_a.py", shared_body),
+        record("services/clone_b.py", shared_body),
+        record(
+            "tools/read.py", "def read(paths):\n    for path in paths:\n        path.read_text()\n"
+        ),
+    ]
+    monkeypatch.setattr(static_analysis, "MAX_CANDIDATES", 8)
+
+    result = summary(*records)
+
+    assert result == summary(*reversed(records))
+    assert len(result["candidates"]) == 8
+    assert {row["kind"] for row in result["candidates"]} == {
+        "complex_function",
+        "duplicate_function",
+        "dependency_cycle",
+        "loop_io",
+    }
+    assert {row["locations"][0]["path"] for row in candidates(result, "complex_function")} >= {
+        "docs/flood.py",
+        "docs/other.py",
+        "services/workflow.py",
+    }
+    assert result["summary"]["candidate_count"] > len(result["candidates"])
+    assert result["status"] == "partial"
+    assert any("remaining candidates omitted" in gap for gap in result["gaps"])
+
+
 def test_unresolved_imports_consume_the_resolution_budget(monkeypatch):
     monkeypatch.setattr(static_analysis, "MAX_IMPORT_TARGETS", 2)
     a = record("a.py", "import missing_one, missing_two, b\n")

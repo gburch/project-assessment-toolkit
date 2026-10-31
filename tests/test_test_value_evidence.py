@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
+
+from project_assess.test_value import audit
 
 SCRIPT = (
     Path(__file__).resolve().parents[1] / ".agents/skills/test-value/scripts/test_value_audit.py"
@@ -54,6 +59,36 @@ def _normalized(path: Path, source_hash: str, *, layer: str, test_id: str, lines
             }
         ],
     }
+
+
+@pytest.mark.parametrize(
+    ("replacement", "expected"),
+    [
+        ("\n\ndef test_value():\n    pass\n", {"startLine": 3, "endLine": 4, "sourceLines": 2}),
+        ("def test_value(:\n    pass\n", None),
+    ],
+)
+def test_source_span_refreshes_when_size_and_mtime_are_preserved(tmp_path, replacement, expected):
+    root = tmp_path.resolve()
+    path = root / "test_value.py"
+    original = "def test_value():\n    assert True\n"
+    size = max(len(original), len(replacement))
+    path.write_text(original.ljust(size))
+    before = path.stat()
+    assert audit.test_source_span(root, "test_value.py::test_value") == {
+        "file": "test_value.py",
+        "startLine": 1,
+        "endLine": 2,
+        "sourceLines": 2,
+    }
+    path.write_text(replacement.ljust(size))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert path.stat().st_size == before.st_size
+    assert path.stat().st_mtime_ns == before.st_mtime_ns
+
+    current = audit.test_source_span(root, "test_value.py::test_value")
+
+    assert current == ({"file": "test_value.py", **expected} if expected is not None else None)
 
 
 def test_compare_imports_istanbul_and_pytest_without_cross_source_false_matches(tmp_path):

@@ -46,9 +46,11 @@ uv run --locked pat --state-dir /path/outside/repos/assessment-state review ASSE
 uv run --locked pat --state-dir /path/outside/repos/assessment-state serve
 ```
 
-Use the URL printed by `serve` to inspect saved assessments, adjust targets and see progress. `--port N` chooses a port. State must remain outside assessed roots, so collecting a report does not change the source being measured. Existing test or analysis reports can be supplied with repeated `scan --report FILE` options; supplied results retain their evidence limitations.
+Use the URL printed by `serve` to scan a new project path, inspect saved evidence, submit a review, adjust targets and see progress. Saved projects can be scanned again from the project selector. `--port N` chooses a port. State must remain outside assessed roots, so collecting a report does not change the source being measured. Existing test or analysis reports can be supplied through the CLI with repeated `scan --report FILE` options; supplied results retain their evidence limitations.
 
-Save the JSON printed by `review-template` to a file outside the assessed repository, then fill it using the captured evidence and rubric before passing it to `review --input`. Each numeric judgment needs cited evidence; inspection can support a labeled burden estimate without execution or time records.
+In the app, open the review editor for the current snapshot, load its template or import review JSON, and fill it using the captured evidence and rubric. Submit explicitly when ready. A rescan needs a review bound to the new snapshot; an old or mismatched review is rejected. Each numeric judgment needs cited evidence; inspection can support a labeled burden estimate without execution or time records.
+
+For the CLI workflow, save the JSON printed by `review-template` to a file outside the assessed repository, fill it, then pass it to `review --input`.
 
 The [project-assess skill](../.agents/skills/project-assess/SKILL.md) guides evidence review and judgment. Its structured review is bound to an assessment ID, source digest and rubric version. It supplies each dimension's scores, confidence, rationale, evidence IDs and recommendations; findings retain separate severity and evidence. Review submission cannot overwrite collected metrics or source identity. Its validation checks structure and provenance, not the truth of an agent's conclusion.
 
@@ -92,7 +94,7 @@ Exports omit private evidence content, rationale and local paths, but publish ra
 
 `evolve ASSESSMENT_ID` returns a focused read-only next-step plan from the snapshot's saved review and selected goals; doctor includes the same orientation under `goal_alignment`. It can recommend `strengthen`, `simplify`, `rebalance` or `maintain`, with gaps and acceptance guidance; gather unknown evidence while keeping known gaps visible, and choose unconfigured targets explicitly. Without selected goals, it recommends their selection and saves nothing. Strengthen one rubric step through the smallest protection or seam addressing a real risk or variant, name acceptance proof and respect the burden ceiling. A simpler interface can increase capability without more layers. The [Evolve guide](../.agents/skills/project-assess/references/evolve-review.md) complements simplification; neither changes scores, goals or source automatically. Changing a target is not engineering progress.
 
-Python AST analysis can identify complex functions, normalized duplicate bodies, dependency-cycle leads and repeated I/O patterns. These are bounded hints, not proof of needless complexity, equivalent behavior or measured runtime cost. Function-local imports may defer dependencies intentionally; repeated checks can protect freshness, authorization or transactions. Supplied Ruff diagnostics retain unverified source identity, including any fix suggestions. Inspect the relevant source and callers before assigning impact, trusting a fix or choosing a score.
+Python AST analysis can identify complex functions, normalized duplicate bodies, dependency-cycle leads and repeated I/O patterns. These are bounded hints, not proof of needless complexity, equivalent behavior or measured runtime cost. When capped, retained candidates share the budget across analysis kinds, source areas and files; totals and omission gaps remain visible. The sample is not an exhaustive list or a priority ranking. Function-local imports may defer dependencies intentionally; repeated checks can protect freshness, authorization or transactions. Supplied Ruff diagnostics retain unverified source identity, including any fix suggestions. Inspect the relevant source and callers before assigning impact, trusting a fix or choosing a score.
 
 For review of recent work, focus on the requested changes. Search existing helpers and references before recommending reuse, then propose the smallest useful change and its closest verifier. Assessment produces advice; separately authorized implementation may apply high-confidence behavior-preserving fixes and validate them. Preserve errors, permissions, transactions and concurrency. The [focused skill guidance](../.agents/skills/project-assess/references/simplify-review.md) supplies review detail without adding a required checklist, line-count target or plugin architecture.
 
@@ -248,6 +250,21 @@ Before an update, record the current application version or commit and complete 
 Update to the intended application revision and its locked dependencies, then use `list` and `report` with the existing state path to verify access. To restore, stop writers and copy the backup into a **fresh state directory**, preserving permissions. Point the application at that restored copy; retain the previous directory and application revision for rollback.
 
 There is no automatic state-schema migration. If a version rejects the state schema, use the application version that created it or restore a compatible backup. Do not hand-edit schema metadata or delete history to bypass the check.
+
+### Local delivery and rollback proof
+
+Before distributing a candidate, run the [local delivery proof](https://github.com/gburch/project-assessment-toolkit/blob/main/CONTRIBUTING.md#local-delivery-proof) from its clean committed checkout. It uses one offline wheel installation and synthetic state, records source and artifact identity, and verifies failed updates leave state intact and a closed-state backup restores into a fresh directory. Its receipt does not establish compatibility with every historical state schema or authorize publication.
+
+For a real update, retain the last verified wheel, its `core-requirements.txt`, private receipt and the stopped-state backup described above. Install the selected verified wheel into a new environment, then verify `list` and `report` against the intended state. To roll application code back, use the earlier verified artifact and its matching constraints:
+
+```bash
+uv venv --offline /path/outside/repos/pat-rollback
+uv pip install --offline --python /path/outside/repos/pat-rollback/bin/python \
+  --constraint /path/to/prior-proof/core-requirements.txt /path/to/prior-proof/dist/VERIFIED_WHEEL.whl
+/path/outside/repos/pat-rollback/bin/pat --state-dir /path/to/fresh-restored-state list
+```
+
+Restore the complete stopped-state backup into that fresh state directory before the last command; keep the later state and application environment for investigation. Use an artifact compatible with the backup's schema. This is a manual local rollback, with no automatic migration or provider operation.
 
 For common problems:
 

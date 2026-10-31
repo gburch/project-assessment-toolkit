@@ -94,6 +94,8 @@ def create_server(service, port=0):
                     result = service.rubric()
                 elif parsed.path == "/api/report":
                     result = service.get_report(self._query(parsed.query, "assessment_id"))
+                elif parsed.path == "/api/review-template":
+                    result = service.review_template(self._query(parsed.query, "assessment_id"))
                 elif parsed.path == "/api/history":
                     result = service.history(self._query(parsed.query, "project_id"), summary=True)
                 elif parsed.path == "/api/progress":
@@ -106,7 +108,7 @@ def create_server(service, port=0):
             if self.command != "POST":
                 self._error(405, "Method not allowed")
                 return
-            if parsed.query or parsed.path not in {"/api/targets", "/api/scan"}:
+            if parsed.query or parsed.path not in {"/api/targets", "/api/scan", "/api/review"}:
                 self._error(404, "Report route not found")
                 return
             if self.headers.get("Origin") != self.server.origin or not secrets.compare_digest(
@@ -145,17 +147,37 @@ def create_server(service, port=0):
                 }:
                     raise ValueError("Unsupported target fields")
                 result = service.set_targets(**document)
+            elif parsed.path == "/api/review":
+                if (
+                    not {"assessment_id", "review"} <= document.keys()
+                    or document.keys() - {"assessment_id", "review", "request_id"}
+                    or not isinstance(document["assessment_id"], str)
+                    or not isinstance(document["review"], dict)
+                ):
+                    raise ValueError(
+                        "Review requires assessment_id, review, and optional request_id"
+                    )
+                result = service.submit_review(**document)
             else:
-                if set(document) != {"project_id"}:
-                    raise ValueError("Scan requires only project_id")
-                project = next(
-                    (p for p in service.list_projects() if p["id"] == document["project_id"]),
-                    None,
-                )
-                if project is None:
-                    self._error(404, "Project not found")
-                    return
-                result = service.scan(project["root"])
+                if set(document) == {"root"} and isinstance(document["root"], str):
+                    root = document["root"]
+                    if not root or len(root) > 4096 or "\x00" in root:
+                        raise ValueError("Scan root must be a nonempty project directory path")
+                elif set(document) == {"project_id"} and isinstance(document["project_id"], str):
+                    project = next(
+                        (p for p in service.list_projects() if p["id"] == document["project_id"]),
+                        None,
+                    )
+                    if project is None:
+                        self._error(404, "Project not found")
+                        return
+                    root = project["root"]
+                else:
+                    raise ValueError("Scan requires either root or project_id")
+                try:
+                    result = service.scan(root)
+                except (FileNotFoundError, NotADirectoryError):
+                    raise ValueError("Project root must be an existing directory") from None
             self._respond(200, result)
 
         def _handle(self):

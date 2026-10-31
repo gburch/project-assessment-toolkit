@@ -24,7 +24,7 @@ SCHEMA = "test-value-audit.v3"
 PHASES = {"setup": "setup", "run": "call", "teardown": "teardown"}
 DEFAULT_SOFT_TARGET = 70.0
 GREEDY_SELECTION_BUDGET = 256
-_SOURCE_TREE_CACHE: dict[tuple[str, int, int], ast.AST | None] = {}
+_SOURCE_TREE_CACHE: dict[str, tuple[str, ast.AST]] = {}
 
 
 def digest(path: Path) -> str:
@@ -737,11 +737,14 @@ def test_source_span(root: Path, nodeid: str) -> dict[str, Any] | None:
         return None
     function_name = parts[-1].split("[", 1)[0]
     try:
-        stat = path.stat()
-        cache_key = (str(path), stat.st_mtime_ns, stat.st_size)
-        if cache_key not in _SOURCE_TREE_CACHE:
-            _SOURCE_TREE_CACHE[cache_key] = ast.parse(path.read_text())
-        tree = _SOURCE_TREE_CACHE[cache_key]
+        source = path.read_text()
+        fingerprint = hashlib.sha256(source.encode()).hexdigest()
+        cached = _SOURCE_TREE_CACHE.get(str(path))
+        if cached is None or cached[0] != fingerprint:
+            tree = ast.parse(source)
+            _SOURCE_TREE_CACHE[str(path)] = (fingerprint, tree)
+        else:
+            tree = cached[1]
     except (OSError, SyntaxError, UnicodeDecodeError):
         return None
     if tree is None:

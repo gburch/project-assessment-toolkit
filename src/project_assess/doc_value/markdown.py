@@ -22,6 +22,11 @@ def without_fences(text: str) -> str:
     return "\n".join(result)
 
 
+def _underscore_emphasis(text: str) -> bool:
+    outside_code = re.sub(r"(`+)[^`]*\1", "", text)
+    return re.search(r"(?<!\w)_{1,2}\w+_{1,2}(?!\w)", outside_code) is not None
+
+
 def headings(text: str) -> tuple[dict[str, int], bool]:
     result: dict[str, int] = {}
     seen: Counter[str] = Counter()
@@ -30,7 +35,8 @@ def headings(text: str) -> tuple[dict[str, int], bool]:
     for index, line in enumerate(lines):
         m = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
         if m:
-            slug = re.sub(r"[^a-z0-9 -]", "", m.group(1).lower())
+            unsupported |= _underscore_emphasis(m.group(1))
+            slug = re.sub(r"[^a-z0-9_ -]", "", m.group(1).lower())
             base = re.sub(r"\s+", "-", slug.strip())
             occurrence = seen[base]
             seen[base] += 1
@@ -40,14 +46,15 @@ def headings(text: str) -> tuple[dict[str, int], bool]:
             and index + 1 < len(lines)
             and re.match(r"^\s*(=+|-+)\s*$", lines[index + 1])
         ):
-            base = re.sub(r"[^a-z0-9 -]", "", line.lower())
+            unsupported |= _underscore_emphasis(line)
+            base = re.sub(r"[^a-z0-9_ -]", "", line.lower())
             base = re.sub(r"\s+", "-", base.strip())
             occurrence = seen[base]
             seen[base] += 1
             result[base if occurrence == 0 else f"{base}-{occurrence}"] = 1
     for match in re.finditer(r"<h[1-6]\b[^>]*>(.*?)</h[1-6]>", without_fences(text), re.I | re.S):
         inner = re.sub(r"<[^>]+>", "", match.group(1))
-        base = re.sub(r"[^a-z0-9 -]", "", inner.lower())
+        base = re.sub(r"[^a-z0-9_ -]", "", inner.lower())
         base = re.sub(r"\s+", "-", base.strip())
         occurrence = seen[base]
         seen[base] += 1

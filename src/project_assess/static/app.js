@@ -3,7 +3,8 @@
 let dims = [];
 let titles = {};
 const $ = (id) => document.getElementById(id);
-const state = { token: null, rubric: null, projects: [], project: null, report: null, targets: {}, revision: 0, dirty: false, load: 0, loading: false, saving: false };
+const MAX_REVIEW_BYTES = 256 * 1024;
+const state = { token: null, rubric: null, projects: [], project: null, report: null, targets: {}, revision: 0, dirty: false, load: 0, loading: true, saving: false, reviewLoading: false, reviewDirty: false, reviewAssessment: null, reviewRequest: null };
 
 function node(tag, text, className) {
   const el = document.createElement(tag);
@@ -102,10 +103,32 @@ function missingTargets() {
 }
 function updateControls() {
   const busy = state.loading || state.saving || !state.report;
+  $("scan").disabled = !state.token || state.loading || state.saving;
+  $("scan-root").disabled = state.loading || state.saving;
   $("profile").disabled = busy;
   for (const input of $("goal-controls").querySelectorAll("input")) input.disabled = busy;
   $("save").disabled = busy || !state.dirty || missingTargets().length > 0;
   $("rescan").disabled = busy;
+  for (const id of ["review-load", "review-file", "review-json"]) $(id).disabled = busy || state.reviewLoading;
+  $("review-submit").disabled = busy || state.reviewLoading || !state.reviewDirty ||
+    state.reviewAssessment !== state.report?.assessment.id || !$("review-json").value.trim();
+}
+function allowDiscard() {
+  return !(state.dirty || state.reviewDirty) ||
+    window.confirm("Discard unsaved target or review edits? Sent requests will still finish.");
+}
+function resetReview() {
+  state.reviewLoading = false;
+  state.reviewDirty = false;
+  state.reviewAssessment = null;
+  state.reviewRequest = null;
+  $("review-json").value = "";
+  $("review-file").value = "";
+  $("review-editor").open = false;
+  $("review-state").textContent = "Load a template or import a review for this snapshot.";
+}
+function currentSnapshot(load, id) {
+  return load === state.load && state.report?.assessment.id === id;
 }
 function dirty() {
   state.dirty = true;
@@ -286,7 +309,7 @@ function renderHistory(history) {
     if (id) {
       const button = node("button", "View assessment");
       button.type = "button";
-      button.addEventListener("click", () => loadReport(id));
+      button.addEventListener("click", () => { if (allowDiscard()) loadReport(id); });
       item.append(button);
     }
     $("history").append(item);
@@ -299,6 +322,7 @@ async function loadReport(id) {
   state.saving = false;
   state.dirty = false;
   state.report = null;
+  resetReview();
   $("report").hidden = true;
   updateControls();
   message("Loading assessment…");
@@ -330,8 +354,7 @@ async function loadReport(id) {
     }
   }
 }
-async function loadProjects(selected) {
-  state.projects = await api("/api/projects");
+function renderProjectOptions(selected) {
   $("project").replaceChildren(node("option", "Choose a project"));
   $("project").firstChild.value = "";
   for (const project of state.projects) {
@@ -339,18 +362,32 @@ async function loadProjects(selected) {
     option.value = project.id;
     $("project").append(option);
   }
+  $("project").value = selected || "";
+}
+async function loadProjects(selected) {
+  const load = state.load;
+  const projects = await api("/api/projects");
+  if (load !== state.load) return;
+  state.projects = projects;
   const project = state.projects.find((p) => p.id === selected) || state.projects[0];
+  renderProjectOptions(project?.id);
   if (project) {
     $("project").value = project.id;
     state.project = project;
     await loadReport(project.latest_assessment_id);
   } else {
+    state.loading = false;
     $("empty").hidden = false;
     $("report").hidden = true;
     message("No projects have been assessed yet.");
   }
+  updateControls();
 }
 $("project").addEventListener("change", async () => {
+  if (!allowDiscard()) {
+    $("project").value = state.project?.id || "";
+    return;
+  }
   const project = state.projects.find((p) => p.id === $("project").value);
   if (!project) {
     ++state.load;
@@ -359,6 +396,7 @@ $("project").addEventListener("change", async () => {
     state.loading = false;
     state.saving = false;
     state.dirty = false;
+    resetReview();
     $("report").hidden = true;
     updateControls();
     return;
@@ -412,7 +450,7 @@ $("goal-form").addEventListener("submit", async (event) => {
   }
 });
 $("rescan").addEventListener("click", async () => {
-  if (!state.project || !state.report || state.loading || state.saving) return;
+  if (!state.project || !state.report || state.loading || state.saving || !allowDiscard()) return;
   const project = state.project;
   const projectId = project.id;
   const load = state.load;
@@ -428,6 +466,145 @@ $("rescan").addEventListener("click", async () => {
     if (load === state.load) message(error.message, true);
   } finally {
     if (load === state.load) {
+      state.saving = false;
+      updateControls();
+    }
+  }
+});
+$("scan-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const root = $("scan-root").value.trim();
+  if (!root || !state.token || state.loading || state.saving || !allowDiscard()) return;
+  const load = state.load;
+  state.saving = true;
+  updateControls();
+  message("Inspecting project files…");
+  try {
+    const snapshot = await api("/api/scan", { root });
+    const known = state.projects.find((project) => project.id === snapshot.project_id);
+    if (known) known.latest_assessment_id = snapshot.id;
+    const projects = await api("/api/projects");
+    // Register completed scans without changing the active view or its drafts.
+    for (const project of projects) {
+      const existing = state.projects.find((item) => item.id === project.id);
+      if (existing) Object.assign(existing, project);
+      else state.projects.push(project);
+    }
+    renderProjectOptions($("project").value);
+    if (load !== state.load) return;
+    $("project").value = snapshot.project_id;
+    await loadReport(snapshot.id);
+  } catch (error) {
+    if (load === state.load) message(error.message, true);
+  } finally {
+    if (load === state.load) {
+      state.saving = false;
+      updateControls();
+    }
+  }
+});
+$("review-load").addEventListener("click", async () => {
+  if (!state.report || state.loading || state.saving || state.reviewLoading ||
+      (state.reviewDirty && !window.confirm("Replace the unsaved review JSON with a fresh template?"))) return;
+  const load = state.load;
+  const id = state.report.assessment.id;
+  state.reviewLoading = true;
+  updateControls();
+  try {
+    const review = await api(`/api/review-template?assessment_id=${encodeURIComponent(id)}`);
+    if (!currentSnapshot(load, id)) return;
+    $("review-json").value = jsonText(review);
+    state.reviewAssessment = id;
+    state.reviewRequest = null;
+    state.reviewDirty = true;
+    $("review-state").textContent = "Unsaved review template. Edit judgments and evidence citations before submitting.";
+  } catch (error) {
+    if (currentSnapshot(load, id)) message(error.message, true);
+  } finally {
+    if (currentSnapshot(load, id)) {
+      state.reviewLoading = false;
+      updateControls();
+    }
+  }
+});
+$("review-file").addEventListener("change", async () => {
+  const file = $("review-file").files[0];
+  if (!file || !state.report || state.loading || state.saving || state.reviewLoading) return;
+  const load = state.load;
+  const id = state.report.assessment.id;
+  state.reviewLoading = true;
+  updateControls();
+  try {
+    if (file.size > MAX_REVIEW_BYTES) throw new Error("Review JSON files must be at most 256 KiB");
+    const review = JSON.parse(await file.text());
+    if (!currentSnapshot(load, id)) return;
+    $("review-json").value = jsonText(review);
+    state.reviewAssessment = id;
+    state.reviewRequest = null;
+    state.reviewDirty = true;
+    $("review-state").textContent = "Imported JSON is unsaved. Check its snapshot identity, judgments and citations, then submit explicitly.";
+  } catch (error) {
+    if (currentSnapshot(load, id)) message(error.message, true);
+  } finally {
+    if (currentSnapshot(load, id)) {
+      $("review-file").value = "";
+      state.reviewLoading = false;
+      updateControls();
+    }
+  }
+});
+$("review-json").addEventListener("input", () => {
+  if (!state.report || state.loading || state.saving || state.reviewLoading) return;
+  state.reviewAssessment = state.report.assessment.id;
+  state.reviewRequest = null;
+  state.reviewDirty = true;
+  $("review-state").textContent = "Unsaved review JSON";
+  updateControls();
+});
+$("review-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.report || state.loading || state.saving || state.reviewLoading || !state.reviewDirty ||
+      state.reviewAssessment !== state.report.assessment.id) return;
+  const load = state.load;
+  const id = state.report.assessment.id;
+  let review;
+  try {
+    if (new TextEncoder().encode($("review-json").value).length > MAX_REVIEW_BYTES) throw new Error("Review JSON must be at most 256 KiB");
+    review = JSON.parse($("review-json").value);
+  } catch (error) {
+    message(error.message, true);
+    return;
+  }
+  state.reviewRequest ||= crypto.randomUUID();
+  const payload = { assessment_id: id, review, request_id: state.reviewRequest };
+  if (new TextEncoder().encode(JSON.stringify(payload)).length > MAX_REVIEW_BYTES) {
+    message("Review JSON and its request metadata must fit within 256 KiB", true);
+    return;
+  }
+  state.saving = true;
+  updateControls();
+  let saved;
+  try {
+    saved = await api("/api/review", payload);
+    if (!currentSnapshot(load, id)) return;
+    state.report.review = saved;
+    state.reviewDirty = false;
+    $("review-state").textContent = `Saved review ${saved.id}`;
+    renderRatings(state.report);
+    renderFindings(state.report);
+    const projectId = state.report.assessment.project_id;
+    const [progress, history] = await Promise.all([
+      api(`/api/progress?project_id=${encodeURIComponent(projectId)}`),
+      api(`/api/history?project_id=${encodeURIComponent(projectId)}`)
+    ]);
+    if (!currentSnapshot(load, id)) return;
+    renderProgress(progress);
+    renderHistory(history);
+    message("Review saved. Collected facts and project files are unchanged.");
+  } catch (error) {
+    if (currentSnapshot(load, id)) message(saved ? `Review saved, but the report refresh failed: ${error.message}` : error.message, true);
+  } finally {
+    if (currentSnapshot(load, id)) {
       state.saving = false;
       updateControls();
     }

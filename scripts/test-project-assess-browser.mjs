@@ -22,6 +22,7 @@ from pathlib import Path
 from threading import Thread
 from project_assess.service import AssessmentService
 from project_assess.web import create_server
+from project_assess.badges import badge
 
 base = Path(sys.argv[1])
 root = base / 'fixture-<img src=x onerror=window.pwned=1>'
@@ -73,12 +74,28 @@ class FixtureService(AssessmentService):
         return snapshot
 
 service = FixtureService(base / 'state')
-service.scan(root)
+initial = service.scan(root)
 second_root = base / 'second-project'
 second_root.mkdir()
 (second_root / 'app.py').write_text('value = 1')
 second = service.scan(second_root)
 service.set_targets(second['project_id'], None, 0, profile='internal-service')
+first_root = base / 'ui-first-project'
+first_root.mkdir()
+(first_root / 'app.py').write_text("raise AssertionError('Scans must not execute this project')\n")
+(first_root / '.env').write_text('PRIVATE_UI_SCAN_MARKER=never-return-this-value\n')
+forbidden_root = base / 'forbidden-project'
+forbidden_root.mkdir()
+first_service = AssessmentService(base / 'first-state', allowed_roots=[first_root, second_root])
+badge_report = service.get_report(initial['id'])
+badges = {'normal': badge(badge_report, 'maintainability')}
+unknown = json.loads(json.dumps(badge_report))
+unknown['review']['ratings']['maintainability'].update(capability=None, burden=None)
+badges['unknown'] = badge(unknown, 'maintainability')
+warning = json.loads(json.dumps(badge_report))
+warning['assessment']['complete'] = False
+warning['assessment']['findings'] = [{'severity': severity} for severity in ['critical', 'high'] for _ in range(100)]
+badges['warning'] = badge(warning, 'maintainability')
 def commands():
     for line in sys.stdin:
         command = line.strip()
@@ -94,8 +111,11 @@ def commands():
         service.submit_review(assessment_id, review)
         print(json.dumps({'command': command}), flush=True)
 Thread(target=commands, daemon=True).start()
-with create_server(service) as server:
-    print(json.dumps({'origin': server.origin, 'root': str(root)}), flush=True)
+with create_server(service) as server, create_server(first_service) as first_server:
+    Thread(target=first_server.serve_forever, daemon=True).start()
+    print(json.dumps({'origin': server.origin, 'root': str(root),
+        'first_origin': first_server.origin, 'first_root': str(first_root),
+        'second_root': str(second_root), 'forbidden_root': str(forbidden_root), 'badges': badges}), flush=True)
     server.serve_forever()
 `;
 const child = spawn(path.join(repo, ".venv/bin/python"), ["-u", "-c", python, fixture], {
@@ -334,12 +354,201 @@ async function checkLegacyTargets(page, origin, frameworkProfile) {
     await expect(page.locator("#goal-state")).toContainText(`Saved goal version ${original.goals.revision}`);
   }
 }
+async function checkFirstScanAndReview(browser, info) {
+  const origin = info.first_origin;
+  const context = await browser.newContext({ viewport: { width: 320, height: 900 } });
+  const page = await context.newPage();
+  let dismissNext = false;
+  page.on("dialog", (dialog) => dismissNext ? (dismissNext = false, dialog.dismiss()) : dialog.accept());
+  const reviews = [];
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/review") reviews.push(request.postDataJSON());
+  });
+  const projects = async () => (await page.request.get(`${origin}/api/projects`)).json();
+  const history = async (id) => (await page.request.get(`${origin}/api/history?project_id=${id}`)).json();
+  const submit = async (status) => {
+    const response = page.waitForResponse((response) => response.url() === `${origin}/api/review` && response.request().method() === "POST");
+    await page.getByRole("button", { name: "Submit review", exact: true }).click();
+    const result = await response;
+    assert.equal(result.status(), status);
+    return result.json();
+  };
+  const scored = (template, snapshot, capability = 3) => {
+    const result = structuredClone(template);
+    Object.assign(result.ratings.testing, { capability, burden: 2, confidence: "medium", burden_basis: "source_estimate", burden_confidence: "low",
+      rationale: "Synthetic browser review <img src=x onerror=window.reviewPwned=1>",
+      evidence_ids: [snapshot.evidence.find((entry) => entry.kind === "python").id] });
+    return result;
+  };
+  try {
+    assert.deepEqual(await projects(), [], "first workflow must begin with no registered projects");
+    await page.goto(origin);
+    await expect(page.locator("#empty")).toBeVisible();
+    await expect(page.locator("#scan")).toBeEnabled();
+    await page.getByLabel("Project directory", { exact: true }).fill(info.forbidden_root);
+    await page.getByRole("button", { name: "Scan project", exact: true }).click();
+    await expect(page.locator("#error")).toContainText("outside configured allowed roots");
+    assert.deepEqual(await projects(), []);
+    await page.getByLabel("Project directory", { exact: true }).fill(info.first_root);
+    const initialResponse = page.waitForResponse((response) => response.url() === `${origin}/api/scan` && response.request().method() === "POST");
+    await page.locator("#scan-root").press("Enter");
+    const initial = await (await initialResponse).json();
+    await expect(page.locator("#status")).toContainText(initial.id);
+    await expect(page.locator("#empty")).toBeHidden();
+    await expect(page.locator("#ratings")).toContainText("Not reviewed");
+    assert.equal((await page.request.get(`${origin}/api/report?assessment_id=${initial.id}`)).status(), 200);
+    assert(!JSON.stringify(initial).includes("never-return-this-value"), "secret files must stay excluded");
+    await page.locator("#review-editor summary").click();
+    await page.getByRole("button", { name: "Load review template", exact: true }).click();
+    await expect(page.locator("#review-state")).toContainText("Unsaved review template");
+    const template = JSON.parse(await page.locator("#review-json").inputValue());
+    assert.equal(template.assessment_id, initial.id);
+    assert.equal(template.source_digest, initial.source.manifest_digest);
+    assert(Object.values(template.ratings).every((rating) => rating.capability === null && rating.burden === null));
+    await page.getByLabel("Import review JSON", { exact: true }).setInputFiles({ name: "large.json", mimeType: "application/json", buffer: Buffer.alloc(256 * 1024 + 1, 32) });
+    await expect(page.locator("#error")).toContainText("at most 256 KiB");
+    assert.deepEqual(JSON.parse(await page.locator("#review-json").inputValue()), template);
+    const draft = scored(template, initial);
+    await page.getByLabel("Import review JSON", { exact: true }).setInputFiles({ name: "review.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(draft)) });
+    await expect(page.locator("#review-state")).toContainText("Imported JSON is unsaved");
+    assert.equal((await history(initial.project_id)).reviews.length, 0, "import must not submit automatically");
+    dismissNext = true;
+    await page.getByRole("button", { name: "Scan again", exact: true }).click();
+    assert.equal((await projects())[0].latest_assessment_id, initial.id, "declining discard keeps the snapshot and draft");
+    assert.deepEqual(JSON.parse(await page.locator("#review-json").inputValue()), draft);
+    const invalid = structuredClone(draft);
+    invalid.ratings.testing.evidence_ids = ["foreign-evidence"];
+    await page.locator("#review-json").fill(JSON.stringify(invalid));
+    await submit(400);
+    await expect(page.locator("#error")).toContainText("outside its captured snapshot");
+    await expect(page.locator("#review-submit")).toBeEnabled();
+    invalid.ratings.testing.evidence_ids = draft.ratings.testing.evidence_ids;
+    invalid.source_digest = "wrong-source";
+    await page.locator("#review-json").fill(JSON.stringify(invalid));
+    await submit(409);
+    await expect(page.locator("#error")).toContainText("identity does not match");
+    const session = await (await page.request.get(`${origin}/api/session`)).json();
+    const newerResponse = await page.request.post(`${origin}/api/scan`, { data: { project_id: initial.project_id }, headers: { Origin: origin, "X-Project-Assess-Token": session.token } });
+    assert.equal(newerResponse.status(), 200);
+    const newer = await newerResponse.json();
+    await page.locator("#review-json").fill(JSON.stringify(draft));
+    await submit(409);
+    await expect(page.locator("#error")).toContainText("Assessment is stale");
+    assert.equal((await history(initial.project_id)).reviews.length, 0);
+    await page.reload();
+    await expect(page.locator("#status")).toContainText(newer.id);
+    await expect(page.locator("#review-json")).toHaveValue("");
+    await page.locator("#review-editor summary").click();
+    await page.getByRole("button", { name: "Load review template", exact: true }).click();
+    await expect(page.locator("#review-state")).toContainText("Unsaved review template");
+    const currentTemplate = JSON.parse(await page.locator("#review-json").inputValue());
+    const current = scored(currentTemplate, newer);
+    await page.locator("#review-json").fill(JSON.stringify(current));
+    await page.selectOption("#profile", "local-experiment");
+    await page.locator("#testing-capability_min").fill("2");
+    const saved = await submit(200);
+    await expect(page.locator("#review-state")).toContainText(saved.id);
+    await expect(ratingCard(page, "Testing")).toContainText("3 / 5");
+    await expect(ratingCard(page, "Testing")).toContainText("2 / 5");
+    await expect(ratingCard(page, "Operability")).toContainText("Unknown");
+    await expect(page.locator("#review-submit")).toBeDisabled();
+    await expect(page.locator("#goal-state")).toContainText("Unsaved targets");
+    await expect(page.locator("#testing-capability_min")).toHaveValue("2");
+    assert.equal((await history(initial.project_id)).goals.length, 0);
+    assert.equal(await page.evaluate(() => window.reviewPwned), undefined);
+    assert.equal(await page.locator("main img").count(), 0);
+    await page.screenshot({ path: path.join(output, "project-assess-first-review-mobile.png"), fullPage: true });
+    await page.reload();
+    await expect(ratingCard(page, "Testing")).toContainText("3 / 5");
+    await expect(page.locator("#review-json")).toHaveValue("");
+    await page.getByLabel("Project directory", { exact: true }).fill(info.second_root);
+    await page.getByRole("button", { name: "Scan project", exact: true }).click();
+    await expect(page.locator("#project-name")).toHaveText("second-project");
+    const second = (await projects()).find((project) => project.name === "second-project");
+    await page.selectOption("#project", initial.project_id);
+    await expect(page.locator("#status")).toContainText(newer.id);
+    await page.locator("#review-editor summary").click();
+    const pendingTemplate = await holdResponse(page, `**/api/review-template?assessment_id=${newer.id}`);
+    await page.getByRole("button", { name: "Load review template", exact: true }).click();
+    await pendingTemplate.entered;
+    await page.selectOption("#project", second.id);
+    await expect(page.locator("#project-name")).toHaveText("second-project");
+    await pendingTemplate.release();
+    await expect(page.locator("#review-json")).toHaveValue("");
+    await page.selectOption("#project", initial.project_id);
+    await expect(page.locator("#status")).toContainText(newer.id);
+    await page.locator("#review-editor summary").click();
+    await page.locator("#review-json").fill(JSON.stringify(scored(currentTemplate, newer, 4)));
+    const pendingReview = await holdResponse(page, "**/api/review");
+    await page.getByRole("button", { name: "Submit review", exact: true }).click();
+    await pendingReview.entered;
+    await expect(page.locator("#review-json")).toBeDisabled();
+    await page.selectOption("#project", second.id);
+    await expect(page.locator("#project-name")).toHaveText("second-project");
+    await page.selectOption("#project", initial.project_id);
+    await expect(page.locator("#status")).toContainText(newer.id);
+    await expect(ratingCard(page, "Testing")).toContainText("4 / 5");
+    await page.locator("#review-editor summary").click();
+    const returnedDraft = JSON.stringify({ ...current, findings: [] }, null, 2);
+    await page.locator("#review-json").fill(returnedDraft);
+    await pendingReview.release();
+    await expect(page.locator("#review-json")).toHaveValue(returnedDraft);
+    await expect(page.locator("#review-state")).toContainText("Unsaved review JSON");
+    const pendingError = await holdResponse(page, "**/api/review", true);
+    await page.getByRole("button", { name: "Submit review", exact: true }).click();
+    await pendingError.entered;
+    await page.selectOption("#project", second.id);
+    await expect(page.locator("#project-name")).toHaveText("second-project");
+    await pendingError.release();
+    await expect(page.locator("#error")).toBeHidden();
+    assert.equal((await history(second.id)).reviews.length, 0, "late review responses must not write to the selected project");
+    assert(reviews.every((request) => request.assessment_id === request.review.assessment_id));
+    await page.locator("#review-editor summary").click();
+    const overflow = await page.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth,
+      elements: Array.from(document.querySelectorAll("main *")).map((element) => ({ tag: element.tagName, id: element.id, width: element.getBoundingClientRect().width, right: element.getBoundingClientRect().right })).filter((element) => element.right > innerWidth + 1) }));
+    assert(overflow.scrollWidth <= overflow.width, `expanded review editor must fit mobile: ${JSON.stringify(overflow)}`);
+    const accessibility = await new AxeBuilder({ page }).analyze();
+    assert.deepEqual(accessibility.violations.map((violation) => ({ id: violation.id, targets: violation.nodes.map((node) => node.target) })), [], "first scan/review mobile accessibility");
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+}
+
+async function checkBadgeText(browser, badges) {
+  const page = await browser.newPage({ viewport: { width: 320, height: 220 } });
+  try {
+    for (const [name, svg] of Object.entries(badges)) {
+      await page.setContent(svg);
+      await page.evaluate(() => document.fonts.ready);
+      const result = await page.locator("svg").evaluate((svg) => ({ width: svg.width.baseVal.value, height: svg.querySelector("rect").getBBox().height + 0.5,
+        texts: Array.from(svg.querySelectorAll("text"), (element) => { const box = element.getBBox(); return { text: element.textContent, x: box.x, y: box.y, width: box.width, height: box.height }; }) }));
+      assert.equal(result.width, 200);
+      for (const text of result.texts) assert(text.x >= 0 && text.y >= 0 && text.x + text.width <= result.width && text.y + text.height <= result.height, `${name} badge text must fit: ${text.text}`);
+      for (let i = 0; i < result.texts.length; i++) for (let j = i + 1; j < result.texts.length; j++) {
+        const a = result.texts[i], b = result.texts[j];
+        assert(!(Math.min(a.x + a.width, b.x + b.width) > Math.max(a.x, b.x) + 0.5 && Math.min(a.y + a.height, b.y + b.height) > Math.max(a.y, b.y) + 0.5), `${name} badge labels must not overlap`);
+      }
+      if (name === "unknown") assert.equal(result.texts.filter((text) => text.text === "?/5").length, 2);
+      if (name === "warning") for (const text of ["Reported: 100 critical", "100 high", "Partial scan"]) assert(result.texts.some((row) => row.text === text));
+    }
+  } finally {
+    await page.close();
+  }
+}
+
 let browser;
 try {
-  const { origin, root } = await launch;
+  const info = await launch;
+  const { origin, root } = info;
   browser = await chromium.launch({ headless: true });
+  await checkBadgeText(browser, info.badges);
+  await checkFirstScanAndReview(browser, info);
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
+  page.on("dialog", (dialog) => dialog.accept());
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   const rubric = await (await page.request.get(`${origin}/api/rubric`)).json();
@@ -475,7 +684,7 @@ try {
   assert.deepEqual(mobileAccessibility.violations.map((v) => ({ id: v.id, impact: v.impact, targets: v.nodes.map((node) => node.target) })), [], "mobile accessibility");
   await page.screenshot({ path: path.join(output, "project-assess-mobile.png"), fullPage: true });
   assert.deepEqual(errors, [], "browser should not report JavaScript errors");
-  console.log("PAT browser acceptance passed: goals, persistence, progress, project-switch races, hostile content, keyboard, mobile, accessibility.");
+  console.log("PAT browser acceptance passed: first scan/review, validation, snapshot races, goals, progress, hostile content, keyboard, mobile, accessibility, badge text bounds.");
 } finally {
   await browser?.close();
   lines.close();

@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 from project_assess.doc_value import audit, markdown
+from project_assess.documentation import captured_documentation
 
 
 def test_shared_markdown_helpers_preserve_existing_words_fences_links_and_anchors():
@@ -57,6 +58,53 @@ def test_standalone_audit_preserves_existing_helper_imports():
         "UNSUPPORTED_LINK_RE",
     ):
         assert getattr(audit, name) is getattr(markdown, name)
+
+
+def test_heading_underscores_preserve_links_and_duplicate_suffixes():
+    # GitHub-compatible underscore behavior is covered by github-slugger's
+    # primary fixtures: https://github.com/Flet/github-slugger/blob/master/test/fixtures.json
+    text = """# Configure request_timeout
+# Configure request_timeout
+Setext_title
+============
+<h2>HTML_title</h2>
+"""
+    anchors, unsupported = markdown.headings(text)
+    assert anchors == {
+        "configure-request_timeout": 1,
+        "configure-request_timeout-1": 1,
+        "setext_title": 1,
+        "html_title": 1,
+    }
+    assert unsupported
+    texts = {
+        "README.md": "[guide](guide.md#configure-request_timeout)\n[absent](guide.md#missing_heading)\n",
+        "guide.md": "# Configure `request_timeout`\n",
+    }
+
+    result = captured_documentation(texts, set(texts))
+
+    assert result["links"] == [
+        {
+            "source": "README.md",
+            "target": "guide.md#configure-request_timeout",
+            "resolved": "guide.md",
+        },
+        {"source": "README.md", "target": "guide.md#missing_heading", "issue": "missing-anchor"},
+    ]
+
+
+def test_underscore_emphasis_is_uncertain_while_code_identifiers_remain_supported():
+    for heading in ("# _Setup_", "# __Setup__", "_Setup_\n======="):
+        texts = {"README.md": "[setup](guide.md#setup)\n", "guide.md": heading + "\n"}
+        links = captured_documentation(texts, set(texts))["links"]
+        assert links[0]["issue"] == "uncertain-anchor"
+    for heading, fragment in (("# `_Setup_`", "_setup_"), ("# ``__Setup__``", "__setup__")):
+        texts = {"README.md": f"[setup](guide.md#{fragment})\n", "guide.md": heading + "\n"}
+        links = captured_documentation(texts, set(texts))["links"]
+        assert links == [
+            {"source": "README.md", "target": f"guide.md#{fragment}", "resolved": "guide.md"}
+        ]
 
 
 def test_captured_documentation_does_not_load_standalone_audit_or_collector():

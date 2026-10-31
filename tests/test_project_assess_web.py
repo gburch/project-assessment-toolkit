@@ -20,6 +20,7 @@ class Service:
         self.calls = []
         self.targets = None
         self.history_calls = []
+        self.reviews = []
 
     def list_projects(self):
         return [
@@ -58,6 +59,14 @@ class Service:
     def scan(self, root):
         self.scans.append(root)
         return {"id": "a2"}
+
+    def review_template(self, assessment_id):
+        self.get_report(assessment_id)
+        return {"assessment_id": assessment_id, "ratings": {}}
+
+    def submit_review(self, **document):
+        self.reviews.append(deepcopy(document))
+        return {"id": "r1", **document["review"]}
 
 
 @pytest.fixture
@@ -125,6 +134,14 @@ def test_session_rejects_rebinding_and_cross_site_reads(running_report, headers)
 
 
 @pytest.mark.parametrize(
+    ("path", "document"),
+    [
+        ("/api/targets", {"project_id": "p1", "targets": {}, "expected_revision": 0}),
+        ("/api/scan", {"root": "/registered/source"}),
+        ("/api/review", {"assessment_id": "a1", "review": {}}),
+    ],
+)
+@pytest.mark.parametrize(
     "headers",
     [
         {"Origin": "https://attacker.example"},
@@ -133,11 +150,10 @@ def test_session_rejects_rebinding_and_cross_site_reads(running_report, headers)
         {"X-Project-Assess-Token": "wrong"},
     ],
 )
-def test_target_writes_require_exact_origin_and_session_token(running_report, headers):
+def test_writes_require_exact_origin_and_session_token(running_report, headers, path, document):
     service, server = running_report
-    document = {"project_id": "p1", "targets": {}, "expected_revision": 0}
-    assert request(server, "POST", "/api/targets", document, headers)[0] == 403
-    assert service.calls == []
+    assert request(server, "POST", path, document, headers)[0] == 403
+    assert service.calls == service.scans == service.reviews == []
 
 
 def test_target_write_and_stale_revision_conflict(running_report):
@@ -185,10 +201,134 @@ def test_query_contract_and_method_rejection(running_report):
     assert request(server, path="/api/report?assessment_id=a1")[0] == 200
     assert request(server, path="/api/report?assessment_id=a1&assessment_id=a2")[0] == 400
     assert request(server, path="/api/report?path=/etc/passwd")[0] == 400
+    assert request(server, path="/api/review-template?assessment_id=a1")[0] == 200
+    assert request(server, path="/api/review-template?assessment_id=absent")[0] == 400
+    assert request(server, path="/api/review-template?assessment_id=a1&assessment_id=a2")[0] == 400
     assert request(server, path="/api/history?project_id=p1")[0] == 200
     assert service.history_calls == [("p1", True)]
     assert request(server, path="/api/progress?project_id=p1")[0] == 200
     assert request(server, "PUT", "/api/targets")[0] == 405
+
+
+@pytest.mark.parametrize(
+    ("path", "document"),
+    [
+        ("/api/scan", {"root": ""}),
+        ("/api/scan", {"root": []}),
+        ("/api/scan", {"root": "/one", "project_id": "p1"}),
+        ("/api/scan", {"project_id": 1}),
+        ("/api/review", {"assessment_id": "a1"}),
+        ("/api/review", {"assessment_id": [], "review": {}}),
+        ("/api/review", {"assessment_id": "a1", "review": []}),
+        ("/api/review", {"assessment_id": "a1", "review": {}, "facts": {}}),
+    ],
+)
+def test_scan_and_review_reject_ambiguous_or_unsupported_fields(running_report, path, document):
+    service, server = running_report
+    assert request(server, "POST", path, document)[0] == 400
+    assert service.scans == service.reviews == []
+
+
+def test_first_scan_and_review_use_service_authority_and_preserve_source(tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    root = allowed / "first-project"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "app.py").write_text("value = 1\n")
+    (allowed / "escape").symlink_to(outside, target_is_directory=True)
+    (root / "app.py").write_text("raise AssertionError('Assessed code must not execute')\n")
+    (root / ".env").write_text("PRIVATE_SCAN_MARKER=never-return-this-value\n")
+    before = {path.name: path.read_bytes() for path in root.iterdir()}
+    service = AssessmentService(tmp_path / "state", allowed_roots=[allowed])
+    with create_server(service) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            assert json.loads(request(server, path="/api/projects")[2]) == []
+            for denied in (outside, allowed / "escape"):
+                assert request(server, "POST", "/api/scan", {"root": str(denied)})[0] == 403
+            assert (
+                request(server, "POST", "/api/scan", {"root": str(allowed / "missing")})[0] == 400
+            )
+            status, _, body = request(server, "POST", "/api/scan", {"root": str(root)})
+            assert status == 200 and b"never-return-this-value" not in body
+            snapshot = json.loads(body)
+            template_status, _, body = request(
+                server, path="/api/review-template?assessment_id=" + snapshot["id"]
+            )
+            assert template_status == 200
+            template = json.loads(body)
+            assert template["source_digest"] == snapshot["source"]["manifest_digest"]
+            assert all(
+                row["capability"] is row["burden"] is None for row in template["ratings"].values()
+            )
+            template["ratings"]["testing"].update(
+                capability=3,
+                burden=2,
+                burden_basis="source_estimate",
+                burden_confidence="low",
+                confidence="medium",
+                rationale="Synthetic HTTP review of captured source.",
+                evidence_ids=[
+                    next(row["id"] for row in snapshot["evidence"] if row["kind"] == "python")
+                ],
+            )
+            invalid = deepcopy(template)
+            invalid["source_digest"] = "wrong-source"
+            assert (
+                request(
+                    server,
+                    "POST",
+                    "/api/review",
+                    {"assessment_id": snapshot["id"], "review": invalid},
+                )[0]
+                == 409
+            )
+            invalid = deepcopy(template)
+            invalid["ratings"]["testing"]["evidence_ids"] = ["foreign-evidence"]
+            assert (
+                request(
+                    server,
+                    "POST",
+                    "/api/review",
+                    {"assessment_id": snapshot["id"], "review": invalid},
+                )[0]
+                == 400
+            )
+            assert service.history(snapshot["project_id"])["reviews"] == []
+            document = {
+                "assessment_id": snapshot["id"],
+                "review": template,
+                "request_id": "web-review-1",
+            }
+            status, _, body = request(server, "POST", "/api/review", document)
+            assert status == 200
+            saved = json.loads(body)
+            assert (
+                json.loads(request(server, "POST", "/api/review", document)[2])["id"] == saved["id"]
+            )
+            assert service.get_report(snapshot["id"])["assessment"] == snapshot
+            assert service.get_report(snapshot["id"])["goals"] is None
+            assert len(service.history(snapshot["project_id"])["reviews"]) == 1
+            assert (
+                request(server, "POST", "/api/scan", {"project_id": snapshot["project_id"]})[0]
+                == 200
+            )
+            document["request_id"] = "stale-web-review"
+            assert request(server, "POST", "/api/review", document)[0] == 409
+            assert len(service.history(snapshot["project_id"])["reviews"]) == 1
+            service.allowed_roots = (outside,)
+            assert (
+                request(server, path="/api/review-template?assessment_id=" + snapshot["id"])[0]
+                == 403
+            )
+            assert request(server, "POST", "/api/review", document)[0] == 403
+            assert {path.name: path.read_bytes() for path in root.iterdir()} == before
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
 
 
 @pytest.mark.parametrize(

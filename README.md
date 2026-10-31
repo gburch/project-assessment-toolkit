@@ -45,7 +45,7 @@ uv run --locked pat --state-dir /path/outside/repos/pat-state report ASSESSMENT_
 uv run --locked pat --state-dir /path/outside/repos/pat-state serve --open
 ```
 
-The local app displays evidence, ratings, editable goals and progress. **Keep state outside assessed repositories:** it contains captured source excerpts, reviews and goals.
+The local app can scan a project, inspect evidence, load or import a cited JSON review, submit it and save goals. It also shows ratings, history and progress. **Keep state outside assessed repositories:** it contains captured source excerpts, reviews and goals.
 
 Follow the [local workflow](docs/PROJECT_ASSESS.md#local-workflow) to fill a `review-template`, inspect `evidence` and `rubric`, and submit the review. The optional [assessment skill](.agents/skills/project-assess/SKILL.md) guides the same process. Choose goals explicitly; profiles are starting suggestions.
 

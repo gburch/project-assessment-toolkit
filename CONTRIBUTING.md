@@ -29,6 +29,18 @@ Dependency and browser installation can download packages. Browser checks use th
 
 For skill changes, run `uv run --locked pat skills`, check that the returned entry points and referenced resources exist, and try a realistic synthetic scenario through the documented commands. Use your agent's skill validator when available. Review the resulting advice as well as the JSON: plausible syntax is not evidence of a useful assessment.
 
+## Local delivery proof
+
+After the relevant checks, rehearse delivery from a clean, committed PAT checkout:
+
+```bash
+uv run --offline --locked python scripts/smoke-wheel.py --output /path/outside/repos/pat-release-proof
+```
+
+Use a **new directory outside the checkout**. The command builds one wheel, exports locked core constraints and installs the wheel into a fresh environment using the existing uv cache. It verifies installed resource origins, bundled skills/guide/UI and operation without MCP. A real CLI scenario exercises scan, cited review, targets and progress, rejected review/CAS changes, and backup/restore of closed synthetic state. No personal assessment state is opened or copied.
+
+`receipt.json` records the source revision/manifest, wheel digest, checks and any failed step. A pass requires source identity to remain unchanged. Retain the wheel, constraints and private receipt together; this is a local proof, not publication or deployment. A missing offline dependency fails rather than downloading it. `--allow-dirty` is only for development rehearsals and labels the receipt accordingly; it does not prove a committed release. See the [update and rollback procedure](docs/PROJECT_ASSESS.md#local-state-and-updates) before changing an installation or real state.
+
 ## Preserve the boundaries
 
 - Keep scans read-only: do not execute assessed code, import its plugins, install its dependencies or contact its services. Separate test-value runtime collectors run only when explicitly requested.
