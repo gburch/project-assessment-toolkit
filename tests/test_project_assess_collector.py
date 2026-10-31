@@ -239,7 +239,9 @@ def test_content_identity_changes_while_collection_scope_remains_comparable(tmp_
     fourth = collector.collect(tmp_path)
     assert third["source"]["manifest_digest"] != fourth["source"]["manifest_digest"]
     assert third["scope_digest"] == fourth["scope_digest"]
-    assert any("Unsupported file kind .go" in gap for gap in fourth["gaps"])
+    source = next(entry for entry in fourth["evidence"] if entry["path"] == "library.go")
+    assert source["kind"] == "source" and source["stats"]["language"] == "go"
+    assert source["stats"]["syntax_analysis"] == "not_available"
 
 
 def test_never_reads_secrets_or_traverses_symlinks_and_redacts_evidence(tmp_path, monkeypatch):
@@ -701,7 +703,8 @@ def test_detail_budget_keeps_every_module_and_does_not_count_imports_against_fun
     facts = result["facts"]["static_analysis"]
     captured = next(row["stats"] for row in result["evidence"] if row["id"] == facts["evidence_id"])
     assert facts["coverage"]["functions_total"] == 10
-    assert facts["coverage"]["functions_analyzed"] == 2
+    assert facts["coverage"]["functions_analyzed"] == 10
+    assert facts["coverage"]["pattern_functions"] == 2
     assert facts["coverage"]["overview_files"] == 2
     assert {row["path"] for row in captured["modules"]} == {"src/pkg/a.py", "src/pkg/b.py"}
     assert len(captured["topology"]["edges"]) == 2
@@ -825,3 +828,170 @@ def test_large_application_module_exceeds_document_limit_without_losing_source_o
     entry = next(row for row in result["evidence"] if row["path"] == "src/projects/integration.py")
     assert entry["lines"] > 37_000
     assert result["complete"]
+
+
+def test_supported_text_has_its_own_budget_and_precedes_asset_hashing(tmp_path, monkeypatch):
+    code = "def run(value):\n    return value + 1\n"
+    write(tmp_path, "src/product/ops/runtime.py", code)
+    write(tmp_path, ".agents/asset.bin", "x" * 200)
+    monkeypatch.setattr(collector, "MAX_TOTAL_BYTES", len(code.encode()))
+    monkeypatch.setattr(collector, "MAX_UNSUPPORTED_ASSET_BYTES", 100)
+    result = collector.collect(tmp_path)
+    assert any(row["path"] == "src/product/ops/runtime.py" for row in result["evidence"])
+    assert result["facts"]["collection"]["supported_text_complete"]
+    assert not result["facts"]["collection"]["unsupported_assets_complete"]
+    assert result["facts"]["collection"]["skipped_by_reason"] == {"unsupported-asset-byte-limit": 1}
+    assert result["facts"]["inventory"]["supported_input_bytes"] == len(code.encode())
+    assert result["facts"]["inventory"]["unsupported_asset_bytes"] == 0
+    static = next(row["stats"] for row in result["evidence"] if row["kind"] == "static-analysis")
+    assert static["topology"]["complete"]
+
+
+def test_pattern_refill_reuses_unused_slots_without_losing_cheap_metrics(tmp_path, monkeypatch):
+    for number in range(12):
+        write(tmp_path, f"src/empty_{number}.py", "value = 1\n")
+    write(
+        tmp_path,
+        "src/core.py",
+        "".join(
+            f"def function_{number}(value):\n    return value + {number}\n" for number in range(30)
+        ),
+    )
+    monkeypatch.setattr(collector, "MAX_STATIC_SYMBOLS", 12)
+    result = collector.collect(tmp_path)
+    static = next(row["stats"] for row in result["evidence"] if row["kind"] == "static-analysis")
+    assert static["coverage"]["functions_analyzed"] == 30
+    assert static["coverage"]["pattern_functions"] == 12
+    module = next(row for row in static["modules"] if row["path"] == "src/core.py")
+    assert module["pattern_functions"] == 12 and module["function_count"] == 30
+    assert result["facts"]["collection"]["python_detail_functions"] == 12
+
+
+def test_profiles_change_scope_and_limits_but_not_source_identity(tmp_path):
+    write(tmp_path, "src/sample.swift", "func value() -> Int { return 1 }\n")
+    standard = collector.collect(tmp_path)
+    deep = collector.collect(tmp_path, analysis_profile="deep")
+    assert standard["source"] == deep["source"]
+    assert standard["scope_digest"] != deep["scope_digest"]
+    assert deep["facts"]["collection"]["limits"]["supported_text_bytes"] == 256 * 1024 * 1024
+    assert deep["facts"]["collection"]["limits"]["pattern_functions"] == 60_000
+    assert deep["facts"]["collection"]["limits"]["metric_nodes_per_file"] == 1_000_000
+    assert deep["tool_provenance"]["collection"]["limits"] == deep["facts"]["collection"]["limits"]
+    source = next(row for row in deep["evidence"] if row["path"] == "src/sample.swift")
+    assert source["kind"] == "source" and source["stats"]["language"] == "swift"
+    assert source["stats"]["syntax_analysis"] == "not_available"
+    assert deep["facts"]["inventory"]["source_files"] == 1
+    assert deep["facts"]["inventory"]["roles"]["production"]["files"] == 1
+
+
+def test_cooperative_deadline_reports_unsearched_and_uncaptured_surfaces(tmp_path, monkeypatch):
+    write(tmp_path, "src/app.py", "value = 1\n")
+    monkeypatch.setattr(collector, "MAX_SCAN_SECONDS", 0)
+    result = collector.collect(tmp_path)
+    collection = result["facts"]["collection"]
+    assert collection["deadline_exceeded"] and not result["complete"]
+    assert not collection["supported_text_complete"]
+    assert not collection["discovery_complete"]
+    assert collection["unsearched_directories"] == [{"path": ".", "reason": "deadline"}]
+    assert collection["captured_files"] == 0
+    assert not any(row["kind"] == "python" for row in result["evidence"])
+    assert "elapsed_seconds" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"analysis_profile": "unlimited"},
+        {"analyzers": "vulture"},
+        {"analyzers": ["unknown"]},
+        {"analyzers": ["vulture", "vulture"]},
+    ],
+)
+def test_collection_rejects_unknown_profiles_and_analyzers_before_inspection(
+    tmp_path, monkeypatch, options
+):
+    monkeypatch.setattr(
+        collector, "_git", lambda *_: pytest.fail("invalid options inspected source")
+    )
+    with pytest.raises(ValueError):
+        collector.collect(tmp_path, **options)
+
+
+def test_optional_analyzer_is_explicit_and_never_executes_captured_source(tmp_path):
+    sentinel = tmp_path.parent / (tmp_path.name + "-should-not-exist")
+    write(
+        tmp_path,
+        "src/app.py",
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('bad')\ndef _candidate():\n    return 1\n",
+    )
+    plain = collector.collect(tmp_path)
+    selected = collector.collect(tmp_path, analyzers=["vulture"])
+    assert not sentinel.exists()
+    assert plain["source"] == selected["source"]
+    assert plain["scope_digest"] != selected["scope_digest"]
+    summary = selected["facts"]["optional_analysis"]["vulture"]
+    assert summary["status"] in {"unavailable", "complete", "partial"}
+    assert summary["configuration"]["project_config_loaded"] is False
+    assert summary["provenance"]["source_identity"] == "captured_snapshot"
+    evidence = next(row for row in selected["evidence"] if row["id"] == summary["evidence_id"])
+    assert evidence["kind"] == "analyzer-analysis"
+    assert evidence["stats"]["analyzer"]["name"] == "vulture"
+    assert selected["facts"]["collection"]["analyzers"] == ["vulture"]
+    assert "elapsed_seconds" not in json.dumps(evidence)
+
+
+def test_deadline_after_first_read_lists_remaining_discovered_sources(tmp_path, monkeypatch):
+    write(tmp_path, "src/a.py", "value = 1\n")
+    write(tmp_path, "src/b.py", "value = 2\n")
+    now = [0.0]
+    read = collector._read_at
+
+    def expire_after_read(*args, **kwargs):
+        result = read(*args, **kwargs)
+        now[0] = 121.0
+        return result
+
+    monkeypatch.setattr(collector.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(collector, "_read_at", expire_after_read)
+    result = collector.collect(tmp_path)
+    collection = result["facts"]["collection"]
+    assert collection["discovery_complete"] and collection["deadline_exceeded"]
+    assert not collection["supported_text_complete"]
+    assert collection["skipped_inputs"] == [
+        {
+            "path": "src/b.py",
+            "kind": "python",
+            "role": "production",
+            "bytes": 10,
+            "reason": "deadline",
+        }
+    ]
+    assert {row["path"] for row in result["evidence"] if row["kind"] == "python"} == {"src/a.py"}
+    assert {"analysis": "test-value-static", "reason": "deadline"} in collection[
+        "analysis_omissions"
+    ]
+
+
+def test_malformed_python_remains_evidence_backed_for_optional_analysis(tmp_path):
+    write(tmp_path, "src/broken.py", "def broken(:\napi_key = 'private-test-value'\n")
+    result = collector.collect(tmp_path, analyzers=["vulture"])
+    assert not result["complete"] and not result["facts"]["collection"]["supported_text_complete"]
+    entry = next(row for row in result["evidence"] if row["path"] == "src/broken.py")
+    assert entry["kind"] == "python" and entry["stats"]["syntax_analysis"] == "not_completed"
+    assert entry["digest"].startswith("sha256:")
+    provider = result["facts"]["optional_analysis"]["vulture"]
+    assert provider["status"] in {"partial", "unavailable"}
+    assert any("src/broken.py" in gap for gap in result["gaps"])
+    assert "private-test-value" not in json.dumps(result)
+
+
+def test_generic_source_roles_include_production_and_test_code(tmp_path):
+    production = "struct Application {}\n"
+    test = "class ApplicationTest {}\n"
+    write(tmp_path, "src/App.swift", production)
+    write(tmp_path, "tests/ApplicationTest.java", test)
+    result = collector.collect(tmp_path)
+    roles = result["facts"]["inventory"]["roles"]
+    assert roles["production"] == {"files": 1, "bytes": len(production.encode()), "lines": 1}
+    assert roles["test"] == {"files": 1, "bytes": len(test.encode()), "lines": 1}
+    assert result["facts"]["inventory"]["source_files"] == 2

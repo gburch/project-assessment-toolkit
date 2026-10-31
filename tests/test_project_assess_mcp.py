@@ -65,6 +65,7 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                     "start_assessment",
                     "query_evidence",
                     "inspect_source_context",
+                    "list_analyzers",
                 } <= names
                 assert all(
                     tool.annotations.read_only_hint
@@ -100,6 +101,21 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                     str(root.resolve()),
                     str(reports.resolve()),
                 ]
+                available = await session.call_tool("list_analyzers", {})
+                assert not available.is_error
+                assert available.structured_content["analyzers"][0]["name"] == "vulture"
+                deep = await session.call_tool(
+                    "start_assessment",
+                    {"root": str(root), "reports": [str(supplied)], "analysis_profile": "deep"},
+                )
+                assert not deep.is_error
+                assert deep.structured_content["collection_scope"]["analysis_profile"] == "deep"
+                # Restore standard analysis as latest for the following review scenario.
+                current = await session.call_tool(
+                    "scan_project", {"root": str(root), "reports": [str(supplied)]}
+                )
+                assert not current.is_error
+                snapshot = current.structured_content
                 brief = await session.call_tool(
                     "get_report", {"assessment_id": snapshot["id"], "brief": True}
                 )

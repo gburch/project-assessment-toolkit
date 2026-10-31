@@ -18,14 +18,31 @@ def _input(path):
 
 
 def parser():
+    from .analyzer_registry import registered_analyzer_names
+
     result = argparse.ArgumentParser(prog="pat", description="PAT — Project Assessment Toolkit")
     result.add_argument("--state-dir", help="Local state outside assessed projects")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("skills", help="Locate the bundled general assessment skills")
     commands.add_parser("info", help="Read this installation's tool and instruction provenance")
+    commands.add_parser("analyzers", help="List trusted optional analyzers and availability")
     scan = commands.add_parser("scan", help="Capture deterministic source facts")
     scan.add_argument("root")
     scan.add_argument("--brief", action="store_true", help="Return a compact, queryable handoff")
+    scan.add_argument(
+        "--analysis-profile",
+        choices=("standard", "deep"),
+        default="standard",
+        help="Select recorded collection/work budgets; independent of goal profiles",
+    )
+    scan.add_argument(
+        "--analyzer",
+        dest="analyzers",
+        action="append",
+        choices=registered_analyzer_names(),
+        default=[],
+        help="Opt into an installed trusted analyzer on captured source",
+    )
     scan.add_argument(
         "--report",
         action="append",
@@ -113,6 +130,11 @@ def parser():
 def main(argv=None):
     argument_parser = parser()
     args = argument_parser.parse_args(argv)
+    if args.command == "analyzers":
+        from .analyzer_registry import list_analyzers
+
+        print(json.dumps(list_analyzers(), indent=2, allow_nan=False))
+        return 0
     if args.command == "info":
         from .provenance import tool_info
 
@@ -156,7 +178,12 @@ def main(argv=None):
             serve(service, args.port, open_browser=args.open)
             return 0
         if args.command == "scan":
-            output = service.scan(args.root, args.report)
+            output = service.scan(
+                args.root,
+                args.report,
+                analysis_profile=args.analysis_profile,
+                analyzers=args.analyzers,
+            )
             if args.brief:
                 output = service.overview(output["id"])
         elif args.command == "list":

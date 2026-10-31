@@ -49,7 +49,8 @@ def test_exhausted_detail_allowance_preserves_every_module_overview_and_topology
     result = analysis.summarize(records, 5, 0)
     assert result["coverage"]["overview_files"] == 5
     assert result["coverage"]["functions_total"] == 5
-    assert result["coverage"]["functions_analyzed"] == 0
+    assert result["coverage"]["functions_analyzed"] == 5
+    assert result["coverage"]["pattern_functions"] == 0
     assert len(result["topology"]["edges"]) == 5
     assert {row["role"] for row in result["modules"]} == {"production"}
     assert result["status"] == "partial"
@@ -182,7 +183,7 @@ def test_index_exposes_leads_beyond_rich_sample_with_explicit_denominators(monke
     assert counts["omitted_from_index"] == 2
     assert counts["by_kind"] == {"unreferenced_module": 1, "unused_symbol": 3}
     assert counts["by_role"] == {"production": 4}
-    assert result["analyzer"]["version"] == "2"
+    assert result["analyzer"]["version"] == "3"
     assert any("index limit" in gap for gap in result["gaps"])
 
 
@@ -254,3 +255,116 @@ def test_role_hints_cover_application_stacks_and_preserve_generated_uncertainty(
     assert analysis.source_role("src/generated/client.py")["role"] == "unknown"
     assert analysis.source_role("src/api/service_pb2.py")["generated_hint"]
     assert analysis.source_role("vendor/copied.py")["vendor_hint"]
+
+
+def test_source_roots_own_nested_ops_tools_but_not_generated_vendor_or_tests():
+    for path in (
+        "src/product/ops/repair.py",
+        "backend/tools/worker.py",
+        "frontend/src/tools/client.ts",
+    ):
+        assert analysis.source_role(path)["role"] == "production"
+    assert analysis.source_role("ops/repair.py")["role"] == "tooling"
+    assert analysis.source_role("src/product/ops/tests/test_repair.py")["role"] == "test"
+    assert analysis.source_role("src/product/vendor/repair.py")["role"] == "unknown"
+    assert analysis.source_role("src/product/generated/test_client.py")["role"] == "unknown"
+
+
+def test_cheap_metrics_cover_all_functions_while_expensive_patterns_are_capped():
+    source = "\n".join(
+        f"def feature_{number}(value):\n"
+        + "".join(f"    if value == {branch}:\n        value += 1\n" for branch in range(10))
+        + f"    return value + {number}\n"
+        for number in range(6)
+    )
+    record = analysis.analyze_python(
+        "src/features.py", ast.parse(source), detail_budget=1, metric_node_budget=200_000
+    )
+    result = analysis.summarize([record], 1, 0)
+    assert len(record["functions"]) == 6
+    assert all(row["decisions"] == 10 and not row["partial"] for row in record["functions"])
+    assert sum(row["pattern_analyzed"] for row in record["functions"]) == 1
+    assert sum(bool(row["patterns"]) for row in record["functions"]) == 1
+    assert len(leads(result, "complex_function")) == 6
+    assert result["coverage"]["functions_analyzed"] == 6
+    assert result["coverage"]["pattern_functions"] == 1
+
+
+def test_metric_budget_is_shared_with_explicit_lower_bounds_not_whole_function_skips():
+    source = "\n".join(
+        f"def feature_{i}(value):\n    if value:\n        return value + 1\n" for i in range(4)
+    )
+    record = analysis.analyze_python(
+        "src/features.py", ast.parse(source), detail_budget=0, metric_node_budget=3
+    )
+    assert len(record["functions"]) == 4
+    assert record["module"]["metric_nodes"] == 3
+    assert record["module"]["metric_probe_nodes"] <= 4
+    assert sum(row["nodes_analyzed"] for row in record["functions"]) == 3
+    assert all(row["metric_basis"] == "lower_bound" for row in record["functions"])
+    assert record["module"]["pattern_functions"] == 0
+
+
+def test_summary_reports_effective_profile_metric_limits_separate_from_default():
+    from project_assess.budgets import get_budget
+
+    tree = ast.parse("def feature(value):\n    return value + 1\n")
+    for profile in ("standard", "deep"):
+        configured = get_budget(profile).metric_nodes_per_file
+        record = analysis.analyze_python(
+            "src/app.py", tree, detail_budget=0, metric_node_budget=configured
+        )
+        result = analysis.summarize([record], 1, 0)
+        assert result["limits"]["ast_nodes_per_file"] == configured
+        assert result["limits"]["metric_nodes_per_file"] == configured
+        assert result["limits"]["default_metric_nodes_per_file"] == analysis.MAX_NODES
+        assert result["modules"][0]["metric_node_budget"] == configured
+
+
+def test_import_resolution_caches_repeated_targets_without_charging_unique_budget_again():
+    records = [
+        analysis.analyze_python(
+            f"src/pkg/consumer{i}.py",
+            ast.parse(
+                "from pkg import shared\ndef load():\n    from pkg import shared\n    return shared\n"
+            ),
+        )
+        for i in range(12)
+    ]
+    records.append(analysis.analyze_python("src/pkg/shared.py", ast.parse("value = 1\n")))
+    result = analysis.summarize(records, len(records), 0, import_target_limit=1)
+    resolution = result["topology"]["resolution"]
+    assert resolution["attempted"] == 24
+    assert resolution["unique_work"] == 1 and resolution["cached"] == 23
+    assert resolution["complete"] and result["topology"]["complete"]
+    assert len(result["topology"]["edges"]) == 24
+    assert {row["phase"] for row in result["topology"]["edges"]} == {"eager", "deferred"}
+
+
+def test_incomplete_capture_or_graph_withholds_zero_inbound_module_leads():
+    records = [
+        analysis.analyze_python("src/isolated.py", ast.parse("def feature():\n    return 1\n"))
+    ]
+    assert leads(analysis.summarize(records, 1, 0), "unreferenced_module")
+    incomplete = analysis.summarize(records, 1, 0, source_complete=False)
+    assert not leads(incomplete, "unreferenced_module")
+    assert not incomplete["topology"]["complete"]
+    assert not incomplete["modules"][0]["inbound_complete"]
+    importer = analysis.analyze_python(
+        "src/importer.py", ast.parse("import external_one, external_two\n")
+    )
+    limited = analysis.summarize([*records, importer], 2, 0, import_target_limit=1)
+    assert limited["topology"]["resolution"]["budget_exhausted"]
+    assert not leads(limited, "unreferenced_module")
+    dynamic = analysis.analyze_python(
+        "src/dynamic.py", ast.parse("def load(name):\n    return __import__(name)\n")
+    )
+    assert not leads(analysis.summarize([*records, dynamic], 2, 0), "unreferenced_module")
+
+
+def test_unreachable_yield_retains_intentional_async_generator_contract_caveat():
+    result = scan({"src/stream.py": "async def empty_stream():\n    return\n    yield None\n"})
+    lead = leads(result, "unreachable_statement")[0]
+    assert lead["confidence"] == "high"
+    assert lead["metrics"]["generator_marker"] == "async_generator"
+    assert lead["counterevidence"]

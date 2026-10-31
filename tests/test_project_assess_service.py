@@ -544,7 +544,14 @@ def test_legacy_doctor_reports_missing_analysis_without_read_time_migration(asse
     captured["evidence"] = [
         entry
         for entry in captured["evidence"]
-        if entry["kind"] not in {"static-analysis", "test-value-static-analysis"}
+        if entry["kind"]
+        not in {
+            "static-analysis",
+            "test-value-static-analysis",
+            "source-analysis",
+            "analyzer-analysis",
+            "javascript-analysis",
+        }
     ]
     captured["facts"].pop("static_analysis", None)
     captured["facts"].pop("test_value_static", None)
@@ -863,7 +870,10 @@ def test_doctor_uses_older_test_static_inventory_without_generic_ast_evidence(tm
     service = AssessmentService(tmp_path / "state")
     captured = service.scan(root)
     captured["evidence"] = [
-        entry for entry in captured["evidence"] if entry["kind"] != "static-analysis"
+        entry
+        for entry in captured["evidence"]
+        if entry["kind"]
+        not in {"static-analysis", "source-analysis", "analyzer-analysis", "javascript-analysis"}
     ]
     captured["facts"].pop("static_analysis")
     with sqlite3.connect(service.db_path) as db:
@@ -931,6 +941,7 @@ def test_doctor_combines_test_static_and_ruff_evidence_with_one_candidate_bound(
         "ruff",
         "ecosystem",
         "dead_code",
+        "source_text",
     }
     unreachable = next(row for row in candidates if row["kind"] == "unreachable_statement")
     assert unreachable["candidate_confidence"]["level"] == "high"

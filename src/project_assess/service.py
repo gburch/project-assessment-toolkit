@@ -490,7 +490,7 @@ class AssessmentService:
     def rubric():
         return rubric()
 
-    def scan(self, root, reports=None):
+    def scan(self, root, reports=None, *, analysis_profile="standard", analyzers=None):
         root = self._root(root)
         # Report paths have the same authorization boundary as source reads.
         report_paths = []
@@ -502,7 +502,9 @@ class AssessmentService:
                 raise PermissionError("Report is outside configured allowed roots")
             report_paths.append(path)
         started = time.monotonic()
-        snapshot = collect(root, reports=report_paths)
+        snapshot = collect(
+            root, reports=report_paths, analysis_profile=analysis_profile, analyzers=analyzers
+        )
         snapshot["collection"] = {"seconds": round(time.monotonic() - started, 4)}
         project_id = "p_" + hashlib.sha256(str(root).encode()).hexdigest()[:24]
         snapshot.update(id=_id("a_"), project_id=project_id, created_at=now())
@@ -604,6 +606,13 @@ class AssessmentService:
                 }
             },
             "javascript_analysis": facts.get("javascript_analysis", {}),
+            "source_analysis": facts.get("source_analysis", {}),
+            "optional_analysis": facts.get("optional_analysis", {}),
+            "collection_scope": {
+                key: value
+                for key, value in facts.get("collection", {}).items()
+                if key not in {"skipped_inputs", "unsearched_directories", "unprocessed_reports"}
+            },
             "evidence_kinds": {
                 kind: sum(entry["kind"] == kind for entry in assessment["evidence"])
                 for kind in sorted({entry["kind"] for entry in assessment["evidence"]})
@@ -706,7 +715,7 @@ class AssessmentService:
                 return "test"
             if entry["path"] in captured_roles:
                 return captured_roles[entry["path"]]
-            if entry["kind"] in {"python", "javascript"}:
+            if entry["kind"] in {"python", "javascript", "source"}:
                 return source_role(entry["path"])["role"]
             return entry["kind"]
 
@@ -926,7 +935,13 @@ class AssessmentService:
                     "topology_complete": entry["stats"].get("topology", {}).get("complete"),
                 }
                 for entry in entries
-                if entry["kind"] in {"static-analysis", "javascript-analysis"}
+                if entry["kind"]
+                in {
+                    "static-analysis",
+                    "javascript-analysis",
+                    "source-analysis",
+                    "analyzer-analysis",
+                }
             ],
         }
         if view == "snippets" and not filtered:
@@ -1027,6 +1042,7 @@ class AssessmentService:
                 "ecosystem",
                 "dead_code",
                 "sarif",
+                "source_text",
             )
         }
         entries = assessment["evidence"]
@@ -1034,7 +1050,8 @@ class AssessmentService:
         analyses = [
             entry
             for entry in entries
-            if entry["kind"] in {"static-analysis", "javascript-analysis"}
+            if entry["kind"]
+            in {"static-analysis", "javascript-analysis", "source-analysis", "analyzer-analysis"}
         ]
         analysis = analyses[0]["stats"] if analyses else None
         gaps = list(assessment["gaps"])
@@ -1067,8 +1084,8 @@ class AssessmentService:
                     "Check the enclosing functions' outcomes, errors and early exits.",
                 ),
                 "unreachable_statement": (
-                    "Inspect the stated control-flow proof and remove only statements that cannot execute in this context.",
-                    "Verify the enclosing branch and its important success and failure outcomes.",
+                    "Inspect reachability and binding/compiler effects before removal, including async-generator shape and hoisted declarations.",
+                    "Preserve public contracts, generator/coroutine classification, cleanup and important outcomes; unreachable does not mean safe to delete.",
                 ),
                 "unused_symbol": (
                     "Trace local references, public exports, decorators and reflection before changing the symbol.",
@@ -1081,6 +1098,14 @@ class AssessmentService:
                 "shadowed_module": (
                     "Verify which module Python resolves in supported source and installed layouts before removing a predecessor.",
                     "Check public imports and packaging; a source-layout collision alone does not establish deletion safety.",
+                ),
+                "duplicate_source_file": (
+                    "Inspect exact text matches against supported callers and deliberate boundary or generated scaffolding before sharing source.",
+                    "Preserve each file's language, packaging and public behavior; text equality does not establish semantic interchangeability.",
+                ),
+                "duplicate_source_block": (
+                    "Compare bindings and enclosing responsibilities around the matching text before proposing a shared concern.",
+                    "Preserve language-specific outputs, errors, authority and side effects; source-text analysis does not parse semantics.",
                 ),
             }
         )
@@ -1120,7 +1145,11 @@ class AssessmentService:
                     continue
                 smallest_fix, verification = guidance[candidate["kind"]]
                 family = (
-                    "dead_code"
+                    "analyzer:" + str(analysis.get("analyzer", {}).get("name", "unknown"))[:100]
+                    if static["kind"] == "analyzer-analysis"
+                    else "source_text"
+                    if static["kind"] == "source-analysis"
+                    else "dead_code"
                     if candidate["kind"]
                     in {
                         "unreachable_statement",
@@ -1132,7 +1161,7 @@ class AssessmentService:
                     if static["kind"] == "javascript-analysis"
                     else "python_ast"
                 )
-                families[family].append(
+                families.setdefault(family, []).append(
                     {
                         **candidate,
                         "evidence_ids": sorted(
@@ -1298,6 +1327,10 @@ class AssessmentService:
                     "level": candidate.get("confidence", "low"),
                     "basis": "supplied_unverified_diagnostic"
                     if family in {"ruff", "sarif"}
+                    else "captured_text"
+                    if family == "source_text"
+                    else "captured_source_producer"
+                    if family.startswith("analyzer:")
                     else "captured_syntax",
                     "defect_established": False,
                     "change_safety": "requires_review",

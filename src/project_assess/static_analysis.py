@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 
 from .analysis_patterns import function_patterns, pattern_candidates
 
-VERSION = "2"
+VERSION = "3"
 MAX_FILES = 1000
 MAX_OVERVIEW_FILES = 20_000
 MAX_SYMBOLS = 20_000
@@ -108,25 +108,14 @@ def source_role(path: str) -> dict:
         set(parts[:-1])
         & {"vendor", "vendored", "third_party", "third-party", "node_modules", ".venv", "venv"}
     )
-    if (
+    if generated or vendor:
+        role = "unknown"
+    elif (
         set(parts[:-1]) & {"test", "tests", "__tests__", "spec", "specs", "e2e"}
         or name.startswith("test_")
         or re.search(r"(?:_test|\.test|\.spec)\.[^.]+$", name)
     ):
         role = "test"
-    elif set(parts[:-1]) & {
-        ".agents",
-        ".claude",
-        ".codex",
-        "scripts",
-        "tools",
-        "ops",
-        "evals",
-        "docs",
-    }:
-        role = "tooling"
-    elif generated or vendor:
-        role = "unknown"
     elif parts and parts[0] in {
         "src",
         "lib",
@@ -140,6 +129,17 @@ def source_role(path: str) -> dict:
         "api",
     }:
         role = "production"
+    elif set(parts[:-1]) & {
+        ".agents",
+        ".claude",
+        ".codex",
+        "scripts",
+        "tools",
+        "ops",
+        "evals",
+        "docs",
+    }:
+        role = "tooling"
     else:
         role = "unknown"
     return {
@@ -159,7 +159,76 @@ def _sample(items, limit):
     return [items[index * len(items) // limit] for index in range(limit)]
 
 
-def analyze_python(path: str, tree: ast.Module, *, detail_budget: int | None = None) -> dict:
+def _function_metrics(functions, node_budget):
+    """Fair, cheap metric work independent of expensive clone/pattern slots."""
+    rows = [
+        {
+            "decisions": 0,
+            "nesting": 0,
+            "nodes_analyzed": 0,
+            "partial": False,
+            "loop_io_nodes": [],
+            "loop_io_count": 0,
+        }
+        for _ in functions
+    ]
+    pending = deque(
+        (index, iter(_nodes(_body(function)))) for index, function in enumerate(functions)
+    )
+    used, probes = 0, 0
+
+    def unfinished(index, iterator):
+        nonlocal probes
+        value = next(iterator, None)
+        probes += value is not None
+        rows[index]["partial"] = value is not None
+
+    while pending and used < node_budget:
+        index, iterator = pending.popleft()
+        item = next(iterator, None)
+        if item is None:
+            continue
+        node, depth, in_loop = item
+        row = rows[index]
+        row["nodes_analyzed"] += 1
+        row["decisions"] += (
+            isinstance(
+                node,
+                (
+                    ast.If,
+                    ast.IfExp,
+                    ast.For,
+                    ast.AsyncFor,
+                    ast.While,
+                    ast.ExceptHandler,
+                    ast.comprehension,
+                ),
+            )
+            + (len(node.values) - 1 if isinstance(node, ast.BoolOp) else 0)
+            + (max(len(node.cases) - 1, 0) if isinstance(node, ast.Match) else 0)
+        )
+        row["nesting"] = max(row["nesting"], depth + isinstance(node, _CONTROL))
+        if in_loop and _io_call(node):
+            row["loop_io_count"] += 1
+            if len(row["loop_io_nodes"]) < 5:
+                row["loop_io_nodes"].append(node)
+        used += 1
+        if row["nodes_analyzed"] >= MAX_FUNCTION_NODES:
+            unfinished(index, iterator)
+        else:
+            pending.append((index, iterator))
+    for index, iterator in pending:
+        unfinished(index, iterator)
+    return rows, used, probes
+
+
+def analyze_python(
+    path: str,
+    tree: ast.Module,
+    *,
+    detail_budget: int | None = None,
+    metric_node_budget: int | None = None,
+) -> dict:
     """Retain a module overview and partial metrics even when detail budgets are reached."""
     record = {"path": path, "functions": [], "imports": [], "gaps": [], **source_role(path)}
     # The overview pass is distinct from detailed metric work. Exceeding the
@@ -239,47 +308,29 @@ def analyze_python(path: str, tree: ast.Module, *, detail_budget: int | None = N
     limit = MAX_FUNCTIONS if detail_budget is None else min(MAX_FUNCTIONS, max(0, detail_budget))
     if len(functions) > limit:
         record["gaps"].append(f"Function detail limit reached: {path}; module overview retained")
-    remaining_nodes = MAX_NODES
-    selected = _sample(functions, limit)
-    # Share the detailed node allowance across functions so one huge body cannot
-    # starve every later function. Values from incomplete bodies are lower bounds.
-    per_function = min(MAX_FUNCTION_NODES, max(1, remaining_nodes // max(len(selected), 1)))
-    for function in selected:
+    metric_budget = MAX_NODES if metric_node_budget is None else max(0, metric_node_budget)
+    metrics, metric_nodes, probes = _function_metrics(functions, metric_budget)
+    selected = {id(function) for function in _sample(functions, limit)}
+    for function, metric in zip(functions, metrics, strict=True):
         body = _body(function)
-        own_nodes = list(islice(_nodes(body), per_function + 1))
-        partial = len(own_nodes) > per_function or overview_partial
-        if len(own_nodes) > per_function:
+        partial = metric["partial"]
+        if partial:
             record["gaps"].append(
                 f"Function node limit reached: {path}:{function.lineno}; partial metrics retained"
             )
-            own_nodes = own_nodes[:per_function]
-        decisions = sum(
-            isinstance(
-                node,
-                (
-                    ast.If,
-                    ast.IfExp,
-                    ast.For,
-                    ast.AsyncFor,
-                    ast.While,
-                    ast.ExceptHandler,
-                    ast.comprehension,
-                ),
-            )
-            + (len(node.values) - 1 if isinstance(node, ast.BoolOp) else 0)
-            + (max(len(node.cases) - 1, 0) if isinstance(node, ast.Match) else 0)
-            for node, _, _ in own_nodes
-        )
-        nesting = max(
-            (depth + isinstance(node, _CONTROL) for node, depth, _ in own_nodes), default=0
-        )
-        io = [_location(path, node) for node, _, in_loop in own_nodes if in_loop and _io_call(node)]
+        pattern_analyzed = id(function) in selected
+        own_nodes = list(islice(_nodes(body), MAX_FUNCTION_NODES + 1)) if pattern_analyzed else []
+        pattern_partial = len(own_nodes) > MAX_FUNCTION_NODES
+        own_nodes = own_nodes[:MAX_FUNCTION_NODES]
+        if pattern_partial:
+            record["gaps"].append(f"Pattern function node limit reached: {path}:{function.lineno}")
         # Do not compare stubs/wrappers. Exact ASTs retain arguments, literals,
         # callees, annotations and decorators; only definition names/locations
         # and the leading docstring are omitted. Equality is not safe merge proof.
         fingerprint = None
         if (
-            not partial
+            pattern_analyzed
+            and not pattern_partial
             and len(body) >= 3
             and len(own_nodes) >= 20
             and not any(isinstance(n, _SCOPES) for n, _, _ in own_nodes)
@@ -297,7 +348,11 @@ def analyze_python(path: str, tree: ast.Module, *, detail_budget: int | None = N
                     f"Clone serialization depth limit reached: {path}:{function.lineno}"
                 )
         try:
-            patterns = function_patterns(path, function, own_nodes, partial=partial)
+            patterns = (
+                function_patterns(path, function, own_nodes, partial=pattern_partial)
+                if pattern_analyzed
+                else {}
+            )
         except RecursionError:
             patterns = {}
             record["gaps"].append(
@@ -307,18 +362,30 @@ def analyze_python(path: str, tree: ast.Module, *, detail_budget: int | None = N
             {
                 "location": _location(path, function),
                 "name": function.name,
-                "decisions": decisions,
-                "nesting": nesting,
-                "nodes_analyzed": len(own_nodes),
+                "decisions": metric["decisions"],
+                "nesting": metric["nesting"],
+                "nodes_analyzed": metric["nodes_analyzed"],
                 "partial": partial,
                 "metric_basis": "lower_bound" if partial else "complete_function",
-                "loop_io": io[:5],
+                "loop_io": [_location(path, node) for node in metric["loop_io_nodes"]],
+                "loop_io_count": metric["loop_io_count"],
+                "pattern_analyzed": pattern_analyzed,
+                "pattern_partial": pattern_partial,
                 "fingerprint": fingerprint,
                 "patterns": patterns,
             }
         )
     record["module"]["analyzed_functions"] = len(record["functions"])
     record["module"]["partial_functions"] = sum(row["partial"] for row in record["functions"])
+    record["module"].update(
+        {
+            "pattern_functions": len(selected),
+            "pattern_function_limit": MAX_FUNCTIONS,
+            "metric_node_budget": metric_budget,
+            "metric_nodes": metric_nodes,
+            "metric_probe_nodes": probes,
+        }
+    )
     for function in record["functions"]:
         for limit in function["patterns"].get("limits_reached", []):
             record["gaps"].append(
@@ -377,11 +444,14 @@ def _module(path):
     return ".".join(parts)
 
 
-def _edges(records):
+def _edges(records, import_target_limit):
     modules = defaultdict(list)
     for record in records:
         modules[_module(record["path"])].append(record["path"])
-    edges, examined, limited = [], 0, False
+    edges, cache = [], {}
+    attempted, cached, skipped, ambiguous = 0, 0, 0, 0
+    oversized, attempts_limited = False, False
+    attempt_limit = min(1_000_000, max(1000, import_target_limit * 10))
     depth = max((name.count(".") + 1 for name in modules), default=1)
 
     def targets(record):
@@ -410,37 +480,60 @@ def _edges(records):
 
     # An import-heavy early file must not consume every graph-resolution slot.
     for path, item, target in _round_robin([targets(record) for record in records]):
-        if examined >= MAX_IMPORT_TARGETS:
-            limited = True
+        if attempted >= attempt_limit:
+            attempts_limited = True
             break
-        examined += 1
+        attempted += 1
         if target is None or len(target) > MAX_MODULE_LENGTH:
-            limited = True
+            oversized = True
             continue
+        if target in cache:
+            cached += 1
+            destination = cache[target]
+        elif len(cache) >= import_target_limit:
+            skipped += 1
+            continue
+        else:
+            # Cache successful, external/unresolved and ambiguous lookups alike.
+            # Repeated imports in different files/phases still emit their edges.
+            parts = target.split(".", depth)[:depth]
+            prefix = ""
+            for end in range(len(parts), 0, -1):
+                name = ".".join(parts[:end])
+                if name in modules:
+                    prefix = name
+                    break
+            matches = modules.get(prefix, [])
+            ambiguous += len(matches) > 1
+            destination = matches[0] if len(matches) == 1 else None
+            cache[target] = destination
         # Resolve captured modules only. Captured depth bounds prefix work for
         # hostile imports containing thousands of unresolved dotted segments.
-        parts = target.split(".", depth)[:depth]
-        target = ""
-        for end in range(len(parts), 0, -1):
-            prefix = ".".join(parts[:end])
-            if prefix in modules:
-                target = prefix
-                break
-        if target in modules and len(modules[target]) == 1:
-            destination = modules[target][0]
-            if destination != path:
-                edges.append(
-                    {
-                        "source": path,
-                        "target": destination,
-                        "phase": item["phase"],
-                        "line": item["location"]["line"],
-                    }
-                )
+        if destination is not None and destination != path:
+            edges.append(
+                {
+                    "source": path,
+                    "target": destination,
+                    "phase": item["phase"],
+                    "line": item["location"]["line"],
+                }
+            )
     return sorted(
         {json.dumps(edge, sort_keys=True): edge for edge in edges}.values(),
         key=lambda row: (row["source"], row["target"], row["line"]),
-    ), limited
+    ), {
+        "attempted": attempted,
+        "cached": cached,
+        "unique_work": len(cache),
+        "limit": import_target_limit,
+        "attempt_limit": attempt_limit,
+        "budget_exhausted": bool(skipped),
+        "budget_skipped_attempts": skipped,
+        "attempt_limit_reached": attempts_limited,
+        "qualified_name_limit_reached": oversized,
+        "ambiguous_targets": ambiguous,
+        "complete": not (skipped or attempts_limited or oversized or ambiguous),
+    }
 
 
 def _components(paths, edges):
@@ -512,7 +605,7 @@ def _retained_candidates(candidates, limit=None):
     return list(islice(_round_robin(kinds), MAX_CANDIDATES if limit is None else limit))
 
 
-def _dead_candidates(records, edges):
+def _dead_candidates(records, edges, *, graph_complete):
     """Unused is a closed-world lead; only syntactic unreachable code is proven."""
     references = {name for row in records for name in row.get("references", [])}
     references.update(name for row in records for item in row["imports"] for name in item["names"])
@@ -574,11 +667,14 @@ def _dead_candidates(records, edges):
                 }
             )
         if (
-            record.get("role") == "production"
+            graph_complete
+            and record.get("role") == "production"
             and path not in inbound
             and module.get("definition_count", 0)
             and not module.get("main_guard")
             and not module.get("exports")
+            and not module.get("exports_unknown")
+            and not module.get("dynamic_resolution")
             and PurePosixPath(path).stem
             not in {"__init__", "__main__", "app", "main", "cli", "wsgi", "asgi", "manage"}
         ):
@@ -598,7 +694,17 @@ def _dead_candidates(records, edges):
     return candidates
 
 
-def summarize(records: list[dict], python_files: int, other_source_files: int) -> dict:
+def summarize(
+    records: list[dict],
+    python_files: int,
+    other_source_files: int,
+    *,
+    import_target_limit: int | None = None,
+    source_complete: bool = True,
+) -> dict:
+    import_limit = MAX_IMPORT_TARGETS if import_target_limit is None else import_target_limit
+    if type(import_limit) is not int or not 1 <= import_limit <= 1_000_000:
+        raise ValueError("import_target_limit must be an integer from 1 to 1000000")
     selected = sorted(records, key=lambda row: row["path"])[:MAX_OVERVIEW_FILES]
     gaps = sorted({gap for record in selected for gap in record["gaps"]})
     if python_files > len(selected):
@@ -610,7 +716,25 @@ def summarize(records: list[dict], python_files: int, other_source_files: int) -
     gaps.append(
         "Dynamic imports, runtime alias resolution, actual call frequency and change cost are not established"
     )
-    edges, edges_limited = _edges(selected)
+    edges, resolution = _edges(selected, import_limit)
+    edges_limited = not resolution["complete"]
+    imports_partial = any(
+        row.get("module", {}).get("dynamic_resolution")
+        or any(
+            gap.startswith(("Import traversal limit", "Module import limit")) for gap in row["gaps"]
+        )
+        for row in selected
+    )
+    graph_complete = (
+        source_complete
+        and python_files == len(selected)
+        and not edges_limited
+        and not imports_partial
+    )
+    if not source_complete:
+        gaps.append("Source capture is incomplete; zero-inbound module leads are withheld")
+    if not graph_complete:
+        gaps.append("Static import graph is incomplete; unreferenced-module leads are withheld")
     candidates, clones, hotspots = [], defaultdict(list), []
     if edges_limited:
         gaps.append("Static import target count or qualified-name limit reached")
@@ -662,7 +786,7 @@ def summarize(records: list[dict], python_files: int, other_source_files: int) -
                     }
                 )
     candidates.extend(pattern_candidates(selected))
-    candidates.extend(_dead_candidates(selected, edges))
+    candidates.extend(_dead_candidates(selected, edges, graph_complete=graph_complete))
     for locations in clones.values():
         if len(locations) > 1:
             candidates.append(
@@ -677,12 +801,17 @@ def summarize(records: list[dict], python_files: int, other_source_files: int) -
                 }
             )
     runtime_edges = [edge for edge in edges if edge["phase"] != "type_checking"]
-    for component in _components([record["path"] for record in selected], runtime_edges):
-        internal = [
-            edge
-            for edge in runtime_edges
-            if edge["source"] in component and edge["target"] in component
-        ]
+    components = list(_components([record["path"] for record in selected], runtime_edges))
+    component_ids = {
+        path: index for index, component in enumerate(components) for path in component
+    }
+    grouped_edges = defaultdict(list)
+    for edge in runtime_edges:
+        index = component_ids.get(edge["source"])
+        if index is not None and index == component_ids.get(edge["target"]):
+            grouped_edges[index].append(edge)
+    for index, component in enumerate(components):
+        internal = grouped_edges[index]
         candidates.append(
             {
                 "kind": "dependency_cycle",
@@ -738,6 +867,7 @@ def summarize(records: list[dict], python_files: int, other_source_files: int) -
         or len(candidates) > MAX_CANDIDATES
         or bool(other_source_files)
         or edges_limited
+        or not source_complete
     )
     inbound, outbound = (
         Counter(edge["target"] for edge in edges),
@@ -754,10 +884,16 @@ def summarize(records: list[dict], python_files: int, other_source_files: int) -
             **row.get("module", {}),
             "inbound": inbound[row["path"]],
             "outbound": outbound[row["path"]],
+            "inbound_complete": graph_complete,
+            "degree_basis": "captured static edges; incomplete graphs provide lower bounds",
         }
         for row in selected
     ]
     retained = _retained_candidates(candidates)
+    metric_budget = max(
+        (row.get("module", {}).get("metric_node_budget", MAX_NODES) for row in selected),
+        default=MAX_NODES,
+    )
     return {
         "schema_version": 1,
         "analyzer": {"name": "project-assess-python-ast", "version": VERSION},
@@ -767,13 +903,23 @@ def summarize(records: list[dict], python_files: int, other_source_files: int) -
             "parsed_files": len(selected),
             "other_source_files": other_source_files,
             "overview_files": len(selected),
-            "detailed_files": sum(bool(row["functions"]) for row in selected),
+            "detailed_files": sum(
+                bool(row.get("module", {}).get("pattern_functions", 0)) for row in selected
+            ),
+            "metric_files": sum(bool(row["functions"]) for row in selected),
+            "pattern_files": sum(
+                bool(row.get("module", {}).get("pattern_functions", 0)) for row in selected
+            ),
+            "pattern_functions": sum(
+                row.get("module", {}).get("pattern_functions", 0) for row in selected
+            ),
             "functions_total": sum(
                 row.get("module", {}).get("function_count", len(row["functions"]))
                 for row in selected
             ),
             "functions_analyzed": len(hotspots),
             "partial_functions": sum(row["partial"] for row in hotspots),
+            "metric_functions_observed": sum(bool(row.get("nodes_analyzed")) for row in hotspots),
         },
         "summary": {
             "functions": sum(len(record["functions"]) for record in selected),
@@ -793,13 +939,9 @@ def summarize(records: list[dict], python_files: int, other_source_files: int) -
         "modules": modules,
         "topology": {
             "edges": edges,
-            "complete": not edges_limited
-            and python_files == len(selected)
-            and not any(
-                gap.startswith(("Import traversal limit", "Module import limit"))
-                for row in selected
-                for gap in row["gaps"]
-            ),
+            "complete": graph_complete,
+            "resolution": resolution,
+            "source_complete": source_complete,
             "caveat": "Captured static imports, including type-checking, conditional and deferred phases; type-checking edges are excluded from runtime-cycle leads. Not a runtime call graph, reachability proof or verified entrypoint inventory.",
         },
         "hotspots": sorted(
@@ -816,9 +958,12 @@ def summarize(records: list[dict], python_files: int, other_source_files: int) -
             "files": MAX_FILES,
             "overview_files": MAX_OVERVIEW_FILES,
             "project_symbols": MAX_SYMBOLS,
-            "import_targets": MAX_IMPORT_TARGETS,
+            "import_targets": import_limit,
+            "import_attempts": resolution["attempt_limit"],
             "qualified_name_characters": MAX_MODULE_LENGTH,
-            "ast_nodes_per_file": MAX_NODES,
+            "ast_nodes_per_file": metric_budget,
+            "metric_nodes_per_file": metric_budget,
+            "default_metric_nodes_per_file": MAX_NODES,
             "overview_nodes_per_file": MAX_OVERVIEW_NODES,
             "functions_per_file": MAX_FUNCTIONS,
             "nodes_per_function": MAX_FUNCTION_NODES,

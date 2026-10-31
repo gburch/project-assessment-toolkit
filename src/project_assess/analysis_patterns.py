@@ -81,6 +81,17 @@ def _suites(body, observed=None):
                                 pending.append(item.body)
 
 
+def _generator_marker(candidate, function, yield_lines):
+    location = candidate["locations"][0]
+    if any(location["line"] <= line <= location["end_line"] for line in yield_lines):
+        candidate["metrics"]["generator_marker"] = (
+            "async_generator" if isinstance(function, ast.AsyncFunctionDef) else "generator"
+        )
+        candidate["counterevidence"] = [
+            "An unreachable yield can intentionally establish the generator/async-generator protocol; removing it changes the callable contract."
+        ]
+
+
 def function_patterns(path, function, own_nodes, *, partial=False):
     """Reuse a bounded function traversal and leave incomplete similarity unknown."""
     result = {
@@ -91,6 +102,9 @@ def function_patterns(path, function, own_nodes, *, partial=False):
         "limits_reached": [],
     }
     observed = {id(node) for node, _, _ in own_nodes}
+    yield_lines = {
+        node.lineno for node, _, _ in own_nodes if isinstance(node, (ast.Yield, ast.YieldFrom))
+    }
     body = function.body
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
         if isinstance(body[0].value.value, str):
@@ -114,6 +128,7 @@ def function_patterns(path, function, own_nodes, *, partial=False):
                         "caveat": "Syntactic reachability only; preserve surrounding cleanup and public contracts.",
                     }
                 )
+                _generator_marker(result["unreachable"][-1], function, yield_lines)
                 if len(result["unreachable"]) >= MAX_UNREACHABLE:
                     result["limits_reached"].append("unreachable statement limit")
                     return result
@@ -140,6 +155,7 @@ def function_patterns(path, function, own_nodes, *, partial=False):
                             "caveat": "The guard may intentionally retain disabled scaffolding; review intent before removal.",
                         }
                     )
+                    _generator_marker(result["unreachable"][-1], function, yield_lines)
                     if len(result["unreachable"]) >= MAX_UNREACHABLE:
                         result["limits_reached"].append("unreachable statement limit")
                         return result

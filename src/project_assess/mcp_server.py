@@ -45,15 +45,34 @@ def create_mcp(service):
         return {**tool_info(), "allowed_roots": [str(root) for root in service.allowed_roots]}
 
     @server.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
-    def start_assessment(root: str, reports: list[str] | None = None) -> dict[str, Any]:
+    def start_assessment(
+        root: str,
+        reports: list[str] | None = None,
+        analysis_profile: str = "standard",
+        analyzers: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Save source facts and return a compact handoff; browse details with query_evidence."""
-        snapshot = service.scan(root, reports)
+        snapshot = service.scan(
+            root, reports, analysis_profile=analysis_profile, analyzers=analyzers
+        )
         return service.overview(snapshot["id"])
 
     @server.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
-    def scan_project(root: str, reports: list[str] | None = None) -> dict[str, Any]:
+    def scan_project(
+        root: str,
+        reports: list[str] | None = None,
+        analysis_profile: str = "standard",
+        analyzers: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Read source within allowed roots and save an immutable local facts snapshot."""
-        return service.scan(root, reports)
+        return service.scan(root, reports, analysis_profile=analysis_profile, analyzers=analyzers)
+
+    @server.tool(annotations={"readOnlyHint": True})
+    def list_analyzers() -> dict[str, Any]:
+        """List trusted optional analyzers; scans never install tools or load target plugins."""
+        from .analyzer_registry import list_analyzers as available
+
+        return {"analyzers": available()}
 
     @server.tool(annotations={"readOnlyHint": True})
     def get_report(assessment_id: str, brief: bool = False) -> dict[str, Any]:

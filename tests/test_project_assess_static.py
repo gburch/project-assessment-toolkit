@@ -165,7 +165,8 @@ def test_collection_caps_total_static_symbols(tmp_path, monkeypatch):
     result = collector.collect(tmp_path)
     analysis = result["facts"]["static_analysis"]
     assert result["facts"]["python"]["functions"] == 3
-    assert analysis["summary"]["functions"] == 1
+    assert analysis["summary"]["functions"] == 3
+    assert analysis["coverage"]["pattern_functions"] == 1
     assert analysis["status"] == "partial"
     assert any("detail limit" in gap for gap in analysis["gaps"])
     assert analysis["coverage"]["overview_files"] == 2

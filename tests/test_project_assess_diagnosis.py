@@ -48,17 +48,20 @@ def test_initial_handoff_retains_large_core_risks_under_noise_and_collection_bud
     handoff = service.overview(snapshot["id"])
     assert not handoff["complete"] and handoff["gap_count"]
     coverage = handoff["static_analysis"]["coverage"]
-    assert coverage["functions_total"] > coverage["functions_analyzed"]
+    assert coverage["functions_total"] == coverage["functions_analyzed"]
+    assert coverage["functions_total"] > coverage["pattern_functions"]
     assert handoff["planning_status"]["status"] == "no_review"
     assert handoff["planning_status"]["gap_status"] == "no_goals"
     collection = snapshot["facts"]["collection"]
     assert collection["skipped_by_role"]["tooling"] == 12
     assert collection["skipped_by_role"]["test"] > 0
-    graph = service.query_evidence(snapshot["id"], view="graph", role="production")
+    graph = service.query_evidence(
+        snapshot["id"], view="graph", role="production", kind="static-analysis"
+    )
     modules = [row for row in graph["items"] if row["record_type"] == "module"]
     assert {row["path"] for row in modules} == {"src/product/core.py", "src/product/peer.py"}
     assert all(
-        row["lines"] > 1500 and row["analyzed_functions"] < row["function_count"] for row in modules
+        row["lines"] > 1500 and row["pattern_functions"] < row["function_count"] for row in modules
     )
     clones = service.query_evidence(
         snapshot["id"], view="candidates", candidate_kind="duplicate_function", role="production"

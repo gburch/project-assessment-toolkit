@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pat-assess"
-version = "0.2.0"
+version = "0.3.0"
 description = "PAT — Project Assessment Toolkit: capability, upkeep burden, and goal tracking"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,7 @@ keywords = ["project-assessment", "static-analysis", "maintainability", "mcp"]
 dev = ["pytest>=9.1.1,<10", "pytest-cov>=6,<8", "coverage>=7.6,<8", "ruff>=0.12,<1"]
 mcp = ["mcp>=2.3,<3"]
 test-value = ["coverage>=7.6,<8"]
+vulture = ["vulture>=2.14,<3"]
 analysis = [
     "tree-sitter>=0.25.2,<0.26",
     "tree-sitter-javascript>=0.25,<0.26",

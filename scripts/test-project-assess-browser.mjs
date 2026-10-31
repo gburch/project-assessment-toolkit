@@ -63,10 +63,10 @@ class FixtureService(AssessmentService):
         super().__init__(*args, **kwargs)
         self.scans = {}
 
-    def scan(self, project_root, reports=None):
+    def scan(self, project_root, reports=None, **options):
         key = str(Path(project_root).resolve())
         count = self.scans.get(key, 0)
-        snapshot = super().scan(project_root, reports)
+        snapshot = super().scan(project_root, reports, **options)
         review = synthetic_review(self, snapshot, 4 if count == 0 else 1,
             unknown_operability=key == str(root) and count == 0)
         self.submit_review(snapshot['id'], review)
@@ -84,6 +84,8 @@ first_root = base / 'ui-first-project'
 first_root.mkdir()
 (first_root / 'app.py').write_text("raise AssertionError('Scans must not execute this project')\n")
 (first_root / 'src').mkdir()
+(first_root / 'src' / 'Feature.swift').write_text('func feature() { print("swift_context_marker") }\n')
+(first_root / 'src' / 'Example.java').write_text('class Example { String value() { return "java_context_marker"; } }\n')
 (first_root / 'src' / 'dead.py').write_text('\n'.join(
     f"def _unused{index}():\n    return {index}\n    print('never_called')\n" for index in range(25)))
 (first_root / '.env').write_text('PRIVATE_UI_SCAN_MARKER=never-return-this-value\n')
@@ -648,6 +650,113 @@ async function checkPlanningEvidence(browser, info) {
   } finally { await context.close(); }
 }
 
+async function checkAnalysisOptions(browser, info) {
+  const origin = info.first_origin;
+  const context = await browser.newContext({ viewport: { width: 320, height: 900 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  try {
+    const projects = await (await page.request.get(`${origin}/api/projects`)).json();
+    const project = projects.find((entry) => entry.root === info.first_root);
+    const other = projects.find((entry) => entry.id !== project.id);
+    const previous = await (await page.request.get(`${origin}/api/report?assessment_id=${project.latest_assessment_id}`)).json();
+    const goals = (await (await page.request.get(`${origin}/api/history?project_id=${project.id}`)).json()).goals;
+    const vulture = (await (await page.request.get(`${origin}/api/analyzers`)).json()).find((entry) => entry.name === "vulture");
+    await page.goto(origin);
+    await page.selectOption("#project", project.id);
+    await expect(page.locator("#status")).toContainText(project.latest_assessment_id);
+    await expect(page.locator("#analysis-profile")).toHaveValue(previous.assessment.facts.collection.analysis_profile);
+    await page.selectOption("#analysis-profile", "deep");
+    await page.locator("#analyzer-vulture").focus();
+    if (!(await page.locator("#analyzer-vulture").isChecked())) await page.keyboard.press("Space");
+    await expect(page.locator("#analyzer-vulture")).toBeChecked();
+    await expect(page.locator("#vulture-status")).toContainText(vulture.available ? `Vulture ${vulture.version} is available` : "Vulture is not installed");
+    assert.deepEqual((await (await page.request.get(`${origin}/api/history?project_id=${project.id}`)).json()).goals, goals, "analysis selection must not save targets");
+    const response = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/scan" && response.request().method() === "POST");
+    await page.getByRole("button", { name: "Scan again", exact: true }).click();
+    const completed = await response;
+    assert.equal(completed.status(), 200);
+    assert.deepEqual(completed.request().postDataJSON(), { project_id: project.id, analysis_profile: "deep", analyzers: ["vulture"] });
+    const snapshot = await completed.json();
+    await expect(page.locator("#status")).toContainText(snapshot.id);
+    await expect(page.locator("#analysis-scope")).toContainText("Analysis: deep");
+    await expect(page.locator("#analysis-scope")).toContainText("optional: vulture");
+    assert.equal(snapshot.facts.collection.analysis_profile, "deep");
+    assert.deepEqual(snapshot.facts.collection.analyzers, ["vulture"]);
+    assert.equal(snapshot.facts.optional_analysis.vulture.status, vulture.available ? "complete" : "unavailable");
+    assert.equal(snapshot.facts.optional_analysis.vulture.configuration.analysis_profile, "deep");
+    const report = await (await page.request.get(`${origin}/api/report?assessment_id=${snapshot.id}`)).json();
+    assert.deepEqual(report.goals, previous.goals, "a deeper scan must preserve selected goals and their baseline");
+    assert.equal(report.review, null, "an optional analyzer must not manufacture ratings");
+    await page.reload();
+    await page.selectOption("#project", project.id);
+    await expect(page.locator("#status")).toContainText(snapshot.id);
+    await expect(page.locator("#analysis-profile")).toHaveValue("deep");
+    await expect(page.locator("#analyzer-vulture")).toBeChecked();
+    await expect(page.locator("#profile")).toHaveValue(previous.goals.profile);
+    await page.locator("#evidence-browser summary").first().click();
+    await page.selectOption("#query-view", "index");
+    await page.selectOption("#query-kind", "source");
+    await page.locator("#query-path").fill("Feature.swift");
+    await page.getByRole("button", { name: "Query evidence", exact: true }).click();
+    await expect(page.locator("#query-state")).toContainText("1 matching row(s)");
+    const swift = page.locator("#query-results > details").first();
+    await swift.locator("summary").click();
+    await expect(swift).toContainText("src/Feature.swift");
+    const contextRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/source-context");
+    await swift.getByRole("button", { name: "Read matching source context" }).click();
+    assert.equal(new URL((await contextRequest).url()).searchParams.get("evidence_id"), snapshot.evidence.find((entry) => entry.path === "src/Feature.swift").id);
+    await expect(swift).toContainText("snapshot_matched_live_bytes");
+    await expect(swift).toContainText("swift_context_marker");
+    await page.selectOption("#project", other.id);
+    await expect(page.locator("#status")).toContainText(other.latest_assessment_id);
+    await expect(page.locator("#analysis-profile")).toHaveValue("standard");
+    await expect(page.locator("#analyzer-vulture")).not.toBeChecked();
+    await page.selectOption("#project", project.id);
+    await expect(page.locator("#analysis-profile")).toHaveValue("deep");
+    await expect(page.locator("#analyzer-vulture")).toBeChecked();
+    assert.deepEqual((await (await page.request.get(`${origin}/api/history?project_id=${project.id}`)).json()).goals, goals);
+    const hostileTitle = "Fixture <img src=x onerror=window.analyzerPwned=1>";
+    await page.route("**/api/analyzers", async (route) => {
+      const response = await route.fetch();
+      const descriptors = await response.json();
+      descriptors.push({ name: "fixture-analyzer", title: hostileTitle, version: null, available: false, optional: true, languages: ["python"] });
+      await route.fulfill({ response, json: descriptors });
+    });
+    await page.reload();
+    await page.selectOption("#project", project.id);
+    await expect(page.locator("#status")).toContainText(snapshot.id);
+    await expect(page.locator("#optional-analyzers input[data-analyzer]")).toHaveCount(2);
+    await expect(page.locator("#optional-analyzers")).toContainText(hostileTitle);
+    await page.locator("#analyzer-fixture-analyzer").check();
+    const beforeInvalid = await (await page.request.get(`${origin}/api/history?project_id=${project.id}`)).json();
+    const pending = await holdResponse(page, "**/api/scan");
+    const pendingRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/scan" && request.method() === "POST");
+    await page.getByRole("button", { name: "Scan again", exact: true }).click();
+    const invalid = await pending.entered;
+    assert.equal(invalid.status(), 400, "metadata alone must not register a backend analyzer");
+    assert.deepEqual((await pendingRequest).postDataJSON().analyzers, ["vulture", "fixture-analyzer"], "scan payload must derive from all selected metadata checkboxes");
+    await expect(page.locator("#analyzer-vulture")).toBeDisabled();
+    await expect(page.locator("#analyzer-fixture-analyzer")).toBeDisabled();
+    await pending.release();
+    await expect(page.locator("#error")).toContainText("registered");
+    await expect(page.locator("#analyzer-fixture-analyzer")).toBeEnabled();
+    assert.deepEqual(await (await page.request.get(`${origin}/api/history?project_id=${project.id}`)).json(), beforeInvalid);
+    await page.reload();
+    await page.selectOption("#project", project.id);
+    await expect(page.locator("#status")).toContainText(snapshot.id);
+    await expect(page.locator("#analyzer-vulture")).toBeChecked();
+    await expect(page.locator("#analyzer-fixture-analyzer")).not.toBeChecked();
+    assert.equal(await page.locator("#optional-analyzers img").count(), 0);
+    assert.equal(await page.evaluate(() => window.analyzerPwned), undefined);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "analysis options must fit mobile");
+    const accessibility = await new AxeBuilder({ page }).analyze();
+    assert.deepEqual(accessibility.violations.map((violation) => ({ id: violation.id, targets: violation.nodes.map((node) => node.target) })), [], "analysis options mobile keyboard/accessibility");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+}
+
 let browser;
 try {
   const info = await launch;
@@ -656,6 +765,7 @@ try {
   await checkBadgeText(browser, info.badges);
   await checkFirstScanAndReview(browser, info);
   await checkPlanningEvidence(browser, info);
+  await checkAnalysisOptions(browser, info);
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
   page.on("dialog", (dialog) => dialog.accept());
@@ -794,7 +904,7 @@ try {
   assert.deepEqual(mobileAccessibility.violations.map((v) => ({ id: v.id, impact: v.impact, targets: v.nodes.map((node) => node.target) })), [], "mobile accessibility");
   await page.screenshot({ path: path.join(output, "project-assess-mobile.png"), fullPage: true });
   assert.deepEqual(errors, [], "browser should not report JavaScript errors");
-  console.log("PAT browser acceptance passed: first scan/review, shared roadmap/coverage/urgent findings, filtered evidence/pagination/source identity, stale responses, goals/progress, hostile content, keyboard/mobile/accessibility, badge text bounds.");
+  console.log("PAT browser acceptance passed: first scan/review, independent Deep/Vulture selection, shared roadmap/coverage/urgent findings, filtered evidence/pagination/source identity, stale responses, goals/progress, hostile content, keyboard/mobile/accessibility, badge text bounds.");
 } finally {
   await browser?.close();
   lines.close();

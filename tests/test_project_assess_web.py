@@ -17,6 +17,7 @@ class Service:
     def __init__(self):
         self.revision = 0
         self.scans = []
+        self.scan_options = []
         self.calls = []
         self.targets = None
         self.history_calls = []
@@ -58,8 +59,9 @@ class Service:
         self.targets = {"revision": self.revision, "targets": document["targets"]}
         return self.targets
 
-    def scan(self, root):
+    def scan(self, root, **options):
         self.scans.append(root)
+        self.scan_options.append(options)
         return {"id": "a2"}
 
     def review_template(self, assessment_id):
@@ -131,6 +133,10 @@ def test_report_bootstrap_assets_and_session(running_report):
     assert len(session["token"]) >= 32
     projects = json.loads(request(server, path="/api/projects")[2])
     assert projects[0]["name"].startswith("<script>")
+    analyzers = json.loads(request(server, path="/api/analyzers")[2])
+    assert [entry["name"] for entry in analyzers] == ["vulture"]
+    assert type(analyzers[0]["available"]) is bool and analyzers[0]["optional"]
+    assert request(server, path="/api/analyzers?path=/etc/passwd")[0] == 404
 
 
 @pytest.mark.parametrize(
@@ -208,6 +214,22 @@ def test_no_arbitrary_paths_or_source_roots(running_report):
     assert request(server, "POST", "/api/scan", {"project_id": "absent"})[0] == 404
     assert request(server, "POST", "/api/scan", {"project_id": "p1"})[0] == 200
     assert service.scans == ["/registered/source"]
+    assert service.scan_options == [{"analysis_profile": "standard", "analyzers": None}]
+
+
+def test_scan_options_delegate_independently_of_goal_profile(running_report):
+    service, server = running_report
+    assert (
+        request(
+            server,
+            "POST",
+            "/api/scan",
+            {"root": "/registered/source", "analysis_profile": "deep", "analyzers": ["vulture"]},
+        )[0]
+        == 200
+    )
+    assert service.scan_options == [{"analysis_profile": "deep", "analyzers": ["vulture"]}]
+    assert service.targets is None and service.revision == 0
 
 
 def test_query_contract_and_method_rejection(running_report):
@@ -366,6 +388,138 @@ def test_scan_and_review_reject_ambiguous_or_unsupported_fields(running_report, 
     service, server = running_report
     assert request(server, "POST", path, document)[0] == 400
     assert service.scans == service.reviews == []
+
+
+def test_invalid_analysis_options_reject_before_registering_project(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "app.py").write_text("raise AssertionError('Never execute source')\n")
+    service = AssessmentService(tmp_path / "state", [root])
+    with create_server(service) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for options in (
+                {"analysis_profile": "framework"},
+                {"analysis_profile": True},
+                {"analysis_profile": ["deep"]},
+                {"analyzers": "vulture"},
+                {"analyzers": True},
+                {"analyzers": ["vulture", "vulture"]},
+                {"analyzers": ["project-plugin"]},
+                {"analyzers": [False]},
+                {"profile": "internal-service"},
+            ):
+                status, _, _ = request(server, "POST", "/api/scan", {"root": str(root), **options})
+                assert status == 400, options
+                assert service.list_projects() == []
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+
+def test_deep_optional_analysis_and_generic_source_sarif_inspection_preserve_goals(tmp_path):
+    root, supplied = tmp_path / "project", tmp_path / "reports"
+    (root / "src").mkdir(parents=True)
+    supplied.mkdir()
+    (root / "src" / "Feature.swift").write_text(
+        'func renderFeature() { print("swift_context_marker") }\n'
+    )
+    (root / "src" / "Legacy.java").write_text(
+        'class Legacy { String message() { return "java_context_marker"; } }\n'
+    )
+    (root / "src" / "app.py").write_text(
+        "raise AssertionError('Never execute source')\ndef unused(payload):\n    return 1\n"
+    )
+    report = supplied / "native.sarif"
+    report.write_text(
+        json.dumps(
+            {
+                "version": "2.1.0",
+                "runs": [
+                    {
+                        "tool": {"driver": {"name": "Synthetic Swift analyzer"}},
+                        "results": [
+                            {
+                                "ruleId": "swift.review",
+                                "level": "warning",
+                                "message": {"text": "Supplied source-only review lead"},
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "src/Feature.swift"},
+                                            "region": {"startLine": 1},
+                                        }
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    service = AssessmentService(tmp_path / "state", [root, supplied])
+    initial = service.scan(root, [report])
+    goals = service.set_targets(initial["project_id"], None, 0, profile="internal-service")
+    swift = next(entry for entry in initial["evidence"] if entry["path"] == "src/Feature.swift")
+    assert swift["kind"] == "source"
+    with create_server(service) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            status, _, body = request(
+                server,
+                path="/api/evidence-query?assessment_id="
+                + initial["id"]
+                + "&view=index&kind=source&role=production",
+            )
+            assert status == 200
+            assert {row["path"] for row in json.loads(body)["items"]} == {
+                "src/Feature.swift",
+                "src/Legacy.java",
+            }
+            status, _, body = request(
+                server,
+                path="/api/evidence-query?assessment_id="
+                + initial["id"]
+                + "&view=candidates&kind=sarif&path=Feature.swift",
+            )
+            assert status == 200 and json.loads(body)["items"][0]["kind"] == "sarif_diagnostic"
+            assert json.loads(body)["items"][0]["source_identity"] == "unverified"
+            status, _, body = request(
+                server,
+                path="/api/source-context?assessment_id="
+                + initial["id"]
+                + "&evidence_id="
+                + swift["id"]
+                + "&line=1",
+            )
+            assert status == 200 and "swift_context_marker" in json.loads(body)["excerpt"]
+            assert json.loads(body)["source_identity"] == "snapshot_matched_live_bytes"
+            status, _, body = request(
+                server,
+                "POST",
+                "/api/scan",
+                {
+                    "project_id": initial["project_id"],
+                    "analysis_profile": "deep",
+                    "analyzers": ["vulture"],
+                },
+            )
+            assert status == 200
+            current = json.loads(body)
+            assert current["facts"]["collection"]["analysis_profile"] == "deep"
+            assert current["facts"]["collection"]["analyzers"] == ["vulture"]
+            optional = current["facts"]["optional_analysis"]["vulture"]
+            available = json.loads(request(server, path="/api/analyzers")[2])[0]["available"]
+            assert optional["status"] == ("complete" if available else "unavailable")
+            assert optional["configuration"]["analysis_profile"] == "deep"
+            assert service.history(initial["project_id"])["goals"] == [goals]
+            assert service.get_report(current["id"])["goals"] == goals
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
 
 
 def test_first_scan_and_review_use_service_authority_and_preserve_source(tmp_path):

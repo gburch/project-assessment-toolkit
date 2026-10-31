@@ -108,6 +108,10 @@ def create_server(service, port=0):
                     result = service.list_projects()
                 elif parsed.path == "/api/rubric" and not parsed.query:
                     result = service.rubric()
+                elif parsed.path == "/api/analyzers" and not parsed.query:
+                    from .analyzer_registry import list_analyzers
+
+                    result = list_analyzers()
                 elif parsed.path == "/api/report":
                     result = service.get_report(self._query(parsed.query, "assessment_id"))
                 elif parsed.path == "/api/review-template":
@@ -206,11 +210,12 @@ def create_server(service, port=0):
                     )
                 result = service.submit_review(**document)
             else:
-                if set(document) == {"root"} and isinstance(document["root"], str):
+                identity_fields = document.keys() - {"analysis_profile", "analyzers"}
+                if identity_fields == {"root"} and isinstance(document["root"], str):
                     root = document["root"]
                     if not root or len(root) > 4096 or "\x00" in root:
                         raise ValueError("Scan root must be a nonempty project directory path")
-                elif set(document) == {"project_id"} and isinstance(document["project_id"], str):
+                elif identity_fields == {"project_id"} and isinstance(document["project_id"], str):
                     project = next(
                         (p for p in service.list_projects() if p["id"] == document["project_id"]),
                         None,
@@ -222,7 +227,11 @@ def create_server(service, port=0):
                 else:
                     raise ValueError("Scan requires either root or project_id")
                 try:
-                    result = service.scan(root)
+                    result = service.scan(
+                        root,
+                        analysis_profile=document.get("analysis_profile", "standard"),
+                        analyzers=document.get("analyzers"),
+                    )
                 except (FileNotFoundError, NotADirectoryError):
                     raise ValueError("Project root must be an existing directory") from None
             self._respond(200, result)

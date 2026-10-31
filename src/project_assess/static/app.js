@@ -9,6 +9,34 @@ let queryLoad = 0;
 let queryNext = null;
 let queryParams = null;
 
+function scanOptions() {
+  return { analysis_profile: $("analysis-profile").value, analyzers: Array.from($("optional-analyzers").querySelectorAll("input[data-analyzer]:checked"), (input) => input.dataset.analyzer) };
+}
+
+function renderAnalyzers(analyzers) {
+  const container = $("optional-analyzers");
+  container.replaceChildren();
+  for (const analyzer of analyzers) {
+    const title = analyzer.title || analyzer.name[0].toUpperCase() + analyzer.name.slice(1);
+    const languages = (analyzer.languages || []).map((language) => language[0].toUpperCase() + language.slice(1)).join("/");
+    const label = node("label", undefined, "inline-check");
+    const input = node("input");
+    input.type = "checkbox";
+    input.id = `analyzer-${analyzer.name}`;
+    input.dataset.analyzer = analyzer.name;
+    input.disabled = state.loading || state.saving;
+    const status = node("p", analyzer.available ? `${title} ${analyzer.version || ""} is available. Findings need caller and contract review.` : `${title}${analyzer.version ? ` ${analyzer.version} is unavailable` : " is not installed"}. Selecting it records unavailable evidence; scanning never installs it.`, "secondary");
+    status.id = `${analyzer.name}-status`;
+    input.setAttribute("aria-describedby", status.id);
+    label.htmlFor = input.id;
+    label.append(input, node("span", `Include ${title}${languages ? ` ${languages}` : ""} analysis`));
+    const option = node("div");
+    option.append(label, status);
+    container.append(option);
+  }
+  if (!analyzers.length) container.append(node("p", "No optional analyzers are registered.", "secondary"));
+}
+
 function node(tag, text, className) {
   const el = document.createElement(tag);
   if (tag === "pre") el.tabIndex = 0;
@@ -105,6 +133,8 @@ function missingTargets() {
     !validTarget(dim, state.targets[dim]?.burden_max));
 }
 function updateControls() {
+  $("analysis-profile").disabled = state.loading || state.saving;
+  for (const input of $("optional-analyzers").querySelectorAll("input[data-analyzer]")) input.disabled = state.loading || state.saving;
   const busy = state.loading || state.saving || !state.report;
   $("scan").disabled = !state.token || state.loading || state.saving;
   $("scan-root").disabled = state.loading || state.saving;
@@ -324,7 +354,7 @@ function evidenceResult(row, load, assessmentId) {
   const location = row.locations?.[0] || (row.path ? row : null);
   item.append(node("summary", `${row.kind || row.name || row.record_type || row.evidence_kind || "Evidence"}${location ? ` · ${location.path}${location.line ? `:${location.line}` : ""}` : ""}`), node("pre", jsonText(row)));
   // Join by captured path; analysis evidence IDs cannot authorize arbitrary file reads.
-  const source = location && state.report.assessment.evidence.find((entry) => entry.path === location.path && ["python", "javascript", "documentation", "manifest", "configuration"].includes(entry.kind));
+  const source = location && state.report.assessment.evidence.find((entry) => entry.path === location.path && ["python", "javascript", "source", "documentation", "manifest", "configuration"].includes(entry.kind));
   if (source) {
     const button = node("button", "Read matching source context");
     button.type = "button";
@@ -485,6 +515,10 @@ async function loadReport(id) {
     $("project-name").textContent = state.project.name;
     const source = result.assessment.source;
     $("source").textContent = `${source.root} · ${source.revision || "Unversioned source"}${source.dirty ? " · modified worktree" : ""}`;
+    const collection = result.assessment.facts?.collection || {};
+    $("analysis-profile").value = collection.analysis_profile || "standard";
+    for (const input of $("optional-analyzers").querySelectorAll("input[data-analyzer]")) input.checked = (collection.analyzers || []).includes(input.dataset.analyzer);
+    $("analysis-scope").textContent = `Analysis: ${collection.analysis_profile || "legacy"}${collection.supported_text_complete === undefined ? "" : ` · supported text ${collection.supported_text_complete ? "captured" : "partial"}`}${collection.deadline_exceeded ? " · analysis deadline reached" : ""}${collection.analyzers?.length ? ` · optional: ${collection.analyzers.join(", ")}` : ""}.`;
     renderRatings(result);
     renderControls(result.goals);
     renderProgress(result.progress);
@@ -611,7 +645,7 @@ $("rescan").addEventListener("click", async () => {
   updateControls();
   message("Inspecting project files…");
   try {
-    const snapshot = await api("/api/scan", { project_id: projectId });
+    const snapshot = await api("/api/scan", { project_id: projectId, ...scanOptions() });
     project.latest_assessment_id = snapshot.id;
     if (load !== state.load || state.project?.id !== projectId) return;
     await loadReport(snapshot.id);
@@ -633,7 +667,7 @@ $("scan-form").addEventListener("submit", async (event) => {
   updateControls();
   message("Inspecting project files…");
   try {
-    const snapshot = await api("/api/scan", { root });
+    const snapshot = await api("/api/scan", { root, ...scanOptions() });
     const known = state.projects.find((project) => project.id === snapshot.project_id);
     if (known) known.latest_assessment_id = snapshot.id;
     const projects = await api("/api/projects");
@@ -767,9 +801,10 @@ $("review-form").addEventListener("submit", async (event) => {
   }
 });
 async function init() {
-  const [session, rubric] = await Promise.all([api("/api/session"), api("/api/rubric")]);
+  const [session, rubric, analyzers] = await Promise.all([api("/api/session"), api("/api/rubric"), api("/api/analyzers")]);
   state.token = session.token;
   state.rubric = rubric;
+  renderAnalyzers(analyzers);
   dims = Object.keys(rubric.dimensions);
   titles = Object.fromEntries(dims.map((d) => [d, d[0].toUpperCase() + d.slice(1)]));
   for (const [key, profile] of Object.entries(rubric.profiles || {})) {

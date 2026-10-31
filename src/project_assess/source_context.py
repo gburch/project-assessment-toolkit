@@ -24,7 +24,14 @@ def read_context(root, entry, line=1, end_line=None, max_chars=8000):
     if type(max_chars) is not int or not 256 <= max_chars <= 16000:
         raise ValueError("max_chars must be between 256 and 16000")
     path = PurePosixPath(entry["path"])
-    if entry["kind"] not in {"python", "javascript", "documentation", "manifest", "configuration"}:
+    if entry["kind"] not in {
+        "python",
+        "javascript",
+        "source",
+        "documentation",
+        "manifest",
+        "configuration",
+    }:
         raise ValueError("Source context requires a captured source evidence ID")
     if path.is_absolute() or not path.parts or any(part in {"..", "."} for part in path.parts):
         raise ValueError("Source path is not a captured relative path")
@@ -36,7 +43,9 @@ def read_context(root, entry, line=1, end_line=None, max_chars=8000):
                 os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptors[-1])
             )
         bound = (
-            MAX_SOURCE_FILE_BYTES if entry["kind"] in {"python", "javascript"} else MAX_FILE_BYTES
+            MAX_SOURCE_FILE_BYTES
+            if entry["kind"] in {"python", "javascript", "source"}
+            else MAX_FILE_BYTES
         )
         payload, _ = _read_at(descriptors[-1], path.name, bound)
     except (OSError, ValueError):
