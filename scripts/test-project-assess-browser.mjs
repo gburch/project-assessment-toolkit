@@ -49,6 +49,7 @@ def forward_add(a, b):
 
 def synthetic_review(service, snapshot, burden, unknown_operability=False):
     review = service.review_template(snapshot['id'])
+    review['coverage']['scope'] = 'focused'
     for dimension, rating in review['ratings'].items():
         rating.update(capability=2, burden=burden, confidence='medium',
             burden_basis='source_estimate', burden_confidence='medium',
@@ -390,6 +391,7 @@ async function checkFirstScanAndReview(browser, info) {
   };
   const scored = (template, snapshot, capability = 3) => {
     const result = structuredClone(template);
+    result.coverage.scope = "focused";
     Object.assign(result.ratings.testing, { capability, burden: 2, confidence: "medium", burden_basis: "source_estimate", burden_confidence: "low",
       rationale: "Synthetic browser review <img src=x onerror=window.reviewPwned=1>",
       evidence_ids: [snapshot.evidence.find((entry) => entry.kind === "python").id] });
@@ -579,6 +581,7 @@ async function checkPlanningEvidence(browser, info) {
     });
     const hostile = "<img src=x onerror=window.planPwned=1>";
     review.coverage = { schema_version: 1, scope: "whole_project", examined: [{ area: "Production lifecycle", evidence_ids: [source.id] }], unexamined: [{ area: "Provider recovery", reason: "No runtime receipt supplied" }], limitations: ["Source-only review"], validation: [{ check: "Provider recovery", status: "not_run", evidence_ids: [] }] };
+    review.coverage.dimension_reviews = Object.fromEntries(Object.keys(review.ratings).map((dim) => [dim, { status: "partial", rationale: "Synthetic source-only coverage; provider execution is unverified.", evidence_ids: [source.id] }]));
     review.plan = { schema_version: 1, goal_revision: report.goals.revision, diagnosis: `Shared lifecycle ownership needs consolidation ${hostile}`, target_state: "One supported lifecycle across all entry points with source-linked failure verification", initiatives: [
       { id: "consolidate", title: "Consolidate lifecycle ownership", priority: "high", root_cause: "Ownership duplicated across callers", scope: "Every entry point, persisted transition and recovery caller", dimension_impacts: { maintainability: "Reduce coordinated edits", testing: "Protect shared public outcomes" }, evidence_ids: [source.id], acceptance: ["All supported callers preserve authority and recovery behavior"], burden_effect: "Replace duplicate upkeep; add no framework", depends_on: [], first_slice: "Move one path after agreeing the complete contract" },
       { id: "recovery", title: "Verify recovery guidance", priority: "medium", root_cause: "Guidance can drift from lifecycle ownership", scope: "Supported operator recovery workflows", dimension_impacts: { documentation: "Reliable recovery task" }, evidence_ids: [source.id], acceptance: ["A reader completes the recovery task"], burden_effect: "Maintain one canonical explanation", depends_on: ["consolidate"], first_slice: "Trace the documented recovery path" }
@@ -597,7 +600,12 @@ async function checkPlanningEvidence(browser, info) {
     const roadmap = await page.locator("#improvement-plan").textContent();
     assert(roadmap.indexOf("Full target state") < roadmap.indexOf("First implementation slice"));
     assert(roadmap.indexOf("Acceptance for the full outcome") < roadmap.indexOf("First implementation slice"));
-    await page.locator("#review-coverage summary").click();
+    await expect(page.locator("#review-coverage")).toContainText("Partial project review");
+    await page.locator("#review-coverage summary").filter({ hasText: "Production system overview" }).click();
+    await expect(page.locator("#review-coverage")).toContainText("captured production file(s)");
+    await page.locator("#review-coverage summary").filter({ hasText: "Review coverage by dimension" }).click();
+    await expect(page.locator("#review-coverage")).toContainText("Performance & Scalability: partial");
+    await page.locator("#review-coverage summary").filter({ hasText: "Review coverage · whole project" }).click();
     await expect(page.locator("#review-coverage")).toContainText("Provider recovery: No runtime receipt supplied");
     const history = await (await page.request.get(`${origin}/api/history?project_id=${project.id}`)).json();
     await page.locator("#evidence-browser summary").first().click();

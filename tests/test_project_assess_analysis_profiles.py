@@ -25,6 +25,7 @@ def test_standard_deep_changes_evidence_scope_without_changing_source_or_goals(t
     root, service = project(tmp_path)
     first = service.scan(root)
     review = service.review_template(first["id"])
+    review["coverage"]["scope"] = "focused"
     for rating in review["ratings"].values():
         rating.update(
             capability=2,

@@ -22,6 +22,7 @@ def assessed(tmp_path):
 
 def reviewed(service, snapshot, capability=2, burden=1):
     review = service.review_template(snapshot["id"])
+    review["coverage"]["scope"] = "focused"
     for rating in review["ratings"].values():
         rating.update(
             capability=capability,
@@ -192,6 +193,7 @@ def test_incompatible_scope_has_no_comparable_progress(assessed, monkeypatch):
 def test_source_supported_burden_estimates_are_kept_and_qualified(assessed):
     service, _, snapshot = assessed
     review = service.review_template(snapshot["id"])
+    review["coverage"]["scope"] = "focused"
     review["ratings"]["documentation"].update(
         capability=3,
         burden=3,
@@ -215,6 +217,7 @@ def test_source_supported_burden_estimates_are_kept_and_qualified(assessed):
 def test_old_review_clients_do_not_imply_measured_burden(assessed):
     service, _, snapshot = assessed
     review = service.review_template(snapshot["id"])
+    review["coverage"]["scope"] = "focused"
     for rating in review["ratings"].values():
         rating.pop("burden_basis", None)
         rating.pop("burden_confidence", None)
@@ -229,6 +232,7 @@ def test_old_review_clients_do_not_imply_measured_burden(assessed):
 def test_observed_burden_metadata_and_unknown_remain_distinct(assessed):
     service, _, snapshot = assessed
     review = service.review_template(snapshot["id"])
+    review["coverage"]["scope"] = "focused"
     review["ratings"]["testing"].update(
         burden=2,
         burden_basis="observed",
@@ -522,6 +526,7 @@ def test_legacy_targets_require_an_explicit_seventh_choice_and_preserve_prior_hi
 def test_new_extensibility_review_stays_unknown_until_explicitly_assessed(assessed):
     service, _, snapshot = assessed
     template = service.review_template(snapshot["id"])
+    template["coverage"]["scope"] = "focused"
     assert set(template["ratings"]) == set(DIMENSIONS)
     for dimension, rating in template["ratings"].items():
         if dimension != "extensibility":
@@ -551,6 +556,7 @@ def test_two_projects_keep_distinct_extension_goals_without_penalizing_high_capa
     second = service.scan(second_root)
     for snapshot, extension_capability in ((first, 5), (second, 2)):
         review = service.review_template(snapshot["id"])
+        review["coverage"]["scope"] = "focused"
         for dimension, rating in review["ratings"].items():
             rating.update(
                 capability=extension_capability if dimension == "extensibility" else 3,
@@ -581,6 +587,7 @@ def test_prototype_can_choose_no_extension_requirement_without_adding_frameworks
     service, root, snapshot = assessed
     source_before = {path.name: path.read_bytes() for path in root.iterdir()}
     review = service.review_template(snapshot["id"])
+    review["coverage"]["scope"] = "focused"
     rating = review["ratings"]["extensibility"]
     assert rating["capability"] is None and rating["burden"] is None
     rating.update(
@@ -1355,6 +1362,7 @@ def test_seven_dimension_history_requires_explicit_performance_target(assessed):
 def test_performance_can_remain_unknown_with_other_dimensions_scored(assessed):
     service, _, snapshot = assessed
     template = service.review_template(snapshot["id"])
+    template["coverage"]["scope"] = "focused"
     evidence_id = snapshot["evidence"][0]["id"]
     for dimension, rating in template["ratings"].items():
         if dimension != "performance":

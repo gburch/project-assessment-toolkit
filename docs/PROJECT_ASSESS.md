@@ -33,6 +33,8 @@ Rubric 5 adds **Performance & Scalability** as the eighth tunable dimension (`pe
 
 Whole-project maintainability review also traces **systemic debt**: domains, shared stores/transactions, duplicate models, lifecycle ownership, dependency cycles, and the edit/coordination cost of a representative valuable change. Monolithic deployment or size alone does not assign a grade. Prefer the smallest adequate ownership boundary; modularization need not introduce services. Group evidenced symptoms into root-cause initiatives and a target state before choosing the first slice.
 
+Broad scoring starts with the shared **system map**, a bounded inventory of captured production areas and phased cross-area imports. It helps a reviewer inspect the system before local Doctor candidates; paths and counts do not establish semantic ownership or quality. Reviews record per-dimension coverage (`reviewed`, `partial`, `unreviewed`) with rationale and citations. Whole-project unreviewed dimensions cannot receive numeric grades. Reports and Evolve distinguish broad, partial, focused and unestablished review scope. Legacy records remain readable with breadth unestablished; structural validation does not prove the truth or completeness of a review.
+
 ## Local workflow
 
 Requires macOS or Linux, Python 3.11+ and uv. From the PAT checkout:

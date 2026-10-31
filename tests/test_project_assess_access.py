@@ -39,6 +39,7 @@ def imported_report(directory, source_root, kind):
 
 def score(service, snapshot, capability):
     review = service.review_template(snapshot["id"])
+    review["coverage"]["scope"] = "focused"
     for rating in review["ratings"].values():
         rating.update(
             capability=capability,

@@ -216,6 +216,7 @@ def main():
             "core scan preserves facts and explicit unavailable Joern evidence without external tools",
         )
         review = cli("review-template", snapshot["id"])
+        review["coverage"]["scope"] = "focused"
         for rating in review["ratings"].values():
             rating.update(
                 capability=2,

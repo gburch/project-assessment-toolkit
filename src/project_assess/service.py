@@ -16,6 +16,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 from .collector import collect
+from .review_context import get_system_map
 from .rubric import DIMENSIONS, PROFILES, RUBRIC_VERSION, rubric
 
 
@@ -83,6 +84,58 @@ def _gap(score, target, axis):
     if score is None or target is None:
         return None
     return max(target - score if axis == "capability" else score - target, 0)
+
+
+def _review_coverage(review):
+    """Summarize authored breadth without upgrading missing historical declarations."""
+    coverage = (review or {}).get("coverage", {})
+    recorded = coverage.get("dimension_reviews")
+    dimensions = {}
+    for dimension in DIMENSIONS:
+        row = (recorded or {}).get(dimension)
+        if row is None:
+            row = {
+                "status": "unestablished" if review else "unreviewed",
+                "rationale": "Dimension-specific review coverage was not recorded."
+                if review
+                else "No saved review.",
+                "evidence_ids": [],
+            }
+        dimensions[dimension] = {
+            "status": row["status"],
+            "rationale": row["rationale"],
+            "evidence_ids": list(row["evidence_ids"]),
+        }
+    counts = {
+        status: sum(row["status"] == status for row in dimensions.values())
+        for status in ("reviewed", "partial", "unreviewed", "unestablished")
+    }
+    scope = coverage.get("scope", "unknown")
+    if review is None or counts["unreviewed"] == len(DIMENSIONS):
+        status = "unreviewed"
+    elif recorded is None:
+        status = "unestablished"
+    elif scope == "focused":
+        status = "focused"
+    elif scope == "whole_project" and counts["reviewed"] == len(DIMENSIONS):
+        status = "broad"
+    else:
+        status = "partial"
+    return {
+        "scope": scope,
+        "status": status,
+        "dimensions": dimensions,
+        "counts": counts,
+        "gaps": [
+            f"{dimension}: {row['status']}"
+            for dimension, row in dimensions.items()
+            if row["status"] != "reviewed"
+        ],
+        "examined_count": len(coverage.get("examined", [])),
+        "unexamined_count": len(coverage.get("unexamined", [])),
+        "limitation_count": len(coverage.get("limitations", [])),
+        "caveat": "Coverage records the author's declared scope and citations; it does not verify review depth, correctness or runtime coverage.",
+    }
 
 
 def _goal_alignment(assessment, review, goals, goal_rubric_version):
@@ -211,6 +264,8 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
         "missing_targets": missing,
         "dimensions": dimensions,
         "coverage": (review or {}).get("coverage"),
+        "review_coverage": _review_coverage(review),
+        "system_map": get_system_map(assessment),
         "plan": plan,
         "planning_status": planning_status,
         "findings": findings,
@@ -280,7 +335,20 @@ COVERAGE_SCHEMA = _object(
                 }
             ),
         },
-    }
+        "dimension_reviews": _object(
+            {
+                dimension: _object(
+                    {
+                        "status": {"enum": ["reviewed", "partial", "unreviewed"]},
+                        "rationale": TEXT,
+                        "evidence_ids": IDS,
+                    }
+                )
+                for dimension in DIMENSIONS
+            }
+        ),
+    },
+    required=["schema_version", "scope", "examined", "unexamined", "limitations", "validation"],
 )
 INITIATIVE_ID = {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$"}
 PLAN_SCHEMA = _object(
@@ -359,6 +427,19 @@ REVIEW_SCHEMA = _object(
 def _validate_planning(review, evidence_ids):
     """Bind optional authored planning to captured evidence, without judging its quality."""
     coverage = review.get("coverage", {})
+    for dimension, row in coverage.get("dimension_reviews", {}).items():
+        if not set(row["evidence_ids"]) <= evidence_ids or (
+            row["status"] in {"reviewed", "partial"} and not row["evidence_ids"]
+        ):
+            raise ValueError("Reviewed dimensions must cite captured evidence")
+        if (
+            coverage["scope"] == "whole_project"
+            and row["status"] == "unreviewed"
+            and any(
+                review["ratings"][dimension][axis] is not None for axis in ("capability", "burden")
+            )
+        ):
+            raise ValueError("Unreviewed whole-project dimensions cannot carry numeric ratings")
     for area in coverage.get("examined", []):
         if not area["evidence_ids"] or not set(area["evidence_ids"]) <= evidence_ids:
             raise ValueError("Examined coverage areas must cite captured evidence")
@@ -611,7 +692,6 @@ class AssessmentService:
         facts = assessment["facts"]
         findings = [*assessment["findings"], *(review or {}).get("findings", [])]
         urgent = [row for row in findings if row.get("severity") in {"critical", "high"}]
-        coverage = (review or {}).get("coverage", {})
         return {
             "assessment_id": assessment_id,
             "project_id": assessment["project_id"],
@@ -649,12 +729,8 @@ class AssessmentService:
                 for kind in sorted({entry["kind"] for entry in assessment["evidence"]})
             },
             "review_id": (review or {}).get("id"),
-            "review_coverage": {
-                "scope": coverage.get("scope", "unknown"),
-                "examined_count": len(coverage.get("examined", [])),
-                "unexamined_count": len(coverage.get("unexamined", [])),
-                "limitation_count": len(coverage.get("limitations", [])),
-            },
+            "review_coverage": alignment["review_coverage"],
+            "system_map": alignment["system_map"],
             "urgent_findings": [
                 {key: row.get(key) for key in ("severity", "title", "evidence_ids")}
                 for row in urgent[:20]
@@ -1466,6 +1542,14 @@ class AssessmentService:
                 ],
                 "limitations": [],
                 "validation": [],
+                "dimension_reviews": {
+                    dimension: {
+                        "status": "unreviewed",
+                        "rationale": "Not reviewed; inspect the captured evidence for this dimension.",
+                        "evidence_ids": [],
+                    }
+                    for dimension in DIMENSIONS
+                },
             },
             "review_context": {
                 "tool_code_digest": assessment.get("tool_provenance", {}).get("code_digest"),
@@ -1727,12 +1811,15 @@ class AssessmentService:
     def get_report(self, assessment_id):
         with self._db() as db:
             assessment = self._assessment(db, assessment_id)
+            alignment = self._alignment(db, assessment)
             return {
                 "assessment": assessment,
                 "review": self._review(db, assessment_id),
                 "goals": self._goals(db, assessment["project_id"]),
                 "progress": self._progress(db, assessment["project_id"]),
-                "goal_alignment": self._alignment(db, assessment),
+                "goal_alignment": alignment,
+                "review_coverage": alignment["review_coverage"],
+                "system_map": alignment["system_map"],
             }
 
     def get_badge(self, assessment_id, dimension="summary", *, format="svg"):
@@ -1795,6 +1882,32 @@ def _markdown_text(value):
 
 def _planning_markdown(alignment):
     lines = ["", "## Review coverage", ""]
+    summary = alignment.get("review_coverage")
+    if summary:
+        lines += [
+            "Declared breadth: "
+            + _markdown_text(summary["status"])
+            + "; "
+            + str(summary["counts"]["reviewed"])
+            + "/"
+            + str(len(DIMENSIONS))
+            + " dimensions reviewed.",
+            "",
+            _markdown_text(summary["caveat"]),
+            "",
+        ]
+        for dimension, row in summary["dimensions"].items():
+            lines.append(
+                "- "
+                + _markdown_text(dimension)
+                + ": "
+                + _markdown_text(row["status"])
+                + "; "
+                + _markdown_text(row["rationale"])
+                + "; evidence: "
+                + _markdown_text(", ".join(row["evidence_ids"]) or "none recorded")
+            )
+        lines.append("")
     coverage = alignment.get("coverage")
     if coverage:
         lines.append("Scope: " + _markdown_text(coverage["scope"]) + ".")
@@ -1824,6 +1937,53 @@ def _planning_markdown(alignment):
             )
     else:
         lines.append("Review coverage was not recorded.")
+    system = alignment.get("system_map")
+    if system:
+        lines += [
+            "",
+            "## Production source map",
+            "",
+            "Captured map: "
+            + _markdown_text(system["status"])
+            + "; "
+            + str(system["production_files"])
+            + " production files across "
+            + str(system["area_count"])
+            + " path areas.",
+            "",
+            _markdown_text(system["caveat"]),
+            "",
+        ]
+        for area in system["areas"]:
+            functions = "unknown" if area["functions"] is None else str(area["functions"])
+            lines.append(
+                "- "
+                + _markdown_text(area["path"])
+                + ": "
+                + str(area["files"])
+                + " files; functions: "
+                + functions
+                + "; evidence: "
+                + _markdown_text(", ".join(area["evidence_ids"]) or "none recorded")
+            )
+        for dependency in system["cross_area_dependencies"]:
+            lines.append(
+                "- Static imports: "
+                + _markdown_text(dependency["source_area"])
+                + " → "
+                + _markdown_text(dependency["target_area"])
+                + ": "
+                + str(dependency["import_edges"])
+                + "; evidence: "
+                + _markdown_text(", ".join(dependency["evidence_ids"]))
+            )
+        lines.append(
+            "Omitted from this bounded view: "
+            + str(system["omitted_areas"])
+            + " areas; "
+            + str(system["omitted_cross_area_dependencies"])
+            + " import pairs."
+        )
     lines += [
         "",
         "## Improvement plan",
@@ -1983,7 +2143,12 @@ def markdown_report(report):
         lines.append(
             f"- {finding.get('severity', 'unknown')}: {finding.get('title', finding.get('message', 'Finding'))}"
         )
-    lines += _planning_markdown(report.get("goal_alignment", {}))
+    lines += _planning_markdown(
+        {
+            **report.get("goal_alignment", {}),
+            "review_coverage": report.get("review_coverage") or _review_coverage(report["review"]),
+        }
+    )
     lines += [
         "",
         "## Goals and progress",

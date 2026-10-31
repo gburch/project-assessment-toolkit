@@ -240,6 +240,7 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
 
                 source_before = (root / "README.md").read_bytes()
                 scored = json.loads(json.dumps(template.structured_content))
+                scored["coverage"]["scope"] = "focused"
                 source_evidence = next(
                     entry["id"]
                     for entry in evidence.structured_content["evidence"]

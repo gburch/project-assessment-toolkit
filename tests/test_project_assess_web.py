@@ -573,6 +573,11 @@ def test_first_scan_and_review_use_service_authority_and_preserve_source(tmp_pat
                     next(row["id"] for row in snapshot["evidence"] if row["kind"] == "python")
                 ],
             )
+            template["coverage"]["dimension_reviews"]["testing"].update(
+                status="partial",
+                rationale="HTTP fixture inspects testing evidence only.",
+                evidence_ids=template["ratings"]["testing"]["evidence_ids"],
+            )
             invalid = deepcopy(template)
             invalid["source_digest"] = "wrong-source"
             assert (

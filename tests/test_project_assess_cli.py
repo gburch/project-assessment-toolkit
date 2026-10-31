@@ -101,6 +101,7 @@ def test_installed_cli_roundtrip_without_source_path_imports(tmp_path):
     assert "not burden scores" in report
 
     evidence_id = next(row["id"] for row in snapshot["evidence"] if row["path"] == "README.md")
+    review["coverage"]["scope"] = "focused"
     for dimension, rating in review["ratings"].items():
         rating.update(
             capability=2 if dimension == "extensibility" else 3,

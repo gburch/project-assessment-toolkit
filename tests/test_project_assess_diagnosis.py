@@ -96,6 +96,7 @@ def test_compact_handoff_distinguishes_comparable_goals_from_missing_diagnosis(t
     service = AssessmentService(tmp_path / "state")
     snapshot = service.scan(root)
     review = service.review_template(snapshot["id"])
+    review["coverage"]["scope"] = "focused"
     for rating in review["ratings"].values():
         rating.update(
             capability=3,

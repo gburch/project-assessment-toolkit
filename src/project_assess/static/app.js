@@ -293,6 +293,26 @@ function renderAlignment(alignment) {
   }
   const coverage = $("review-coverage");
   coverage.replaceChildren();
+  const breadth = alignment?.review_coverage;
+  const breadthLabels = { broad: "Broad review recorded", partial: "Partial project review", focused: "Focused review", unestablished: "Review breadth not established", unreviewed: "Project not reviewed" };
+  coverage.append(node("p", breadthLabels[breadth?.status] || "Review breadth not established"));
+  if (breadth?.dimensions) {
+    const detail = node("details");
+    detail.append(node("summary", "Review coverage by dimension"));
+    textList(detail, "Reviewed scope and gaps", Object.entries(breadth.dimensions).map(([dim, value]) => `${titles[dim] || dim}: ${value.status} · ${value.rationale || "No review scope recorded"} · Evidence: ${(value.evidence_ids || []).join(", ") || "none"}`));
+    coverage.append(detail);
+  }
+  const map = alignment?.system_map;
+  if (map) {
+    const detail = node("details");
+    detail.append(node("summary", "Production system overview"));
+    detail.append(node("p", `${map.status}: ${map.production_files} captured production file(s) across ${map.area_count} path area(s); ${map.omitted_areas} area(s) and ${map.omitted_cross_area_dependencies} cross-area dependency group(s) omitted by display bounds.`));
+    textList(detail, "Captured areas", (map.areas || []).map((area) => `${area.path}: ${area.files} file(s) · ${area.lines ?? "?"} lines · ${area.partial_modules} partial module(s) · Evidence: ${(area.evidence_ids || []).join(", ")}`));
+    textList(detail, "Cross-area static imports", (map.cross_area_dependencies || []).map((edge) => `${edge.source_area} → ${edge.target_area}: ${edge.import_edges} edge(s) · ${Object.entries(edge.phases || {}).map(([phase, count]) => `${phase}: ${count}`).join(", ")} · Evidence: ${(edge.evidence_ids || []).join(", ")}`));
+    textList(detail, "Overview limits", map.gaps || []);
+    if (map.caveat) detail.append(node("p", map.caveat, "secondary"));
+    coverage.append(detail);
+  }
   if (alignment?.coverage) {
     const value = alignment.coverage;
     const details = node("details");

@@ -19,6 +19,7 @@ def project(tmp_path):
 
 def save_review(service, snapshot, scores=None, *, capability=3, burden=1):
     review = service.review_template(snapshot["id"])
+    review["coverage"]["scope"] = "focused"
     evidence_id = next(row["id"] for row in snapshot["evidence"] if row["path"] == "app.py")
     for dimension, rating in review["ratings"].items():
         cap, cost = (scores or {}).get(dimension, (capability, burden))
