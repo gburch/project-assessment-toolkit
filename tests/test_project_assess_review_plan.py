@@ -428,3 +428,63 @@ def test_unknown_dimensions_are_rejected():
     for function in (build_review_plan, dimension_coverage):
         with pytest.raises(ValueError, match="Unknown review-plan dimension"):
             function({}, dimension="overall")
+
+
+def test_actual_collector_controls_preserve_specialized_mechanisms_amid_large_shared_owners(
+    tmp_path,
+):
+    files = {
+        "src/pkg/providers/interface.py": "from typing import Protocol\nclass Provider(Protocol):\n    def read(self): ...\n",
+        "src/pkg/operations/recovery.py": "def repair():\n    return restore()\n",
+        "src/pkg/cache.py": "from functools import lru_cache\n@lru_cache(maxsize=8)\ndef retrieve(key):\n    return key\n",
+        "docs/operations.md": "# Operations\nRecovery guidance for current supported workflows.\n",
+        "docs/architecture.md": "# Architecture\nCurrent provider, recovery and caching ownership.\n",
+        "pyproject.toml": '[project]\nname="example"\nversion="0"\n',
+    }
+    for number in range(12):
+        files[f"src/pkg/shared{number:02}/owner.py"] = (
+            "from typing import Protocol\nclass Shared(Protocol):\n    def read(self): ...\n"
+            + "\n".join(
+                f"def work{i}():\n    try:\n        return restore()\n    except Exception:\n        return None\n"
+                for i in range(30)
+            )
+        )
+    for number in range(8):
+        files[f"docs/specs/proposal{number}.md"] = (
+            "# Proposed operations\n"
+            + "Historical proposed configuration and recovery guidance.\n" * 30
+        )
+    for path, text in files.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    captured = collect(tmp_path, analysis_profile="deep")
+    plan = build_review_plan(captured, limit=8)
+    expected = {
+        "extensibility": "src/pkg/providers/interface.py",
+        "operability": "src/pkg/operations/recovery.py",
+        "performance": "src/pkg/cache.py",
+    }
+    control_id = next(
+        entry["id"] for entry in captured["evidence"] if entry["kind"] == "control-analysis"
+    )
+    for dimension, path in expected.items():
+        task = next(
+            task for task in plan["dimensions"][dimension]["source_tasks"] if task["path"] == path
+        )
+        assert task["strength"] == "located_signal" and control_id in task["analysis_evidence_ids"]
+        assert task["mechanism_families"] and task["source_identity"] == "captured_snapshot"
+    guidance = [
+        task["path"]
+        for task in plan["dimensions"]["documentation"]["source_tasks"]
+        if task["kind"] == "documentation"
+    ]
+    assert guidance[:2] == ["docs/architecture.md", "docs/operations.md"]
+    assert not any("/specs/" in path for path in guidance[:2])
+    flattened = deepcopy(captured)
+    controls = next(entry for entry in flattened["evidence"] if entry["kind"] == "control-analysis")
+    for signal in controls["stats"]["signals"]:
+        location = signal.pop("locations")[0]
+        signal.update(location)
+    actual = build_review_plan(flattened, limit=8)
+    assert actual == plan

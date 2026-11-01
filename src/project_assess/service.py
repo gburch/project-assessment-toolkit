@@ -32,6 +32,7 @@ from .project_context import (
     validate_project_context,
 )
 from .review_context import build_challenge_evidence_index, get_system_map
+from .review_plan import VERSION as REVIEW_PLAN_VERSION
 from .review_plan import build_review_plan
 from .rubric import DIMENSIONS, PROFILES, RUBRIC_VERSION, rubric
 
@@ -1074,7 +1075,7 @@ class AssessmentService:
             "confidence_assessment": _confidence_summary(confidence_assessment(assessment, review)),
             "dimension_inputs": alignment["dimension_inputs"],
             "review_plan": {
-                "version": "1",
+                "version": REVIEW_PLAN_VERSION,
                 "view": "review-plan",
                 "next_step": "Inspect the per-dimension source tasks and counterevidence questions; revisit low-confidence dimensions before final review.",
             },

@@ -2046,8 +2046,11 @@ def collect(
         key: burden[key] for key in ("version", "coverage", "gaps", "caveat")
     }
     facts["burden_analysis"]["evidence_id"] = burden_id
+    from .review_plan import VERSION as review_plan_version
+
     scope = {
         "collector_version": 12,
+        "review_plan_version": review_plan_version,
         "burden_analysis_version": burden["version"],
         "control_inventory_version": controls["version"],
         "control_signal_limit": controls["limits"]["signals"],

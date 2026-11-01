@@ -10,7 +10,7 @@ from .generic_analysis import source_area
 from .rubric import DIMENSIONS
 from .static_analysis import source_role
 
-VERSION = "1"
+VERSION = "2"
 MAX_TASKS = 32
 _SOURCE_KINDS = {"python", "javascript", "source", "documentation", "configuration", "manifest"}
 _BINARY_SUFFIXES = {
@@ -91,6 +91,54 @@ _PATH_HINTS = {
 def _validate_dimension(dimension):
     if dimension is not None and dimension not in DIMENSIONS:
         raise ValueError("Unknown review-plan dimension")
+
+
+def _navigation_penalty(path, role_hint=None):
+    parts = PurePosixPath(path.lower()).parts
+    archived = bool(parts and parts[0] in {"output", "evals", ".artifacts"})
+    archived |= "docs" in parts and bool(
+        set(parts) & {"archive", "archives", "history", "plans", "specs", "evidence", "generated"}
+    )
+    archived |= "tests" in parts and bool(set(parts) & {"fixtures", "evidence"})
+    return int(archived or role_hint in {"history", "required_record", "raw_evidence", "generated"})
+
+
+def _family(kind):
+    return next(
+        (
+            name
+            for name in (
+                "compatibility",
+                "entry_points",
+                "interface",
+                "registration",
+                "dispatch",
+                "injected",
+                "constructor",
+                "cache",
+                "pagination",
+                "batch",
+                "admission",
+                "query",
+                "io_in_loop",
+                "materialization",
+                "synchronization",
+                "transaction",
+                "recovery",
+                "health",
+                "logging",
+                "exception",
+                "wait",
+                "timer",
+                "process",
+                "guidance",
+                "caller",
+                "script",
+            )
+            if name in kind
+        ),
+        kind,
+    )
 
 
 def _analysis_dimensions(kind):
@@ -285,7 +333,10 @@ def _context(assessment):
             for signal in located:
                 for dimension in signal.get("dimensions", []):
                     if dimension in DIMENSIONS:
-                        for location in signal.get("locations", [])[:8]:
+                        locations = signal.get("locations") or (
+                            [signal] if "path" in signal else []
+                        )
+                        for location in locations[:8]:
                             source = sources.get(location.get("path"))
                             if source is None:
                                 continue
@@ -424,6 +475,12 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
     review = review or {}
     sources, signals, edges = _context(assessment)
     by_id = {entry["id"]: entry for entry in sources.values()}
+    doc_roles = {
+        row["path"]: row.get("roleHint")
+        for entry in assessment.get("evidence", [])
+        if entry.get("kind") == "documentation-analysis"
+        for row in entry.get("stats", {}).get("documents", [])
+    }
     inputs = dimension_inputs(assessment)
     packs = {}
     for name in [dimension] if dimension else DIMENSIONS:
@@ -489,6 +546,9 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
             task.setdefault("binding_states", [])
             if binding not in task["binding_states"]:
                 task["binding_states"].append(binding)
+            task.setdefault("mechanism_families", [])
+            if _family(kind) not in task["mechanism_families"]:
+                task["mechanism_families"].append(_family(kind))
         rating = review.get("ratings", {}).get(name, {})
         for identity in rating.get("evidence_ids", []):
             if identity in by_id:
@@ -513,21 +573,44 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
                 if task["strength"] == "inventory_seed":
                     task["strength"] = "captured_import_context"
 
-        def rank(task):
+        def rank(task, *, name=name):
             reasons = task["selection_reasons"]
-            relevant = any(
-                reason in reasons
-                for reason in (
-                    "dimension_signal",
-                    "filename_navigation_hint",
-                    "authored_rating_citation",
-                    "captured_import_neighbor",
+            direct = any(kind.startswith(name + ".") for kind in task["signal_kinds"])
+            tier = (
+                0
+                if direct or name == "documentation" and "dimension_signal" in reasons
+                else 1
+                if "dimension_signal" in reasons
+                else 2
+                if any(
+                    reason in reasons
+                    for reason in ("filename_navigation_hint", "authored_rating_citation")
                 )
+                else 3
+                if "captured_import_neighbor" in reasons
+                else 4
             )
+            canonical = PurePosixPath(task["path"]).stem.lower() in {
+                "readme",
+                "agents",
+                "contributing",
+                "architecture",
+                "development",
+                "operations",
+                "setup",
+                "installation",
+                "recovery",
+                "runbook",
+                *DIMENSIONS,
+            }
             return (
-                not relevant,
-                task["role"] == "tooling",
-                -int(task["strength"] == "located_signal"),
+                _navigation_penalty(task["path"], doc_roles.get(task["path"])),
+                not canonical if task["kind"] == "documentation" else False,
+                task["role"] == "tooling" and task["kind"] != "documentation",
+                task["kind"] == "configuration",
+                tier,
+                -sum(hint in task["path"].lower() for hint in _PATH_HINTS[name]),
+                len(PurePosixPath(task["path"]).parts) if task["kind"] == "documentation" else 0,
                 -(by_id[task["evidence_id"]].get("lines") or 0),
                 task["path"],
                 task["evidence_id"],
@@ -547,10 +630,59 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
             queues[(category, task["area"])].append(task)
         order = sorted(queues, key=lambda key: (rank(queues[key][0]), key))
         chosen = {}
-        for category in ("production", "guidance", "configuration", "test"):
+        for category in (
+            ("guidance", "production", "configuration", "test")
+            if name == "documentation"
+            else ("production", "guidance", "configuration", "test")
+        ):
             matches = [key for key in order if key[0] == category]
             if matches and len(chosen) < limit:
                 task = queues[matches[0]].popleft()
+                chosen[task["evidence_id"]] = task
+        if name == "documentation":
+            guidance = [
+                task
+                for task in sorted(candidates.values(), key=rank)
+                if task["kind"] == "documentation"
+                and not _navigation_penalty(task["path"], doc_roles.get(task["path"]))
+            ]
+            for task in guidance[: max(1, limit // 3)]:
+                if len(chosen) < limit:
+                    chosen[task["evidence_id"]] = task
+        production = [
+            task
+            for task in sorted(candidates.values(), key=rank)
+            if task["kind"] in {"python", "javascript", "source"}
+            and task["role"] not in {"test", "tooling"}
+            and not _navigation_penalty(task["path"])
+        ]
+        named = sorted(
+            (
+                task
+                for task in production
+                if "filename_navigation_hint" in task["selection_reasons"]
+            ),
+            key=lambda task: (
+                -sum(hint in task["path"].lower() for hint in _PATH_HINTS[name]),
+                rank(task),
+            ),
+        )
+        if named and len(chosen) < limit:
+            chosen[named[0]["evidence_id"]] = named[0]
+        families = sorted(
+            {family for task in production for family in task.get("mechanism_families", [])}
+        )
+        for family in families[: max(1, limit // 2)]:
+            task = next(
+                (
+                    task
+                    for task in production
+                    if family in task.get("mechanism_families", [])
+                    and task["evidence_id"] not in chosen
+                ),
+                None,
+            )
+            if task and len(chosen) < limit:
                 chosen[task["evidence_id"]] = task
         while len(chosen) < limit and any(queues.values()):
             for key in order:
@@ -615,7 +747,7 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
                 "omitted_source_records": len(candidates) - len(chosen),
                 "related_import_edges": len(connections),
                 "omitted_import_edges": max(0, len(connections) - limit),
-                "method": "dimension_signals_then_role_and_area_rounds",
+                "method": "dimension_mechanism_families_then_role_and_area_rounds",
             },
             "provider_evidence_ids": evidence_ids[:20],
             "omitted_provider_evidence_ids": max(0, len(evidence_ids) - 20),
