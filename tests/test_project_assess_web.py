@@ -580,7 +580,9 @@ def test_deep_optional_analysis_and_generic_source_sarif_inspection_preserve_goa
             assert status == 200
             current = json.loads(body)
             assert current["facts"]["collection"]["analysis_profile"] == "deep"
-            assert current["facts"]["collection"]["analyzers"] == ["vulture"]
+            assert current["facts"]["collection"]["analyzers"] == ["joern", "vulture"]
+            assert current["facts"]["collection"]["requested_analyzers"] == ["vulture"]
+            assert current["facts"]["collection"]["automatic_analyzers"] == ["joern"]
             optional = current["facts"]["optional_analysis"]["vulture"]
             available = next(
                 entry["available"]

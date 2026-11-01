@@ -18,7 +18,13 @@ from collections import Counter, defaultdict, deque
 from dataclasses import replace
 from pathlib import Path
 
-from .analyzer_registry import dedicated_phase_limits, run_analyzer, validate_analyzers
+from .analyzer_registry import (
+    SELECTION_VERSION,
+    dedicated_phase_limits,
+    resolve_analyzers,
+    run_analyzer,
+    validate_analyzers,
+)
 from .budgets import get_budget, pattern_allocations
 from .burden_analysis import analyze_change_gates, summarize_burden
 from .burden_context import SCHEMA as BURDEN_CONTEXT_SCHEMA
@@ -27,6 +33,7 @@ from .capture_context import attach_source_windows
 from .control_inventory import ControlInventory
 from .delivery_analysis import analyze_delivery, is_delivery_input
 from .diagnostics import sarif_report
+from .doc_value.markdown import is_agent_guidance
 from .ecosystem import VERSION as ECOSYSTEM_VERSION
 from .ecosystem import dependency_inventory, javascript_signals, python_signals
 from .ecosystem import summarize as summarize_ecosystem
@@ -213,7 +220,11 @@ def _kind(path):
         return "javascript"
     if source_language(path.as_posix()) is not None:
         return "source"
-    if suffix in {".md", ".mdx", ".rst"} or name.startswith(("readme", "license")):
+    if (
+        suffix in {".md", ".mdx", ".rst", ".adoc"}
+        or is_agent_guidance(path)
+        or name.startswith(("readme", "license"))
+    ):
         return "documentation"
     if name in {"package.json", "pyproject.toml", "requirements.txt"}:
         return "manifest"
@@ -232,6 +243,8 @@ def _is_test(path):
 
 def _priority(path):
     kind, role = _kind(path), source_role(path.as_posix())["role"]
+    if is_agent_guidance(path) or path.name in {".agents", ".claude", ".cursor"}:
+        return 0
     if (
         kind == "manifest"
         or is_delivery_input(path.as_posix())
@@ -254,7 +267,11 @@ def _priority(path):
         return 1
     if kind in {"python", "javascript", "source"} and role == "unknown":
         return 1
-    if path.name.lower() in {"readme.md", "agents.md", "contributing.md", "security.md"}:
+    if is_agent_guidance(path) or path.name.lower() in {
+        "readme.md",
+        "contributing.md",
+        "security.md",
+    }:
         return 2
     if role == "test" or path.name in {"test", "tests", "e2e", "__tests__"}:
         return 3
@@ -927,7 +944,8 @@ def collect(
             pattern_functions=MAX_STATIC_SYMBOLS,
             pattern_functions_per_file=MAX_DETAIL_PER_FILE,
         )
-    analyzers = validate_analyzers(analyzers)
+    requested_analyzers = validate_analyzers(analyzers)
+    analyzers = resolve_analyzers(requested_analyzers, budget.name)
     configured_limits = {
         **budget.as_dict(),
         "source_file_bytes": MAX_SOURCE_FILE_BYTES,
@@ -941,6 +959,9 @@ def collect(
         "max_static_definitions": MAX_STATIC_DEFINITIONS,
         "max_git_output_bytes": MAX_GIT_OUTPUT_BYTES,
         "excluded_directory_prefixes": MAX_EXCLUDED_DIRECTORY_PREFIXES,
+        "required_deep_checks": ["dead_code", "documentation_drift"]
+        if budget.name == "deep"
+        else [],
     }
     dedicated = {
         name: limits
@@ -1627,6 +1648,9 @@ def collect(
     optional_analyses = {}
 
     def add_optional_evidence(name, result):
+        result["analyzer"]["selection"] = (
+            "explicit" if name in requested_analyzers else "deep_profile"
+        )
         payload = json.dumps(result, sort_keys=True).encode()
         evidence_id = add_evidence(f"<{name}-analysis>", payload, "analyzer-analysis", "", result)
         facts.setdefault("optional_analysis", {})[name] = {
@@ -1635,7 +1659,7 @@ def collect(
             if key not in {"candidates", "candidate_index", "modules", "topology", "hotspots"}
         }
         facts["optional_analysis"][name]["evidence_id"] = evidence_id
-        gaps.extend(f"Optional analyzer {name}: {gap}" for gap in result["gaps"])
+        gaps.extend(f"Analyzer {name}: {gap}" for gap in result["gaps"])
 
     if analyzers:
         source_evidence = {
@@ -1711,15 +1735,18 @@ def collect(
     gaps.extend(generic_analysis["gaps"])
     for name, result in optional_analyses.items():
         add_optional_evidence(name, result)
-    if documentation_texts and expired():
+    if documentation_texts and expired() and budget.name != "deep":
         analysis_omissions.append({"analysis": "documentation", "reason": "deadline"})
-    if documentation_texts and not expired():
+    # Deep always inspects the captured guidance with its fixed byte/section
+    # bounds, including an empty inventory. Earlier work cannot silently skip it.
+    if budget.name == "deep" or (documentation_texts and not expired()):
         from .documentation import captured_documentation
 
         analysis = captured_documentation(
             documentation_texts,
             {entry["path"] for entry in manifest},
             captured_sources=captured_sources,
+            inventory_paths={path.as_posix() for path, *_ in inputs},
             manifest_scripts={
                 entry["path"]: entry.get("stats", {}).get("scripts", [])
                 for entry in evidence
@@ -1954,6 +1981,9 @@ def collect(
             for row in python_analysis
         ),
         "analyzers": list(analyzers),
+        "requested_analyzers": list(requested_analyzers),
+        "automatic_analyzers": sorted(set(analyzers) - set(requested_analyzers)),
+        "analyzer_selection_version": SELECTION_VERSION,
         "caveat": "Role labels are path heuristics. Counts describe discovered/captured inputs, not the entire repository when discovery is incomplete, production LOC, test coverage or quality.",
     }
     if skipped:
@@ -1988,10 +2018,10 @@ def collect(
     )
     if facts["javascript"]["files"]:
         gaps.append("JavaScript/TypeScript counts are lexical estimates, not semantic analysis")
-    # Core collection has finished, including documentation, supplied reports and
-    # its cooperative deadline check. Explicit external work cannot consume that
-    # budget or starve another analyzer. Each provider enforces its own hard cap.
-    for name in dedicated:
+    # Core capture and documentation are complete. Deep providers get separate
+    # bounded budgets; Joern enforces a hard process deadline, Vulture a
+    # cooperative deadline between bounded AST/API operations. Run lighter work first.
+    for name in sorted(dedicated, key=lambda name: (name == "joern", name)):
         result = _redact_data(
             run_analyzer(
                 name,
@@ -2049,7 +2079,7 @@ def collect(
     from .review_plan import VERSION as review_plan_version
 
     scope = {
-        "collector_version": 12,
+        "collector_version": 13,
         "review_plan_version": review_plan_version,
         "burden_analysis_version": burden["version"],
         "control_inventory_version": controls["version"],
@@ -2061,6 +2091,7 @@ def collect(
         "analysis_profile": budget.name,
         "budgets": configured_limits,
         "analyzers": list(analyzers),
+        "analyzer_selection_version": SELECTION_VERSION,
         "max_total_bytes": budget.supported_text_bytes,
         "max_unsupported_asset_bytes": budget.unsupported_asset_bytes,
         "max_depth": MAX_DEPTH,

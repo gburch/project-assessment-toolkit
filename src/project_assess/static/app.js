@@ -61,7 +61,9 @@ function renderVisuals(report) {
 }
 
 function scanOptions() {
-  return { analysis_profile: $("analysis-profile").value, analyzers: Array.from($("optional-analyzers").querySelectorAll("input[data-analyzer]:checked"), (input) => input.dataset.analyzer) };
+  const analyzers = Array.from($("optional-analyzers").querySelectorAll("input[data-analyzer]:checked"))
+    .filter((input) => input.dataset.autoIncluded !== "true").map((input) => input.dataset.analyzer);
+  return { analysis_profile: $("analysis-profile").value, analyzers };
 }
 
 function renderAnalyzers(analyzers) {
@@ -75,9 +77,11 @@ function renderAnalyzers(analyzers) {
     input.type = "checkbox";
     input.id = `analyzer-${analyzer.name}`;
     input.dataset.analyzer = analyzer.name;
+    input.dataset.deepDefault = String((analyzer.default_profiles || []).includes("deep"));
     input.disabled = state.loading || state.saving;
     const status = node("p", analyzer.available ? `${title} ${analyzer.version || ""} is available. Findings need caller and contract review.` : `${title}${analyzer.version ? ` ${analyzer.version} is unavailable` : " is not installed"}. Selecting it records unavailable evidence; scanning never installs it.`, "secondary");
     status.id = `${analyzer.name}-status`;
+    if (input.dataset.deepDefault === "true") status.append(" Included automatically with Deep; the checkbox selects it for Standard.");
     input.setAttribute("aria-describedby", status.id);
     label.htmlFor = input.id;
     label.append(input, node("span", `Include ${title}${languages ? ` ${languages}` : ""} analysis`));
@@ -288,7 +292,17 @@ function missingTargets() {
 }
 function updateControls() {
   $("analysis-profile").disabled = state.loading || state.saving;
-  for (const input of $("optional-analyzers").querySelectorAll("input[data-analyzer]")) input.disabled = state.loading || state.saving;
+  for (const input of $("optional-analyzers").querySelectorAll("input[data-analyzer]")) {
+    const included = $("analysis-profile").value === "deep" && input.dataset.deepDefault === "true";
+    if (included && input.dataset.autoIncluded !== "true") {
+      input.dataset.wasChecked = String(input.checked);
+      input.checked = true;
+    } else if (!included && input.dataset.autoIncluded === "true") {
+      input.checked = input.dataset.wasChecked === "true";
+    }
+    input.dataset.autoIncluded = String(included);
+    input.disabled = state.loading || state.saving || included;
+  }
   const busy = state.loading || state.saving || !state.report;
   $("scan").disabled = !state.token || state.loading || state.saving;
   $("scan-root").disabled = state.loading || state.saving;
@@ -826,8 +840,11 @@ async function loadReport(id) {
     $("source").textContent = `${source.root} · ${source.revision || "Unversioned source"}${source.dirty ? " · modified worktree" : ""}`;
     const collection = result.assessment.facts?.collection || {};
     $("analysis-profile").value = collection.analysis_profile || "standard";
-    for (const input of $("optional-analyzers").querySelectorAll("input[data-analyzer]")) input.checked = (collection.analyzers || []).includes(input.dataset.analyzer);
-    $("analysis-scope").textContent = `Analysis: ${collection.analysis_profile || "legacy"}${collection.supported_text_complete === undefined ? "" : ` · supported text ${collection.supported_text_complete ? "captured" : "partial"}`}${collection.deadline_exceeded ? " · analysis deadline reached" : ""}${collection.analyzers?.length ? ` · optional: ${collection.analyzers.join(", ")}` : ""}.`;
+    for (const input of $("optional-analyzers").querySelectorAll("input[data-analyzer]")) {
+      input.dataset.autoIncluded = "false";
+      input.checked = (collection.requested_analyzers || collection.analyzers || []).includes(input.dataset.analyzer);
+    }
+    $("analysis-scope").textContent = `Analysis: ${collection.analysis_profile || "legacy"}${collection.supported_text_complete === undefined ? "" : ` · supported text ${collection.supported_text_complete ? "captured" : "partial"}`}${collection.deadline_exceeded ? " · analysis deadline reached" : ""}${collection.analyzers?.length ? ` · analyzers: ${collection.analyzers.join(", ")}` : ""}.`;
     renderRatings(result);
     renderControls(result.goals);
     renderVisuals(result);
@@ -973,6 +990,7 @@ $("rescan").addEventListener("click", async () => {
     }
   }
 });
+$("analysis-profile").addEventListener("change", updateControls);
 $("scan-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const root = $("scan-root").value.trim();

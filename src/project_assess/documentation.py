@@ -13,6 +13,7 @@ from .doc_value.markdown import (
     UNSUPPORTED_LINK_RE,
     documentation_role,
     headings,
+    is_agent_guidance,
     local_links,
     without_fences,
     words,
@@ -24,13 +25,60 @@ SCHEMA = "doc-value.captured.v2"
 MAX_DOCUMENTS = 2000
 MAX_LINKS = 2000
 MAX_REFERENCES = 1000
+MAX_COMMAND_REFERENCES = 200
+MAX_AUTHORITY_CLAIMS = 100
+MAX_MAINTENANCE_LEADS = 200
+DRIFT_VERSION = "1"
 _PATH_REFERENCE = re.compile(
-    r"(?<![\w/.-])(?:[\w.-]+/)*[\w.-]+\.(?:md|mdx|rst|adoc|py|js|jsx|ts|tsx|java|swift|go|rs|sh|json|toml|ya?ml|ini|cfg)(?![\w/.-])",
+    r"(?<![\w/.-])(?:[\w.-]+/)*[\w.-]+\.(?:md|mdx|mdc|rst|adoc|py|js|jsx|ts|tsx|java|swift|go|rs|sh|json|toml|ya?ml|ini|cfg)(?![\w/.-])",
     re.I,
 )
 _SCRIPT_COMMAND = re.compile(
     r"^(?:\$\s*)?(?:npm|pnpm)(?:\s+--prefix\s+(?P<prefix>[\w./-]+))?\s+run\s+(?P<script>[\w:-]+)(?:\s|$)"
 )
+_AUTHORITY_SUBJECT = re.compile(
+    r"\b(?:source of truth for|authoritative source for|canonical)\s+"
+    r"(?P<subject>[\w][\w /-]{0,59})\s*:\s*`?(?P<target>[^`\s]+)",
+    re.I,
+)
+
+
+def _document_priority(path):
+    name = PurePosixPath(path)
+    rank = (
+        0
+        if is_agent_guidance(path)
+        else 1
+        if name.parent == PurePosixPath(".")
+        and name.name.casefold()
+        in {"readme", "readme.md", "readme.mdx", "readme.rst", "readme.adoc"}
+        else 2
+    )
+    return (rank, path)
+
+
+def _path_check(path, raw, captured, inventory):
+    targets = {raw, posixpath.normpath(posixpath.join(posixpath.dirname(path), raw))}
+    targets = {
+        target
+        for target in targets
+        if not target.startswith("/") and target != ".." and not target.startswith("../")
+    }
+    matches = sorted(targets.intersection(captured))
+    if matches:
+        status = "captured" if len(matches) == 1 else "ambiguous_captured_target"
+    elif inventory is not None and (matches := sorted(targets.intersection(inventory))):
+        status = "present_not_captured" if len(matches) == 1 else "ambiguous_inventory_target"
+    else:
+        matches = sorted(targets)
+        status = (
+            "outside_scope"
+            if not targets
+            else "not_in_inspected_inventory"
+            if inventory is not None
+            else "not_in_captured_snapshot"
+        )
+    return {"reference": raw, "status": status, "targets": matches}
 
 
 def _role(path, text):
@@ -56,7 +104,9 @@ def _rich_inputs(texts, *, byte_limit):
         "generated": 5,
     }
     selected, omitted, used = {}, [], 0
-    for path in sorted(texts, key=lambda p: (order.get(roles[p][0], 1), p)):
+    for path in sorted(
+        texts, key=lambda p: (_document_priority(p)[0], order.get(roles[p][0], 1), p)
+    ):
         size = len(texts[path].encode("utf-8"))
         if used + size > byte_limit:
             omitted.append(path)
@@ -66,7 +116,26 @@ def _rich_inputs(texts, *, byte_limit):
     return selected, roles, omitted
 
 
-def _reference_evidence(texts, manifest_paths, sources, scripts, *, byte_limit):
+def _maintenance_sample(leads):
+    groups = defaultdict(deque)
+    for lead in sorted(
+        leads,
+        key=lambda lead: (
+            not any(is_agent_guidance(location["path"]) for location in lead["locations"])
+        ),
+    ):
+        groups[lead["kind"]].append(lead)
+    selected = []
+    while len(selected) < MAX_MAINTENANCE_LEADS and any(groups.values()):
+        for kind in sorted(groups):
+            if groups[kind] and len(selected) < MAX_MAINTENANCE_LEADS:
+                selected.append(groups[kind].popleft())
+    return selected
+
+
+def _reference_evidence(
+    texts, manifest_paths, sources, scripts, *, byte_limit, inventory_paths=None
+):
     """Literal relationships only; never infer command execution or required edits."""
     references, commands, authority, gaps = [], [], [], []
     reference_groups = defaultdict(deque)
@@ -82,6 +151,10 @@ def _reference_evidence(texts, manifest_paths, sources, scripts, *, byte_limit):
     by_target = defaultdict(list)
     examined_bytes = examined_files = 0
     omitted_callers = []
+    path_checks, path_observed, authority_claims, authority_observed = [], 0, [], 0
+    commands_observed = 0
+    inventory = set(inventory_paths) if inventory_paths is not None else None
+    seen_paths = set()
 
     def add(row):
         nonlocal reference_dropped
@@ -96,7 +169,8 @@ def _reference_evidence(texts, manifest_paths, sources, scripts, *, byte_limit):
         else:
             reference_dropped = True
 
-    for path, text in sorted(texts.items()):
+    for path in sorted(texts, key=_document_priority):
+        text = texts[path]
         for line, content in enumerate(text.splitlines(), 1):
             if len(authority) < 100 and re.search(
                 r"\b(?:canonical|source of truth|authoritative|generated from)\b", content, re.I
@@ -111,6 +185,24 @@ def _reference_evidence(texts, manifest_paths, sources, scripts, *, byte_limit):
                 )
             for match in _PATH_REFERENCE.finditer(content):
                 raw = match.group()
+                signature = (path, line, raw)
+                # URL/variable fragments are not literal local file assertions.
+                token = content[max(0, match.start() - 200) : match.end()].rsplit(maxsplit=1)[-1]
+                if signature not in seen_paths and not any(
+                    marker in token for marker in ("://", "${", "{{", "*", "<")
+                ):
+                    seen_paths.add(signature)
+                    path_observed += 1
+                    if len(path_checks) < MAX_REFERENCES:
+                        path_checks.append(
+                            {
+                                "path": path,
+                                "line": line,
+                                **_path_check(path, raw, captured, inventory),
+                                "agentGuidance": is_agent_guidance(path),
+                                "basis": "literal path compared with captured and supplied inspected inventory; exclusions and physical existence remain unverified",
+                            }
+                        )
                 targets = {raw, posixpath.normpath(posixpath.join(posixpath.dirname(path), raw))}
                 for target in sorted(targets.intersection(captured)):
                     if target == path:
@@ -123,38 +215,62 @@ def _reference_evidence(texts, manifest_paths, sources, scripts, *, byte_limit):
                         "basis": "literal captured path mention; relationship needs review",
                     }
                     add(row)
-                    if PurePosixPath(target).suffix.lower() not in {".md", ".mdx", ".rst", ".adoc"}:
+                    if PurePosixPath(target).suffix.lower() not in {
+                        ".md",
+                        ".mdx",
+                        ".mdc",
+                        ".rst",
+                        ".adoc",
+                    }:
                         by_target[target].append(row)
-            candidate = content.strip().strip("`")
-            command = _SCRIPT_COMMAND.match(candidate)
-            if not command or len(commands) >= 200:
-                continue
-            prefix = command.group("prefix")
-            target = (
-                posixpath.normpath(posixpath.join(prefix, "package.json"))
-                if prefix
-                else next(iter(packages), None)
-                if len(packages) == 1
-                else None
-            )
-            # A shell's working directory is not established by a document path.
-            if not prefix and re.search(r"(?m)^\s*(?:\$\s*)?cd\s+", text):
-                target = None
-            declared = packages.get(target)
-            commands.append(
-                {
-                    "path": path,
-                    "line": line,
-                    "script": command.group("script"),
-                    "manifest": target if declared is not None else None,
-                    "status": "declared"
-                    if declared is not None and command.group("script") in declared
-                    else "not_declared_in_captured_manifest"
-                    if declared is not None
-                    else "scope_unresolved",
-                    "basis": "literal documented command compared with captured manifest script names; working directory, intent and execution remain unverified",
-                }
-            )
+            claim = _AUTHORITY_SUBJECT.search(content)
+            if claim and _PATH_REFERENCE.fullmatch(claim.group("target")):
+                authority_observed += 1
+                if len(authority_claims) < MAX_AUTHORITY_CLAIMS:
+                    check = _path_check(path, claim.group("target"), captured, inventory)
+                    authority_claims.append(
+                        {
+                            "path": path,
+                            "line": line,
+                            "subject": " ".join(claim.group("subject").casefold().split()),
+                            **check,
+                            "basis": "explicit lexical authority subject/target declaration; precedence and applicability need review",
+                        }
+                    )
+            candidates = [content.strip().strip("`"), *re.findall(r"`([^`\n]+)`", content)]
+            for candidate in dict.fromkeys(candidates):
+                command = _SCRIPT_COMMAND.match(candidate)
+                if not command:
+                    continue
+                commands_observed += 1
+                if len(commands) >= MAX_COMMAND_REFERENCES:
+                    continue
+                prefix = command.group("prefix")
+                target = (
+                    posixpath.normpath(posixpath.join(prefix, "package.json"))
+                    if prefix
+                    else next(iter(packages), None)
+                    if len(packages) == 1
+                    else None
+                )
+                # A shell's working directory is not established by a document path.
+                if not prefix and re.search(r"(?m)^\s*(?:\$\s*)?cd\s+", text):
+                    target = None
+                declared = packages.get(target)
+                commands.append(
+                    {
+                        "path": path,
+                        "line": line,
+                        "script": command.group("script"),
+                        "manifest": target if declared is not None else None,
+                        "status": "declared"
+                        if declared is not None and command.group("script") in declared
+                        else "not_declared_in_captured_manifest"
+                        if declared is not None
+                        else "scope_unresolved",
+                        "basis": "literal documented command compared with captured manifest script names; working directory, intent and execution remain unverified",
+                    }
+                )
     doc_paths = set(texts)
     groups = defaultdict(lambda: defaultdict(deque))
     for path in sorted(sources):
@@ -209,10 +325,47 @@ def _reference_evidence(texts, manifest_paths, sources, scripts, *, byte_limit):
     }
     if reference_dropped or any(reference_groups.values()):
         gaps.append("Documentation literal-reference limit reached")
+    if path_observed > len(path_checks):
+        gaps.append("Documentation drift path-reference limit reached")
+    if authority_observed > len(authority_claims):
+        gaps.append("Documentation explicit-authority claim limit reached")
+    if commands_observed > len(commands):
+        gaps.append("Documentation command-reference limit reached")
+    claims_by_subject = defaultdict(list)
+    for claim in authority_claims:
+        if claim["status"] in {"captured", "present_not_captured"}:
+            claims_by_subject[claim["subject"]].append(claim)
+    conflicts = [
+        {
+            "subject": subject,
+            "claims": claims,
+            "basis": "same literal subject names different known targets; scopes, intent and precedence may differ",
+        }
+        for subject, claims in sorted(claims_by_subject.items())
+        if len({claim["targets"][0] for claim in claims}) > 1
+    ]
     return {
         "references": references,
         "commands": commands,
         "authorityHints": authority,
+        "driftEvidence": {
+            "version": DRIFT_VERSION,
+            "pathChecks": path_checks,
+            "authorityClaims": authority_claims,
+            "authorityConflicts": conflicts,
+            "scope": {
+                "pathReferencesObserved": path_observed,
+                "pathReferencesRetained": len(path_checks),
+                "pathReferencesOmitted": path_observed - len(path_checks),
+                "authorityClaimsObserved": authority_observed,
+                "authorityClaimsRetained": len(authority_claims),
+                "authorityClaimsOmitted": authority_observed - len(authority_claims),
+                "pathReferenceLimit": MAX_REFERENCES,
+                "authorityClaimLimit": MAX_AUTHORITY_CLAIMS,
+                "inventoryProvided": inventory is not None,
+                "caveat": "Inventory is the caller's inspected scope, not a complete filesystem. Missing membership never proves nonexistence, semantic drift or disuse.",
+            },
+        },
         "sharedSourceReferences": [
             {"target": target, "references": rows[:8], "documents": len({r["path"] for r in rows})}
             for target, rows in sorted(by_target.items())
@@ -230,6 +383,10 @@ def _reference_evidence(texts, manifest_paths, sources, scripts, *, byte_limit):
             "omittedCallerPaths": omitted_callers[:100],
             "omittedCallers": len(omitted_callers),
             "referenceLimit": MAX_REFERENCES,
+            "commandReferencesObserved": commands_observed,
+            "commandReferencesRetained": len(commands),
+            "commandReferencesOmitted": commands_observed - len(commands),
+            "commandReferenceLimit": MAX_COMMAND_REFERENCES,
         },
         "gaps": sorted(set(gaps)),
     }
@@ -241,9 +398,10 @@ def captured_documentation(
     *,
     captured_sources: dict[str, str] | None = None,
     manifest_scripts: dict[str, list[str]] | None = None,
+    inventory_paths: set[str] | None = None,
     deep: bool = False,
 ) -> dict:
-    selected = dict(sorted(texts.items())[:MAX_DOCUMENTS])
+    selected = {path: texts[path] for path in sorted(texts, key=_document_priority)[:MAX_DOCUMENTS]}
     documents, links, gaps = [], [], []
     by_hash = defaultdict(list)
     known = set(manifest_paths)
@@ -321,9 +479,11 @@ def captured_documentation(
         captured_sources or {},
         manifest_scripts or {},
         byte_limit=32_000_000 if deep else 8_000_000,
+        inventory_paths=inventory_paths,
     )
     for row in documents:
         row["roleHint"], row["roleReasons"] = roles[row["path"]]
+        row["agentGuidance"] = is_agent_guidance(row["path"])
     if rich_omitted:
         gaps.append(
             "Rich documentation byte limit reached; remaining documents have only basic inventory/link evidence"
@@ -331,6 +491,36 @@ def captured_documentation(
     gaps.extend(sections["gaps"])
     gaps.extend(references["gaps"])
     maintenance = []
+    drift = references.pop("driftEvidence")
+    for check in drift["pathChecks"]:
+        if check["status"] in {
+            "not_in_captured_snapshot",
+            "not_in_inspected_inventory",
+            "present_not_captured",
+        }:
+            maintenance.append(
+                {
+                    "kind": "documented_path_uncaptured_hint"
+                    if check["status"] == "present_not_captured"
+                    else "documented_path_unresolved_hint",
+                    "locations": [{"path": check["path"], "line": check["line"]}],
+                    "metrics": {
+                        "reference": check["reference"],
+                        "status": check["status"],
+                        "basis": check["basis"],
+                    },
+                }
+            )
+    for conflict in drift["authorityConflicts"]:
+        maintenance.append(
+            {
+                "kind": "competing_authority_targets_hint",
+                "locations": [
+                    {"path": claim["path"], "line": claim["line"]} for claim in conflict["claims"]
+                ],
+                "metrics": {"subject": conflict["subject"], "basis": conflict["basis"]},
+            }
+        )
     for lead in sections["passageLeads"]:
         left, right = lead["left"], lead["right"]
         if left["path"] == right["path"] or any(
@@ -371,6 +561,9 @@ def captured_documentation(
                     "metrics": {"basis": caller["basis"]},
                 }
             )
+    selected_maintenance = _maintenance_sample(maintenance)
+    maintenance_observed = Counter(row["kind"] for row in maintenance)
+    maintenance_retained = Counter(row["kind"] for row in selected_maintenance)
     return {
         "schema": SCHEMA,
         "method": "Captured source bytes only; lexical leads, not ratings or deletion decisions",
@@ -382,7 +575,8 @@ def captured_documentation(
         "links": links,
         "sections": sections,
         "referenceEvidence": references,
-        "maintenanceLeads": maintenance[:200],
+        "driftEvidence": drift,
+        "maintenanceLeads": selected_maintenance,
         "scope": {
             "capturedDocuments": len(texts),
             "analyzedDocuments": len(selected),
@@ -393,8 +587,23 @@ def captured_documentation(
             "richOmittedPaths": rich_omitted[:100],
             "richOmittedDocuments": len(rich_omitted),
             "maintenanceLeadsObserved": len(maintenance),
-            "maintenanceLeadsOmitted": max(0, len(maintenance) - 200),
+            "maintenanceLeadsOmitted": len(maintenance) - len(selected_maintenance),
+            "maintenanceLeadLimit": MAX_MAINTENANCE_LEADS,
+            "maintenanceLeadSelection": "kind_round_robin_agent_guidance_first",
+            "maintenanceLeadCounts": {
+                kind: {
+                    "observed": count,
+                    "retained": maintenance_retained[kind],
+                    "omitted": count - maintenance_retained[kind],
+                }
+                for kind, count in sorted(maintenance_observed.items())
+            },
             "analysisProfile": "deep" if deep else "standard",
+            "documentSelection": "agent_guidance_then_root_readme_then_path",
+            "agentGuidanceCaptured": sum(is_agent_guidance(path) for path in texts),
+            "agentGuidanceAnalyzed": sum(is_agent_guidance(path) for path in selected),
+            "agentGuidanceRich": sum(is_agent_guidance(path) for path in rich_texts),
+            "omittedDocumentPaths": [path for path in sorted(texts) if path not in selected][:100],
         },
         "gaps": gaps
         + [

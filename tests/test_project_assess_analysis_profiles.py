@@ -252,11 +252,11 @@ def test_dedicated_joern_phase_preserves_core_reports_and_other_analyzer_budget(
         events.append(name)
         assert sources and options["snapshot"]["manifest_digest"]
         if name == "joern":
-            assert events == ["vulture", "junit", "joern"]
+            assert events == ["junit", "vulture", "joern"]
             assert options["deadline"] is None
             clock[0] += 600  # Longer than core collection; bounded by the provider itself.
         else:
-            assert options["deadline"] > clock[0]
+            assert options["deadline"] is None
         return {
             "schema_version": 1,
             "analyzer": {"name": name, "version": "synthetic"},
@@ -276,11 +276,93 @@ def test_dedicated_joern_phase_preserves_core_reports_and_other_analyzer_budget(
     snapshot = service.scan(
         root, reports=[report], analysis_profile="deep", analyzers=["joern", "vulture"]
     )
-    assert events == ["vulture", "junit", "joern"]
+    assert events == ["junit", "vulture", "joern"]
     assert snapshot["facts"]["reports"]["junit"]["tests"] == 1
     assert any(row["kind"] == "documentation-analysis" for row in snapshot["evidence"])
     assert not snapshot["facts"]["collection"]["deadline_exceeded"]
     assert snapshot["facts"]["collection"]["unprocessed_reports"] == []
     limits = snapshot["facts"]["collection"]["limits"]["dedicated_analyzer_phases"]
     assert limits["joern"]["seconds"] == 1800
+    assert limits["vulture"]["seconds"] == 300
     assert snapshot["facts"]["optional_analysis"].keys() == {"joern", "vulture"}
+
+
+def test_deep_requests_dead_code_and_guidance_drift_without_analyzer_flags(tmp_path):
+    root, service = project(tmp_path)
+    (root / "AGENTS.md").write_text(
+        "# Change instructions\nRun `npm run removed`.\nRead `src/retired.py` before edits.\n"
+    )
+    (root / "package.json").write_text('{"scripts":{"check":"never execute this"}}')
+    first = service.scan(root)
+    deep = service.scan(root, analysis_profile="deep")
+    assert first["source"] == deep["source"]
+    assert not first["facts"].get("optional_analysis")
+    collection = deep["facts"]["collection"]
+    assert collection["requested_analyzers"] == []
+    assert collection["automatic_analyzers"] == ["joern", "vulture"]
+    assert collection["limits"]["required_deep_checks"] == ["dead_code", "documentation_drift"]
+    providers = deep["facts"]["optional_analysis"]
+    assert set(providers) == {"joern", "vulture"}
+    assert all(p["analyzer"]["selection"] == "deep_profile" for p in providers.values())
+    assert providers["joern"]["status"] in {"unavailable", "unsupported"}
+    assert providers["joern"]["gaps"]  # Missing runtime never becomes a clean result.
+    docs = next(e for e in deep["evidence"] if e["kind"] == "documentation-analysis")
+    assert any(
+        lead["kind"] == "documented_script_mismatch_hint"
+        for lead in docs["stats"]["maintenanceLeads"]
+    )
+    assert docs["stats"]["driftEvidence"]["pathChecks"]
+    coverage = service.query_evidence(deep["id"], view="coverage", limit=100)
+    required = {
+        r["check"]: r for r in coverage["items"] if r.get("record_type") == "required_deep_check"
+    }
+    assert set(required) == {"dead_code", "documentation_drift"}
+    assert required["dead_code"]["collection_status"] == "partial"
+    assert required["documentation_drift"]["evidence_ids"] == [docs["id"]]
+    assert (
+        service.query_evidence(deep["id"], view="coverage", kind="documentation-analysis")[
+            "matched"
+        ]
+        == 1
+    )
+    assert service.get_report(deep["id"])["review"] is None
+    assert not (root / "executed").exists()
+
+
+def test_deep_documentation_pass_is_not_starved_by_core_analysis_deadline(tmp_path, monkeypatch):
+    from project_assess import collector
+
+    root, service = project(tmp_path)
+    (root / ".cursor/rules").mkdir(parents=True)
+    (root / ".cursor/rules/development.mdc").write_text(
+        "# Development rules\nRead `src/retired.py` before editing.\n"
+    )
+    clock = [0.0]
+    monkeypatch.setattr(collector.time, "monotonic", lambda: clock[0])
+    original = collector.summarize_source_text
+
+    def exhaust(*args, **kwargs):
+        result = original(*args, **kwargs)
+        clock[0] = 301.0
+        return result
+
+    monkeypatch.setattr(collector, "summarize_source_text", exhaust)
+    deep = service.scan(root, analysis_profile="deep")
+    docs = next(e for e in deep["evidence"] if e["kind"] == "documentation-analysis")
+    assert deep["facts"]["collection"]["deadline_exceeded"]
+    assert ".cursor/rules/development.mdc" in {d["path"] for d in docs["stats"]["documents"]}
+    assert docs["stats"]["driftEvidence"]["pathChecks"]
+    assert not any(
+        row["analysis"] == "documentation"
+        for row in deep["facts"]["collection"]["analysis_omissions"]
+    )
+    assert not deep["facts"]["optional_analysis"]["vulture"]["provenance"]["shared_deadline"]
+
+
+def test_empty_documentation_inventory_still_has_required_deep_evidence(tmp_path):
+    root, service = project(tmp_path)
+    deep = service.scan(root, analysis_profile="deep")
+    docs = next(e for e in deep["evidence"] if e["kind"] == "documentation-analysis")
+    assert docs["stats"]["scope"]["capturedDocuments"] == 0
+    assert docs["stats"]["scope"]["analyzedDocuments"] == 0
+    assert docs["stats"]["driftEvidence"]["pathChecks"] == []

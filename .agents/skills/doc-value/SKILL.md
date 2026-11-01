@@ -133,3 +133,5 @@ the assessment workflow remains read-only and advisory. Match an external
 receipt's root, revision, selected scope and source hashes to the assessment
 before citing it. Keep assessment state and machine receipts outside the assessed
 repository.
+
+PAT Deep scans already collect bounded documentation drift, agent-guidance and source-reference evidence. The separate `doc-value` workflow adds focused inspection or cleanup evidence when needed; it is not a prerequisite for recognizing documentation as a development input. Trace misleading guidance to its current implementation and affected workflows before judging burden or removing it.

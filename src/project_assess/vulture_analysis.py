@@ -128,6 +128,18 @@ def _snapshot(value):
     }
 
 
+def vulture_limits(analysis_profile):
+    if not isinstance(analysis_profile, str) or analysis_profile not in _PROFILES:
+        raise ValueError("Unknown analysis profile")
+    return {
+        **_PROFILES[analysis_profile],
+        "candidates": MAX_CANDIDATES,
+        "candidate_index": MAX_INDEX,
+        "input_records": MAX_INPUT_RECORDS,
+        "deadline_mode": "cooperative; individual bounded API calls are not preempted",
+    }
+
+
 def analyze_vulture(
     sources,
     *,
@@ -201,13 +213,7 @@ def analyze_vulture(
         group = areas[(source["role"], source_area(source["path"]))]
         group["omissions"][reason] = group["omissions"].get(reason, 0) + 1
 
-    limits = {
-        **_PROFILES[analysis_profile],
-        "candidates": MAX_CANDIDATES,
-        "candidate_index": MAX_INDEX,
-        "input_records": MAX_INPUT_RECORDS,
-        "deadline_mode": "cooperative; individual bounded API calls are not preempted",
-    }
+    limits = vulture_limits(analysis_profile)
     start = _clock()
     stop = (
         min(start + limits["seconds"], deadline)

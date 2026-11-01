@@ -6,11 +6,12 @@ from collections import defaultdict, deque
 from pathlib import PurePosixPath
 
 from .dimension_inputs import dimension_inputs
+from .doc_value.markdown import is_agent_guidance
 from .generic_analysis import source_area
 from .rubric import DIMENSIONS
 from .static_analysis import source_role
 
-VERSION = "2"
+VERSION = "3"
 MAX_TASKS = 32
 _SOURCE_KINDS = {"python", "javascript", "source", "documentation", "configuration", "manifest"}
 _BINARY_SUFFIXES = {
@@ -42,6 +43,11 @@ _LOCK_NAMES = {
     "package.resolved",
 }
 _DEPENDENCY_DIMENSIONS = {"security", "testing", "maintainability", "delivery"}
+_DEAD_CODE_KINDS = {"unused_symbol", "unreachable_statement", "unreferenced_module"}
+_DEEP_QUESTIONS = [
+    "Review dead-code leads against actual reads, initializer effects, entry points, callbacks, registries and public contracts; distinguish unreachable code from unresolved or intentional unused bindings.",
+    "Compare agent instructions, skills and canonical guidance with current code, manifest commands and their callers. Trace a documented rule or source-of-truth conflict to its development impact in this dimension; do not treat documentation as incidental assets.",
+]
 _QUESTIONS = {
     "security": [
         "Trace a relevant authority or dependency change through validation, callers, required checks and failure handling.",
@@ -143,7 +149,7 @@ def _family(kind):
 
 def _analysis_dimensions(kind):
     if kind == "documentation-analysis":
-        return {"documentation"}
+        return set(DIMENSIONS)
     if kind == "test-value-static-analysis":
         return {"testing", "maintainability"}
     if kind in {"static-analysis", "javascript-analysis", "source-analysis", "analyzer-analysis"}:
@@ -327,7 +333,7 @@ def _context(assessment):
             located = stats.get("signals", []) + stats.get("leads", [])
             if kind == "documentation-analysis":
                 located += [
-                    {**row, "dimensions": ["documentation"]}
+                    {**row, "dimensions": list(DIMENSIONS)}
                     for row in stats.get("maintenanceLeads", [])
                 ]
             for signal in located:
@@ -360,6 +366,31 @@ def _context(assessment):
                                     signal.get("context", {}).get("binding", "unestablished"),
                                 )
                             )
+        if kind in {"static-analysis", "javascript-analysis", "analyzer-analysis"}:
+            for candidate in stats.get("candidate_index", stats.get("candidates", [])):
+                if candidate.get("kind") not in _DEAD_CODE_KINDS:
+                    continue
+                for location in candidate.get("locations", [])[:8]:
+                    source = sources.get(location.get("path"))
+                    if source is None:
+                        continue
+                    identities = candidate.get("source_evidence_ids", [])
+                    digest = candidate.get("metrics", {}).get("source_digest")
+                    if (
+                        identities
+                        and source["id"] not in identities
+                        or (digest is not None and digest != source.get("digest"))
+                    ):
+                        continue
+                    signals["dead_code"].append(
+                        (
+                            source["id"],
+                            location,
+                            candidate["kind"],
+                            entry["id"],
+                            "review_lead_not_disuse_proof",
+                        )
+                    )
         if kind in {"static-analysis", "javascript-analysis"}:
             for edge in stats.get("topology", {}).get("edges", []):
                 if edge.get("source") not in sources or edge.get("target") not in sources:
@@ -475,6 +506,11 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
     review = review or {}
     sources, signals, edges = _context(assessment)
     by_id = {entry["id"]: entry for entry in sources.values()}
+    documentation_ids = {
+        entry["id"]
+        for entry in assessment.get("evidence", [])
+        if entry.get("kind") == "documentation-analysis"
+    }
     doc_roles = {
         row["path"]: row.get("roleHint")
         for entry in assessment.get("evidence", [])
@@ -534,12 +570,19 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
             ):
                 continue
             add(entry, "captured_context")
+            if profile == "deep" and is_agent_guidance(entry["path"]):
+                add(entry, "agent_guidance")
             if any(hint in entry["path"].lower() for hint in _PATH_HINTS[name]):
                 add(entry, "filename_navigation_hint")
         for identity, location, kind, analysis_id, binding in sorted(
-            signals[name], key=lambda row: (by_id[row[0]]["path"], row[1].get("line", 1), row[2])
+            signals[name] + (signals["dead_code"] if profile == "deep" else []),
+            key=lambda row: (by_id[row[0]]["path"], row[1].get("line", 1), row[2]),
         ):
             task = add(by_id[identity], "dimension_signal", location, kind)
+            if kind in _DEAD_CODE_KINDS:
+                add(by_id[identity], "dead_code_candidate")
+            elif analysis_id in documentation_ids:
+                add(by_id[identity], "documentation_drift")
             task.setdefault("analysis_evidence_ids", [])
             if analysis_id not in task["analysis_evidence_ids"]:
                 task["analysis_evidence_ids"].append(analysis_id)
@@ -593,6 +636,7 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
             canonical = PurePosixPath(task["path"]).stem.lower() in {
                 "readme",
                 "agents",
+                "claude",
                 "contributing",
                 "architecture",
                 "development",
@@ -605,6 +649,7 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
             }
             return (
                 _navigation_penalty(task["path"], doc_roles.get(task["path"])),
+                not (profile == "deep" and is_agent_guidance(task["path"])),
                 not canonical if task["kind"] == "documentation" else False,
                 task["role"] == "tooling" and task["kind"] != "documentation",
                 task["kind"] == "configuration",
@@ -639,6 +684,18 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
             if matches and len(chosen) < limit:
                 task = queues[matches[0]].popleft()
                 chosen[task["evidence_id"]] = task
+        if profile == "deep":
+            for reason in ("agent_guidance", "dead_code_candidate", "documentation_drift"):
+                task = next(
+                    (
+                        task
+                        for task in sorted(candidates.values(), key=rank)
+                        if reason in task["selection_reasons"]
+                    ),
+                    None,
+                )
+                if task and len(chosen) < limit:
+                    chosen[task["evidence_id"]] = task
         if name == "documentation":
             guidance = [
                 task
@@ -735,6 +792,7 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
             "dimension": name,
             "status": "inspection_required" if chosen else "missing_source",
             "questions": _QUESTIONS[name]
+            + (_DEEP_QUESTIONS if profile == "deep" else [])
             + [
                 "What favorable path or contrary evidence changes the estimate, and what important scope remains unexamined?"
             ],
@@ -757,6 +815,23 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
             or any(rating.get(key) in {None, "low"} for key in ("confidence", "burden_confidence")),
             "follow_up": follow_up,
         }
+        if profile == "deep":
+            packs[name]["required_checks"] = [
+                {
+                    "topic": topic,
+                    "status": inputs["providers"][provider]["collection_status"],
+                    "evidence_ids": inputs["providers"][provider]["evidence_ids"],
+                    "gaps": inputs["providers"][provider]["gaps"],
+                    "operation": "evidence_query",
+                    "view": "candidates" if provider == "dead_code" else "index",
+                    "kind": None if provider == "dead_code" else "documentation-analysis",
+                    "interpretation": "Required review input; collected evidence is not verified disuse, freshness, development impact or a score.",
+                }
+                for topic, provider in (
+                    ("dead_code", "dead_code"),
+                    ("documentation_drift", "documentation"),
+                )
+            ]
     return {
         "schema_version": 1,
         "version": VERSION,

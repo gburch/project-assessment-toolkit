@@ -97,11 +97,23 @@ The local app can scan a project, inspect evidence, load or import a cited JSON 
 
 Follow the [local workflow](docs/PROJECT_ASSESS.md#local-workflow) to fill a `review-template`, inspect `evidence` and `rubric`, and submit the review. The optional [assessment skill](.agents/skills/project-assess/SKILL.md) carries a request to "run PAT" through to a substantive inline scorecard, cited findings and improvement plan; scan counts and links alone are collection output. Choose goals explicitly; profiles are starting suggestions, not a prerequisite for the assessment.
 
-Deep reviews include dimension-specific inspection plans, richer documentation
-evidence and bounded local change history. Representative, corroborated and
+Deep scans include dead-code and documentation-drift checks, agent instructions,
+dimension-specific inspection plans and bounded local change history. They request
+Vulture and Joern automatically when their trusted runtimes are available; missing
+setup and bounded analysis remain explicit gaps. Documentation and skills are
+development inputs whose drift can affect several dimensions. Representative, corroborated and
 independently challenged workflows can support medium-confidence structural
 burden estimates without timing logs. Missing runtime proof stays explicit;
 collection and completed fields never assign confidence automatically.
+
+For Deep scans with Python and JS/TS syntax tools installed in PAT:
+
+```bash
+uv sync --locked --extra analysis --extra vulture
+uv run --locked --extra analysis --extra vulture pat --state-dir /path/outside/repos/pat-state scan /path/to/project --analysis-profile deep --brief
+```
+
+Configure [Joern separately](docs/PROJECT_ASSESS.md#optional-joern-analysis) for its contained call-graph analysis. Deep records an explicit gap when its trusted runtime is unavailable.
 
 Use `pat --state-dir STATE export-report ASSESSMENT_ID` to return nine SVG badges
 and an offline interactive report. Compare all eight dimensions on aligned
@@ -113,13 +125,13 @@ comparison works without WebGL.
 
 Export saved assessments as badges for your own README. See the [badge guide](docs/PROJECT_ASSESS.md#github-badges) for SVG, JSON, regeneration and the metadata made public by an export.
 
-## Optional tools and agents
+## Additional tools and agents
 
-- [Documentation tools](docs/PROJECT_ASSESS.md#documentation-evidence-and-navigation): `doc-value` and `doc-value-nav` inspect documentation and navigation evidence.
+- [Documentation tools](docs/PROJECT_ASSESS.md#documentation-evidence-and-navigation): Deep includes documentation/source-of-truth checks; `doc-value` and `doc-value-nav` add focused documentation and navigation inspection.
 - [Maturity and intended purpose](docs/PROJECT_ASSESS.md#project-maturity-and-intended-purpose): bundled skills classify current position and intended destination, then align ranked recommendations without changing numeric goals.
 - [Test-value tools](docs/PROJECT_ASSESS.md#test-value-evidence): static inventory and explicitly requested runtime test evidence. Scanning never runs tests automatically.
 - [JavaScript/TypeScript syntax analysis](docs/PROJECT_ASSESS.md#doctor-and-evolve): `uv sync --extra analysis --locked` installs optional Tree-sitter parsers in PAT's environment. It provides source leads, without type checking or executing the project.
-- [Optional unused-code analysis](docs/PROJECT_ASSESS.md#doctor-and-evolve): install the separate `vulture` extra and select `scan ROOT --analyzer vulture`. `pat analyzers` lists availability; Vulture runs only when selected.
+- [Dead-code analysis](docs/PROJECT_ASSESS.md#doctor-and-evolve): Deep requests Vulture and configured Joern automatically; standard scans can select `--analyzer`. Install the `vulture` extra in PAT and configure Joern separately. `pat analyzers` reports availability; scans never install tools.
 - [MCP and bundled skills](docs/PROJECT_ASSESS.md#agent-connection-and-limits): connect an agent to the same local service with explicit allowed roots. No cloud credentials or AI API key are required.
 
 The CLI is `pat`, the Python distribution is `pat-assess`, and the package is `project_assess`. The `project-assess` command alias and skill name remain available for compatibility. Read the [guide](docs/PROJECT_ASSESS.md) for evidence limits, source identity and local state.

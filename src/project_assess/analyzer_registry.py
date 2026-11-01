@@ -5,11 +5,13 @@ from __future__ import annotations
 from types import MappingProxyType
 
 from .joern_analysis import analyze_joern, joern_info, joern_limits
-from .vulture_analysis import analyze_vulture, vulture_info
+from .vulture_analysis import analyze_vulture, vulture_info, vulture_limits
 
 _BUILTINS = MappingProxyType(
     {"joern": (joern_info, analyze_joern), "vulture": (vulture_info, analyze_vulture)}
 )
+DEEP_ANALYZERS = ("joern", "vulture")
+SELECTION_VERSION = "1"
 
 
 def registered_analyzer_names():
@@ -26,14 +28,35 @@ def validate_analyzers(names):
     return tuple(sorted(names))
 
 
+def resolve_analyzers(names, analysis_profile):
+    """Deep requests fixed trusted providers; unavailable tools stay explicit gaps."""
+    requested = validate_analyzers(names)
+    if analysis_profile not in {"standard", "deep"}:
+        raise ValueError("Unknown analysis profile")
+    return (
+        tuple(sorted(set(requested) | set(DEEP_ANALYZERS)))
+        if analysis_profile == "deep"
+        else requested
+    )
+
+
 def list_analyzers():
-    """Native collection remains automatic; this list contains opt-in providers only."""
-    return [_BUILTINS[name][0]() for name in registered_analyzer_names()]
+    """Installation is optional; Deep requests these fixed providers automatically."""
+    return [
+        {**_BUILTINS[name][0](), "default_profiles": ["deep"] if name in DEEP_ANALYZERS else []}
+        for name in registered_analyzer_names()
+    ]
 
 
 def dedicated_phase_limits(name, analysis_profile):
-    """External Joern work has its own explicit budget after core collection."""
-    return joern_limits(analysis_profile) if name == "joern" else None
+    """Required Deep work cannot consume documentation or another provider's budget."""
+    if name == "joern":
+        return joern_limits(analysis_profile)
+    return (
+        vulture_limits(analysis_profile)
+        if name == "vulture" and analysis_profile == "deep"
+        else None
+    )
 
 
 def run_analyzer(

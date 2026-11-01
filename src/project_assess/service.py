@@ -1418,6 +1418,15 @@ class AssessmentService:
                 )
             elif view == "hotspots":
                 rows.extend({**row, **common} for row in stats.get("hotspots", []))
+            elif view == "coverage" and entry["kind"] == "documentation-analysis":
+                rows.append(
+                    {
+                        "coverage": stats.get("scope", {}),
+                        "drift_scope": stats.get("driftEvidence", {}).get("scope", {}),
+                        "gaps": stats.get("gaps", []),
+                        **common,
+                    }
+                )
             elif view == "coverage" and "coverage" in stats:
                 rows.append(
                     {
@@ -1478,6 +1487,19 @@ class AssessmentService:
                     for dependency in navigation["cross_area_dependencies"]
                 ]
         if view == "coverage" and kind is None:
+            if assessment["facts"].get("collection", {}).get("analysis_profile") == "deep":
+                providers = dimension_inputs(assessment)["providers"]
+                for provider, check in (
+                    ("dead_code", "dead_code"),
+                    ("documentation", "documentation_drift"),
+                ):
+                    rows.append(
+                        {
+                            "record_type": "required_deep_check",
+                            "check": check,
+                            **providers[provider],
+                        }
+                    )
             rows.extend({"record_type": "collection_gap", "gap": gap} for gap in assessment["gaps"])
         if view == "provenance":
             rows = [
