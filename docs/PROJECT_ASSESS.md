@@ -180,8 +180,11 @@ follow, collapsed until opened.
 **Level map** plots every dimension by burden and capability on one chart; scores
 that coincide share a numbered marker, and repeated clicks step through them.
 **What moved** is the optional Three.js view: each snapshot of the project, up to
-twelve, is one level map stacked back in time, with a path per dimension. Ratings
-from a different rubric, or snapshots without a review, appear as empty layers.
+twelve, is one level map stacked back in time, with a path per dimension. Layers
+are ordered by source time: the capture time of a worktree scan, or the commit
+date of a [Git backfill](#backfill-history-from-git). Ratings from a different
+rubric, or snapshots without a review, appear as empty layers; backfilled layers
+name their commit, and those reviewed later say "judged in hindsight".
 Presets show the latest snapshot, capability over time and burden over time; drag
 to orbit. 3D does not start until requested, and the other views work without
 WebGL.
@@ -199,6 +202,7 @@ uv sync --locked
 uv run --locked pat info
 uv run --locked pat analyzers
 uv run --locked pat --state-dir /path/outside/repos/assessment-state scan /path/to/project --brief
+uv run --locked pat --state-dir /path/outside/repos/assessment-state backfill /path/to/project --months 6
 uv run --locked pat --state-dir /path/outside/repos/assessment-state list
 uv run --locked pat --state-dir /path/outside/repos/assessment-state report ASSESSMENT_ID --brief
 uv run --locked pat --state-dir /path/outside/repos/assessment-state evidence-query ASSESSMENT_ID --view areas --limit 20
@@ -261,6 +265,58 @@ Use the inventory to improve the evidence, not to automatically raise a confiden
 label or change a score.
 
 Challenge packets select a deterministic mix of trace citations, production areas and supporting evidence, with selection reasons and omissions. Whole-project capture and dynamic graph limits remain explicit.
+
+## Backfill history from Git
+
+A project scanned once has one layer in **What moved**. `backfill` adds earlier
+commits from the project's local Git history, so the stack has something to compare
+from the first day. Choose one selection, at most twelve commits:
+
+```bash
+uv run --locked pat --state-dir STATE backfill /path/to/project --months 6
+uv run --locked pat --state-dir STATE backfill /path/to/project --tags 4
+uv run --locked pat --state-dir STATE backfill /path/to/project --revision v1.2.0 --revision 3f9c2ab
+```
+
+- `--months N` takes the last first-parent commit before each of the latest N
+  month starts, i.e. each month's end state (committer dates; quiet months repeat
+  a commit and are merged).
+- `--tags N` takes the N newest tags by creation date; tags that do not name a
+  commit are skipped.
+- `--revision NAME` resolves plain commit IDs, tags or branch names. Option-like
+  names and `REV:PATH` lookups are rejected.
+
+MCP: `backfill_history(root, months=…, tags=…, revisions=[…])`. The local
+workspace has a **Backfill history from Git** form under **Scan a project** for
+the selected project; it uses the chosen analysis depth.
+
+Backfill reads Git objects only (`rev-parse`, `log`, `for-each-ref`, `ls-tree`
+and raw `cat-file --batch`), under the same hardened Git configuration as scans.
+It never checks out, runs filters, textconv, hooks or project code, or writes the
+assessed repository. Each blob's bytes are checked against its object ID, then
+written to `STATE/git-snapshots/PROJECT_ID/COMMIT/` (owner-only permissions) and
+collected exactly like a worktree scan of that tree. Symlinks, submodules, unsafe
+or colliding paths, credential-named files, dependency/build directories and
+blobs over 8 MiB are not copied; each omission is counted under
+`source.origin.extraction` and named in the snapshot's gaps. A snapshot holds at
+most 20,000 files and 256 MiB.
+
+Each backfilled snapshot records its real `source.revision`, commit tree,
+`committed_at` and UTC `as_of`, and how it was selected, alongside the usual
+`manifest_digest` and evidence digests. Untracked files, supplied reports and
+runtime state at that time are unknown, and Deep change history reads first-parent
+history from that commit back. Re-running a selection reuses snapshots already
+saved for the same commit and analysis depth.
+
+Backfills carry facts only: their ratings stay unknown, never zero, until
+reviewed. A review of a backfilled snapshot uses the normal template and
+`review` command; PAT stamps it with `hindsight` (the commit time, the judgment
+time and a note), and **What moved** labels that layer "judged in hindsight".
+Source context and finding citations for a backfill read its private tree.
+Backfills never replace the latest worktree scan as the project's current
+snapshot, so goals, progress and the stale-review check still follow live scans.
+Remove `STATE/git-snapshots` only together with the snapshots that refer to it;
+without the tree, source context for those snapshots is unavailable.
 
 ## GitHub badges
 
@@ -504,7 +560,7 @@ uv --directory /path/to/project-assessment-toolkit run --extra mcp --locked pat 
 
 Repeat `--allowed-root ROOT` to admit additional local source roots. This guide does not install host configuration or enable remote access. The core runtime depends on `jsonschema`, `packaging` and `PyYAML`; the optional `mcp` extra adds the local stdio adapter. No cloud credentials or AI API key are required.
 
-Agents can begin with `get_tool_info` and `start_assessment`, or `get_report(assessment_id, brief=True)` for a saved snapshot, then use `query_evidence` for bounded views and `inspect_source_context` for digest-matched source ranges. Add `--extra analysis` to the MCP launch when optional JavaScript parsers are wanted. The same captured evidence and allowed-root checks apply across interfaces.
+Agents can begin with `get_tool_info` and `start_assessment`, add earlier commits with `backfill_history`, or `get_report(assessment_id, brief=True)` for a saved snapshot, then use `query_evidence` for bounded views and `inspect_source_context` for digest-matched source ranges. Add `--extra analysis` to the MCP launch when optional JavaScript parsers are wanted. The same captured evidence and allowed-root checks apply across interfaces.
 
 `info` / `get_tool_info` lists the selected build's bundled instruction paths and
 hashes in `available_instructions`. Load the matching assessment skill when local
@@ -515,7 +571,7 @@ Assessment reads source and explicitly supplied reports, and saves its own recor
 
 ## Local state and updates
 
-The selected state directory contains `project-assess.sqlite3`, including captured source excerpts, reviews and goals. Keep it and its backups private and outside assessed repositories.
+The selected state directory contains `project-assess.sqlite3`, including captured source excerpts, reviews and goals, and `git-snapshots/` with the files extracted for Git backfills. Keep it and its backups private and outside assessed repositories.
 
 Exports can also contain source excerpts and local paths; redaction does not make them safe for public sharing. Use synthetic examples in issues and follow [SECURITY.md](https://github.com/gburch/project-assessment-toolkit/blob/main/SECURITY.md) for private vulnerability reports.
 

@@ -296,6 +296,7 @@ function updateControls() {
   for (const input of $("goal-controls").querySelectorAll("input")) input.disabled = busy;
   $("save").disabled = busy || !state.dirty || missingTargets().length > 0;
   $("rescan").disabled = busy;
+  for (const id of ["backfill-mode", "backfill-count", "backfill-revisions", "backfill"]) $(id).disabled = busy || !state.token;
   for (const id of ["review-mode", "review-load", "review-file", "review-json"]) $(id).disabled = busy || state.reviewLoading;
   $("review-submit").disabled = busy || state.reviewLoading || !state.reviewDirty ||
     state.reviewAssessment !== state.report?.assessment.id || !$("review-json").value.trim();
@@ -783,7 +784,7 @@ function renderEvidence(assessment) {
 function renderHistory(history) {
   $("history").replaceChildren();
   const events = [
-    ...history.assessments.map((record) => ({ ...record, type: "Source scan", assessment_id: record.id })),
+    ...history.assessments.map((record) => ({ ...record, type: record.origin === "git-commit" ? `Git backfill · source as of ${(record.as_of || "").slice(0, 10)}` : "Source scan", assessment_id: record.id })),
     ...history.reviews.map((record) => ({ ...record, type: "Review · evidence update" })),
     ...history.goals.map((record) => ({ ...record, type: "Goal change · new baseline", message: `Goal version ${record.revision}. No engineering progress recorded.` }))
   ].sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
@@ -823,7 +824,7 @@ async function loadReport(id) {
     $("empty").hidden = true;
     $("project-name").textContent = state.project.name;
     const source = result.assessment.source;
-    $("source").textContent = `${source.root} · ${source.revision || "Unversioned source"}${source.dirty ? " · modified worktree" : ""}`;
+    $("source").textContent = `${source.root} · ${source.revision || "Unversioned source"}${source.dirty ? " · modified worktree" : ""}${source.origin?.kind === "git-commit" ? ` · Git backfill committed ${source.origin.committed_at}` : ""}`;
     const collection = result.assessment.facts?.collection || {};
     $("analysis-profile").value = collection.analysis_profile || "standard";
     for (const input of $("optional-analyzers").querySelectorAll("input[data-analyzer]")) input.checked = (collection.analyzers || []).includes(input.dataset.analyzer);
@@ -964,6 +965,44 @@ $("rescan").addEventListener("click", async () => {
     project.latest_assessment_id = snapshot.id;
     if (load !== state.load || state.project?.id !== projectId) return;
     await loadReport(snapshot.id);
+  } catch (error) {
+    if (load === state.load) message(error.message, true);
+  } finally {
+    if (load === state.load) {
+      state.saving = false;
+      updateControls();
+    }
+  }
+});
+$("backfill-mode").addEventListener("change", () => {
+  const listed = $("backfill-mode").value === "revisions";
+  $("backfill-count-label").hidden = listed;
+  $("backfill-revisions-label").hidden = !listed;
+});
+$("backfill-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.project || !state.report || state.loading || state.saving || !allowDiscard()) return;
+  const mode = $("backfill-mode").value;
+  const selection = mode === "revisions"
+    ? { revisions: $("backfill-revisions").value.split(/[\s,]+/).filter(Boolean) }
+    : { [mode]: Number($("backfill-count").value) };
+  if (mode === "revisions" && !selection.revisions.length) return message("List at least one commit, tag or branch name.", true);
+  const projectId = state.project.id;
+  const currentId = state.report.assessment.id;
+  const load = state.load;
+  state.saving = true;
+  updateControls();
+  message("Reading earlier commits from local Git objects…");
+  try {
+    const result = await api("/api/backfill", { project_id: projectId, analysis_profile: $("analysis-profile").value, ...selection });
+    const count = (status) => result.snapshots.filter((row) => row.status === status).length;
+    const parts = [`Captured ${count("captured")} earlier commit${count("captured") === 1 ? "" : "s"}`];
+    if (count("existing")) parts.push(`${count("existing")} already saved`);
+    if (count("unavailable")) parts.push(`${count("unavailable")} unavailable`);
+    const gaps = [...result.gaps, ...result.snapshots.flatMap((row) => row.status === "unavailable" ? row.gaps || [] : [])];
+    if (load !== state.load || state.project?.id !== projectId) return;
+    await loadReport(currentId);
+    message(`${parts.join(", ")}. Their ratings stay unknown until reviewed.${gaps.length ? ` ${gaps.slice(0, 2).join(". ")}.` : ""}`);
   } catch (error) {
     if (load === state.load) message(error.message, true);
   } finally {

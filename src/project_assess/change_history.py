@@ -105,8 +105,12 @@ def collect_change_history(
     *,
     max_commits=MAX_COMMITS,
     timeout_seconds=5,
+    tip="HEAD",
 ):
-    """Use the collector's trusted Git prefix/environment without loading project config."""
+    """Use the collector's trusted Git prefix/environment without loading project config.
+
+    ``tip`` is HEAD for worktree scans, or the captured revision for Git backfills.
+    """
     if type(max_commits) is not int or not 1 <= max_commits <= MAX_COMMITS:
         raise ValueError("Invalid change history commit limit")
     if type(timeout_seconds) not in {int, float} or not 0 < timeout_seconds <= 5:
@@ -136,6 +140,10 @@ def collect_change_history(
         "gaps": [],
         "caveat": _CAVEAT,
     }
+    if tip not in {"HEAD", revision}:
+        raise ValueError("Change history starts at HEAD or the captured revision")
+    if tip != "HEAD":
+        result["coverage"]["selection"] = "local_first_parent_revision"
     if not isinstance(revision, str) or not _OBJECT_ID.fullmatch(revision):
         result["gaps"].append("No captured Git revision; historical co-change remains unknown")
         return result
@@ -164,7 +172,7 @@ def collect_change_history(
                 "--format=%x00%H%x00%cI%x00%P%x00",
                 "--name-only",
                 f"--max-count={max_commits + 1}",
-                "HEAD",
+                tip,
                 "--",
             ],
             deadline,

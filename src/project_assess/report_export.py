@@ -145,7 +145,7 @@ def _timeline(report, rows):
     """Snapshots oldest first; the shown one is always last and unknown never becomes zero."""
     assessment = report["assessment"]
 
-    def entry(identity, created, revision, reviewed, scores):
+    def entry(identity, created, revision, reviewed, scores, origin=None, hindsight=False):
         revision = (
             revision
             if isinstance(revision, str) and re.fullmatch(r"[0-9a-fA-F]{7,64}", revision)
@@ -155,14 +155,16 @@ def _timeline(report, rows):
             "assessment_id": identity,
             "date": created[:10] if isinstance(created, str) else None,
             "revision": revision[:7].lower() if revision else None,
+            "origin": "git-commit" if origin == "git-commit" else "scan",
             "reviewed": reviewed,
+            "hindsight": reviewed and hindsight,
             "scores": scores,
         }
 
     earlier = [
         entry(
             item.get("assessment_id"),
-            item.get("created_at"),
+            item.get("as_of") or item.get("created_at"),
             item.get("revision"),
             item.get("reviewed") is True,
             {
@@ -172,16 +174,21 @@ def _timeline(report, rows):
                 ]
                 for dimension in DIMENSIONS
             },
+            item.get("origin"),
+            item.get("hindsight") is True,
         )
         for item in report.get("timeline") or []
         if isinstance(item, dict) and item.get("assessment_id") != assessment["id"]
     ]
+    origin = assessment.get("source", {}).get("origin") or {}
     current = entry(
         assessment["id"],
-        assessment.get("created_at"),
+        origin.get("as_of") or assessment.get("created_at"),
         assessment.get("source", {}).get("revision"),
         report.get("review") is not None,
         {row["id"]: [row["capability"], row["burden"]] for row in rows},
+        origin.get("kind"),
+        "hindsight" in (report.get("review") or {}),
     )
     return [*earlier[-11:], current]
 

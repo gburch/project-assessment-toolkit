@@ -19,6 +19,7 @@ class Service:
         self.revision = 0
         self.scans = []
         self.scan_options = []
+        self.backfills = []
         self.calls = []
         self.targets = None
         self.history_calls = []
@@ -66,6 +67,10 @@ class Service:
         self.scans.append(root)
         self.scan_options.append(options)
         return {"id": "a2"}
+
+    def backfill(self, root, **selection):
+        self.backfills.append((root, selection))
+        return {"project_id": "p1", "snapshots": [], "gaps": []}
 
     def review_template(self, assessment_id, mode=None):
         self.get_report(assessment_id)
@@ -172,6 +177,7 @@ def test_session_rejects_rebinding_and_cross_site_reads(running_report, headers)
     [
         ("/api/targets", {"project_id": "p1", "targets": {}, "expected_revision": 0}),
         ("/api/scan", {"root": "/registered/source"}),
+        ("/api/backfill", {"project_id": "p1", "months": 3}),
         ("/api/review", {"assessment_id": "a1", "review": {}}),
         ("/api/challenge-template", {"assessment_id": "a1", "review": {}}),
     ],
@@ -189,6 +195,25 @@ def test_writes_require_exact_origin_and_session_token(running_report, headers, 
     service, server = running_report
     assert request(server, "POST", path, document, headers)[0] == 403
     assert service.calls == service.scans == service.reviews == service.challenges == []
+    assert service.backfills == []
+
+
+def test_backfill_targets_only_registered_projects(running_report):
+    service, server = running_report
+    assert request(server, "POST", "/api/backfill", {"root": "/elsewhere", "months": 3})[0] == 400
+    assert (
+        request(server, "POST", "/api/backfill", {"project_id": "p1", "root": "/x", "months": 3})[0]
+        == 400
+    )
+    assert request(server, "POST", "/api/backfill", {"project_id": "absent", "tags": 2})[0] == 404
+    document = {"project_id": "p1", "revisions": ["v1"], "analysis_profile": "deep"}
+    assert request(server, "POST", "/api/backfill", document)[0] == 200
+    assert service.backfills == [
+        (
+            "/registered/source",
+            {"months": None, "tags": None, "revisions": ["v1"], "analysis_profile": "deep"},
+        )
+    ]
 
 
 def test_target_write_and_stale_revision_conflict(running_report):
@@ -752,7 +777,12 @@ def test_real_history_response_omits_snapshot_bodies_and_reports_retain_selected
             history = json.loads(body)
             assert history == {
                 "assessments": [
-                    {"id": snapshot["id"], "created_at": snapshot["created_at"]}
+                    {
+                        "id": snapshot["id"],
+                        "created_at": snapshot["created_at"],
+                        "as_of": snapshot["created_at"],
+                        "origin": "scan",
+                    }
                     for snapshot in (first, second)
                 ],
                 "reviews": [{key: review[key] for key in ("id", "assessment_id", "created_at")}],

@@ -906,12 +906,19 @@ def _git_inventory(root):
 
 
 def collect(
-    root: Path, reports: list[Path] | None = None, *, analysis_profile="standard", analyzers=None
+    root: Path,
+    reports: list[Path] | None = None,
+    *,
+    analysis_profile="standard",
+    analyzers=None,
+    git_snapshot=None,
 ) -> dict:
     """Collect facts without running target code or changing target files.
 
     ``complete`` means collection finished within its declared scope. It does not
     certify runtime behavior; excluded and unsupported inputs remain visible gaps.
+    ``git_snapshot`` ({revision, paths, repository}) collects a private tree that
+    was extracted from committed objects; Git is then read only from ``repository``.
     """
     from .test_value import static as static_tool
 
@@ -1015,8 +1022,13 @@ def collect(
     complete, supported_text_complete, assets_complete = True, True, True
     python_source_stable = True
     deadline_hit, visited, total, asset_total = False, 0, 0, 0
-    revision, dirty = _git(root)
-    selected, selection_mode, selection_gap, selection_failed = _git_inventory(root)
+    if git_snapshot is None:
+        revision, dirty = _git(root)
+        selected, selection_mode, selection_gap, selection_failed = _git_inventory(root)
+    else:
+        revision, dirty = git_snapshot["revision"], None
+        selected, selection_mode, selection_failed = set(git_snapshot["paths"]), "git-commit", False
+        selection_gap = "Only paths committed at this revision are selected; untracked files of that time are unknown"
     if selection_gap:
         gaps.append(selection_gap)
     complete = not selection_failed
@@ -1848,7 +1860,7 @@ def collect(
         else:
             for key, value in stats.items():
                 previous[key] = previous.get(key, 0) + value
-    end_revision, end_dirty = _git(root)
+    end_revision, end_dirty = _git(root) if git_snapshot is None else (revision, dirty)
     if (revision, dirty) != (end_revision, end_dirty):
         gaps.append("Git identity changed during collection")
         complete = supported_text_complete = assets_complete = False
@@ -1979,7 +1991,7 @@ def collect(
         gaps.append(
             "Supplied reports have no independently verified source identity; overlapping reports may duplicate cases or coverage"
         )
-    if revision is not None:
+    if revision is not None and git_snapshot is None:
         gaps.append(
             "Git clean/dirty status is unknown; the content manifest identifies assessed worktree bytes"
         )
@@ -2015,10 +2027,16 @@ def collect(
     if budget.name == "deep":
         from .change_history import collect_change_history
 
-        prefix, environment = _git_configuration(root)
+        prefix, environment = _git_configuration(
+            Path(git_snapshot["repository"]) if git_snapshot else root
+        )
         history = _redact_data(
             collect_change_history(
-                prefix, environment, {entry["path"] for entry in manifest}, revision
+                prefix,
+                environment,
+                {entry["path"] for entry in manifest},
+                revision,
+                tip=revision if git_snapshot else "HEAD",
             )
         )
         history_id = add_evidence(

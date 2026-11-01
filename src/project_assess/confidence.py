@@ -463,7 +463,7 @@ def _excerpt_digest(excerpt):
     return hashlib.sha256(excerpt.encode()).hexdigest()
 
 
-def validate_finding_support(assessment, review):
+def validate_finding_support(assessment, review, *, root=None):
     """Validate bounded authored citations and return server-owned receipts."""
     entries = {entry["id"]: entry for entry in assessment["evidence"]}
     findings = review.get("findings", [])
@@ -485,7 +485,7 @@ def validate_finding_support(assessment, review):
             if citation["end_line"] - citation["line"] >= 80:
                 raise ValueError("A finding citation may span at most 80 lines")
             context = read_context(
-                Path(assessment["source"]["root"]),
+                Path(root or assessment["source"]["root"]),
                 entry,
                 line=citation["line"],
                 end_line=citation["end_line"],

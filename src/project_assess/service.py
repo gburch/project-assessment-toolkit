@@ -7,6 +7,7 @@ import html
 import json
 import os
 import sqlite3
+import subprocess
 import time
 import uuid
 from contextlib import contextmanager
@@ -47,6 +48,25 @@ def canonical(value):
 
 def now():
     return datetime.now(UTC).isoformat()
+
+
+# Backfilled snapshots sort by commit time; worktree scans by capture time.
+_AS_OF = "COALESCE(json_extract(data,'$.source.origin.as_of'),json_extract(data,'$.created_at'))"
+_BACKFILLED = "json_extract(data,'$.source.origin.kind')='git-commit'"
+HINDSIGHT_NOTE = (
+    "Judged in hindsight from committed source; knowledge from after this commit may shape "
+    "these ratings."
+)
+
+
+def _backfilled(assessment):
+    return (assessment.get("source", {}).get("origin") or {}).get("kind") == "git-commit"
+
+
+def _as_of(assessment):
+    return (assessment.get("source", {}).get("origin") or {}).get("as_of") or assessment.get(
+        "created_at"
+    )
 
 
 def _id(prefix):
@@ -957,6 +977,115 @@ class AssessmentService:
             )
         return snapshot
 
+    def backfill(
+        self,
+        root,
+        *,
+        months=None,
+        tags=None,
+        revisions=None,
+        analysis_profile="standard",
+        analyzers=None,
+    ):
+        """Save facts-only snapshots of earlier commits read from local Git objects.
+
+        Nothing is checked out or written in the project. Each commit's blobs are
+        verified and extracted beneath state, then collected like a worktree scan.
+        Ratings stay unknown until a review, which is then labelled as hindsight.
+        """
+        from .analyzer_registry import validate_analyzers
+        from .budgets import get_budget
+        from .git_backfill import CAVEAT, VERSION, replace_snapshot, select_commits
+
+        root = self._root(root)
+        get_budget(analysis_profile)
+        analyzers = validate_analyzers(analyzers)
+        plan = select_commits(root, months=months, tags=tags, revisions=revisions)
+        project_id = "p_" + hashlib.sha256(str(root).encode()).hexdigest()[:24]
+        with self._db(write=True) as db:
+            db.execute(
+                "INSERT OR IGNORE INTO projects VALUES (?,?,?)", (project_id, str(root), root.name)
+            )
+        results = []
+        for commit in plan["commits"]:
+            row = {key: commit[key] for key in ("revision", "committed_at", "selected_by")}
+            with self._db() as db:
+                existing = db.execute(
+                    f"SELECT id FROM assessments WHERE project_id=? AND {_BACKFILLED} AND "
+                    "json_extract(data,'$.source.revision')=? AND "
+                    "json_extract(data,'$.facts.collection.analysis_profile')=? "
+                    "ORDER BY seq DESC LIMIT 1",
+                    (project_id, commit["revision"], analysis_profile),
+                ).fetchone()
+            if existing:
+                results.append({**row, "status": "existing", "assessment_id": existing[0]})
+                continue
+            started = time.monotonic()
+            try:
+                directory, extraction = replace_snapshot(self.state_dir, project_id, commit, root)
+                snapshot = collect(
+                    directory,
+                    analysis_profile=analysis_profile,
+                    analyzers=analyzers,
+                    git_snapshot={
+                        "revision": commit["revision"],
+                        "paths": extraction["paths"],
+                        "repository": root,
+                    },
+                )
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                gap = str(error) if isinstance(error, ValueError) else "Git objects were unreadable"
+                results.append({**row, "status": "unavailable", "gaps": [gap]})
+                continue
+            snapshot["collection"] = {"seconds": round(time.monotonic() - started, 4)}
+            snapshot["source"] = {
+                **snapshot["source"],
+                "root": str(root),
+                "origin": {
+                    "kind": "git-commit",
+                    "version": VERSION,
+                    "tree": commit["tree"],
+                    "committed_at": commit["committed_at"],
+                    "as_of": commit["as_of"],
+                    "selected_by": commit["selected_by"],
+                    "extraction": extraction["coverage"],
+                    "caveat": CAVEAT,
+                },
+            }
+            snapshot["gaps"] = sorted({*snapshot["gaps"], *extraction["gaps"], CAVEAT})
+            snapshot.update(id=_id("a_"), project_id=project_id, created_at=now())
+            with self._db(write=True) as db:
+                db.execute(
+                    "INSERT INTO assessments(id,project_id,data) VALUES (?,?,?)",
+                    (snapshot["id"], project_id, canonical(snapshot)),
+                )
+            results.append(
+                {
+                    **row,
+                    "status": "captured",
+                    "assessment_id": snapshot["id"],
+                    "complete": snapshot["complete"],
+                    "gaps": extraction["gaps"],
+                }
+            )
+        return {
+            "project_id": project_id,
+            "selection": plan["selection"],
+            "snapshots": results,
+            "gaps": plan["gaps"],
+            "caveat": CAVEAT,
+        }
+
+    def _source_root(self, assessment):
+        """Backfills read their private extracted tree; scans read the project."""
+        if _backfilled(assessment):
+            from .git_backfill import snapshot_directory
+
+            return snapshot_directory(
+                self.state_dir, assessment["project_id"], assessment["source"]["revision"]
+            )
+        return Path(assessment["source"]["root"])
+
     def _assessment(self, db, assessment_id, *, missing_ok=False):
         row = db.execute("SELECT data FROM assessments WHERE id=?", (assessment_id,)).fetchone()
         if not row:
@@ -986,8 +1115,10 @@ class AssessmentService:
 
     @staticmethod
     def _latest(db, project_id):
+        """The newest worktree scan; backfilled history never displaces it."""
         row = db.execute(
-            "SELECT data FROM assessments WHERE project_id=? ORDER BY seq DESC LIMIT 1",
+            f"SELECT data FROM assessments WHERE project_id=? "
+            f"ORDER BY COALESCE({_BACKFILLED},0), {_AS_OF} DESC, seq DESC LIMIT 1",
             (project_id,),
         ).fetchone()
         return json.loads(row[0]) if row else None
@@ -1001,14 +1132,19 @@ class AssessmentService:
         return json.loads(row[0]) if row else None
 
     def _timeline(self, db, assessment, limit=12):
-        """Recent snapshots up to this one, oldest first, with their latest saved ratings.
+        """Recent snapshots up to this one by source time, oldest first, with their
+        latest saved ratings. Backfilled commits sort by commit date.
 
         Ratings from another rubric version are withheld rather than compared.
         """
+        (seq,) = db.execute(
+            "SELECT seq FROM assessments WHERE id=?", (assessment["id"],)
+        ).fetchone()
+        as_of = _as_of(assessment)
         rows = db.execute(
-            "SELECT data FROM assessments WHERE project_id=? AND "
-            "seq<=(SELECT seq FROM assessments WHERE id=?) ORDER BY seq DESC LIMIT ?",
-            (assessment["project_id"], assessment["id"], limit),
+            f"SELECT data FROM assessments WHERE project_id=? AND "
+            f"({_AS_OF}<? OR ({_AS_OF}=? AND seq<=?)) ORDER BY {_AS_OF} DESC, seq DESC LIMIT ?",
+            (assessment["project_id"], as_of, as_of, seq, limit),
         ).fetchall()
         timeline = []
         for (data,) in reversed(rows):
@@ -1026,8 +1162,11 @@ class AssessmentService:
                 {
                     "assessment_id": snapshot["id"],
                     "created_at": snapshot.get("created_at"),
+                    "as_of": _as_of(snapshot),
+                    "origin": "git-commit" if _backfilled(snapshot) else "scan",
                     "revision": snapshot.get("source", {}).get("revision"),
                     "reviewed": comparable,
+                    "hindsight": comparable and "hindsight" in review,
                     "ratings": {
                         dimension: {
                             axis: ratings.get(dimension, {}).get(axis)
@@ -1692,7 +1831,7 @@ class AssessmentService:
             "assessment_id": assessment_id,
             "source": assessment["source"],
             **read_context(
-                Path(assessment["source"]["root"]),
+                self._source_root(assessment),
                 entry,
                 line=line,
                 end_line=end_line,
@@ -2184,7 +2323,9 @@ class AssessmentService:
                 cites(rating["evidence_ids"])
         for finding in review["findings"]:
             cites(finding["evidence_ids"])
-        support_verification = validate_finding_support(assessment, review)
+        support_verification = validate_finding_support(
+            assessment, review, root=self._source_root(assessment)
+        )
         _validate_planning(review, evidence_ids)
         method = review.get("methodology")
         if method:
@@ -2330,7 +2471,10 @@ class AssessmentService:
         """Prepare a bounded, score-free handoff; the caller runs a separate reviewer."""
         with self._db() as db:
             assessment = self._assessment(db, assessment_id)
-            if self._latest(db, assessment["project_id"])["id"] != assessment_id:
+            if (
+                not _backfilled(assessment)
+                and self._latest(db, assessment["project_id"])["id"] != assessment_id
+            ):
                 raise ConflictError("Assessment is stale; challenge the latest snapshot")
             self._validate_review_document(db, assessment, review, final=False)
             goals = self._goals(db, assessment["project_id"])
@@ -2426,7 +2570,11 @@ class AssessmentService:
             replay = self._replay(db, request_id, "review", review)
             if replay:
                 return replay
-            if self._latest(db, assessment["project_id"])["id"] != assessment_id:
+            # Backfilled history is reviewable at any time, always as hindsight.
+            if (
+                not _backfilled(assessment)
+                and self._latest(db, assessment["project_id"])["id"] != assessment_id
+            ):
                 raise ConflictError("Assessment is stale; review the latest snapshot")
             support_verification = self._validate_review_document(db, assessment, review)
             result = {
@@ -2437,6 +2585,12 @@ class AssessmentService:
                 "provenance": "agent_judgment",
             }
             result["ratings"] = _normalized_ratings(review["ratings"])
+            if _backfilled(assessment):
+                result["hindsight"] = {
+                    "source_as_of": assessment["source"]["origin"]["as_of"],
+                    "judged_at": result["created_at"],
+                    "note": HINDSIGHT_NOTE,
+                }
             if support_verification["findings"]:
                 result["support_verification"] = support_verification
             db.execute(
@@ -2696,7 +2850,15 @@ class AssessmentService:
                 # Authorize every snapshot before exposing even its metadata.
                 # CLI/MCP callers retain full history for evidence review.
                 return {
-                    "assessments": [{k: a[k] for k in ("id", "created_at")} for a in assessments],
+                    "assessments": [
+                        {
+                            "id": a["id"],
+                            "created_at": a["created_at"],
+                            "as_of": _as_of(a),
+                            "origin": "git-commit" if _backfilled(a) else "scan",
+                        }
+                        for a in assessments
+                    ],
                     "reviews": [
                         {k: r[k] for k in ("id", "assessment_id", "created_at")} for r in reviews
                     ],

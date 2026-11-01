@@ -303,6 +303,12 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
     segment.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), to.clone().sub(from).normalize());
     graphics.marks.add(segment);
   }
+  function layerLabel(snapshot) {
+    const parts = [snapshot.date || "Date unknown"];
+    if (snapshot.origin === "git-commit") parts.push(snapshot.revision ? `commit ${snapshot.revision}` : "from Git");
+    parts.push(!snapshot.reviewed ? "not reviewed" : snapshot.hindsight ? "judged in hindsight" : "");
+    return parts.filter(Boolean).join(" · ");
+  }
   function rebuild() {
     if (!graphics) return;
     clearMarks();
@@ -327,8 +333,7 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
         marks.add(zone);
         if (current) line([new THREE.Vector3(left, 5, z), new THREE.Vector3(left, bottom, z), new THREE.Vector3(h, bottom, z)], materials.target);
       }
-      const date = snapshot.date || "Date unknown";
-      label(snapshot.reviewed ? date : `${date} · not reviewed`, new THREE.Vector3(-h + 0.6, 5.35, z), current ? "layer-current" : "layer");
+      label(layerLabel(snapshot), new THREE.Vector3(-h + 0.6, 5.35, z), current ? "layer-current" : "layer");
     });
     label("heavy", new THREE.Vector3(-2.2, -0.35, 0), "axis");
     label("light", new THREE.Vector3(2.2, -0.35, 0), "axis");
@@ -443,7 +448,8 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
   function stageStatus() {
     const missing = dimensions.length - rows().length;
     const parts = [];
-    if (timeline.length < 2) parts.push("One scan so far; earlier scans stack behind it.");
+    if (timeline.length < 2) parts.push("One scan so far; earlier scans or Git backfills stack behind it.");
+    else if (timeline.some((snapshot) => !snapshot.reviewed)) parts.push("Unreviewed layers have no positions; their scores stay unknown.");
     if (missing) parts.push(`${missing} unknown ${missing === 1 ? "score is" : "scores are"} not positioned at zero.`);
     return parts.join(" ");
   }

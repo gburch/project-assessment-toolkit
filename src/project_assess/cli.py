@@ -49,6 +49,23 @@ def parser():
         default=[],
         help="Import bounded JUnit, coverage, test-value, observation, burden-context, Ruff JSON or SARIF evidence",
     )
+    backfill = commands.add_parser(
+        "backfill",
+        help="Capture facts-only snapshots of earlier commits from local Git objects",
+    )
+    backfill.add_argument("root")
+    selection = backfill.add_mutually_exclusive_group(required=True)
+    selection.add_argument(
+        "--months", type=int, help="Month-end first-parent commits for the last N months (1..12)"
+    )
+    selection.add_argument("--tags", type=int, help="The newest N tags (1..12)")
+    selection.add_argument(
+        "--revision",
+        dest="revisions",
+        action="append",
+        help="An explicit commit, tag or branch name; repeat for up to 12",
+    )
+    backfill.add_argument("--analysis-profile", choices=("standard", "deep"), default="standard")
     commands.add_parser("list")
     commands.add_parser("rubric")
     for name in (
@@ -183,9 +200,9 @@ def main(argv=None):
     try:
         from .service import AssessmentService, markdown_report
 
-        if args.command == "scan" and Path(args.state_dir).expanduser().resolve().is_relative_to(
-            Path(args.root).expanduser().resolve()
-        ):
+        if args.command in {"scan", "backfill"} and Path(
+            args.state_dir
+        ).expanduser().resolve().is_relative_to(Path(args.root).expanduser().resolve()):
             raise ValueError("State directory must be outside assessed projects")
         service = AssessmentService(args.state_dir, getattr(args, "allowed_root", None))
         if args.command == "mcp":
@@ -207,6 +224,14 @@ def main(argv=None):
             )
             if args.brief:
                 output = service.overview(output["id"])
+        elif args.command == "backfill":
+            output = service.backfill(
+                args.root,
+                months=args.months,
+                tags=args.tags,
+                revisions=args.revisions,
+                analysis_profile=args.analysis_profile,
+            )
         elif args.command == "list":
             output = service.list_projects()
         elif args.command == "rubric":
