@@ -26,6 +26,46 @@ scope/readiness, distinguish owner-stated goals from documented or inferred
 ambitions, and rank the work that fits that destination. A dependable personal
 utility can be complete; commercial or platform scope is not automatically better.
 
+## What a report looks like
+
+Explore capability, upkeep burden and selected goals together, then inspect the
+evidence and ranked improvement plan. **This preview uses synthetic data, not an
+assessment of a real project.** Click either screenshot to view it at full size.
+
+<p align="center">
+  <a href=".github/assets/report-overview.png"><img src=".github/assets/report-overview.png" width="1120" alt="PAT example report: nine badges, interactive 3D capability and burden map, all eight dimension scores, and testing detail showing capability 4/5 with burden 4/5 against a burden ceiling of 2/5."></a>
+</p>
+
+The example is a **working personal application** whose owner wants dependable
+daily workflows with low upkeep. Its priorities are to simplify coupled workflow
+changes, shorten test feedback and reduce repeated security ceremony while
+preserving useful protections. Platform features can wait.
+
+| Example area | Capability | Burden | What to focus on |
+| --- | --- | --- | --- |
+| Maintainability | 2/5 | 4/5 | Give a coupled workflow one clear state boundary so routine edits stay local. |
+| Testing | 4/5 | 4/5 | Keep important failure coverage while reducing repeated full-suite waits. |
+| Security | 4/5 | 3/5 | Preserve authorization and data protections with fewer repeated routine-change checks. |
+| Performance & Scalability | Unknown | 2/5 | Measure a representative workload before adding caching or infrastructure. |
+
+Strong testing capability can coexist with obstructive upkeep. This example's
+testing goal is capability **at least 3/5** and burden **at most 2/5**: keep the
+useful capability and reduce the burden. Unknown performance capability remains
+unknown rather than becoming a zero.
+
+<details>
+<summary>See example findings and the improvement plan</summary>
+
+<p align="center">
+  <a href=".github/assets/report-details.png"><img src=".github/assets/report-details.png" width="1120" alt="PAT example findings and improvement plan, including architecture coupling, testing feedback burden, confidence, counterevidence, limitations, preserved guarantees, acceptance evidence and a first implementation slice."></a>
+</p>
+
+Findings carry evidence references, confidence, counterevidence and limits.
+Recommendations identify the cause, scope, expected burden direction, acceptance
+evidence and a first useful slice; they do not promise an automatic score increase.
+
+</details>
+
 ## From evidence to a next step
 
 | Step | What you get |
