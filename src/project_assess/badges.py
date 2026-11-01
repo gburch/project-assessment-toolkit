@@ -150,7 +150,7 @@ def badge(report, dimension="summary"):
         f"source revision {meta['revision'] or 'unknown'}; source digest {meta['source_digest'] or 'unknown'}; "
         f"rubric {meta['rubric_version'] or 'unknown'}. "
         f"Capability confidence: {meta['confidence']}; burden basis: {meta['burden_basis']}; "
-        f"burden confidence: {meta['burden_confidence']}. "
+        f"declared burden confidence: {meta['burden_confidence']} (inspect the report for scope and support). "
         f"Both rating axes known for {meta['known_dimensions']}/{meta['total_dimensions']} dimensions. "
         f"Collection complete: {str(meta['complete']).lower()}; collection gaps: {meta['gap_count']}. "
         "Finding counts are reported records, not proof of absent risks or a security certification. "

@@ -43,7 +43,9 @@ def test_facts_remain_immutable_and_absent_review_is_unknown(assessed):
     reviewed(service, snapshot)
     assert service.get_report(snapshot["id"])["assessment"] == before
     rendered = markdown_report(service.get_report(snapshot["id"]))
-    assert "| testing | 2 | 1 (estimated from source; low confidence) | medium |" in rendered
+    assert (
+        "| testing | 2 | 1 (estimated from source; declared low confidence) | medium |" in rendered
+    )
     assert {p.name for p in root.iterdir()} == {"app.py", "README.md"}
 
 
@@ -236,7 +238,7 @@ def test_observed_burden_metadata_and_unknown_remain_distinct(assessed):
     review["ratings"]["testing"].update(
         burden=2,
         burden_basis="observed",
-        burden_confidence="high",
+        burden_confidence="medium",
         rationale="Reviewer-supplied direct observation scoped to its evidence; validation does not certify the judgment.",
         evidence_ids=[snapshot["evidence"][0]["id"]],
     )

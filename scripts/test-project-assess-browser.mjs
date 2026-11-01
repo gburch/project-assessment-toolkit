@@ -117,7 +117,7 @@ def commands():
         review = synthetic_review(service, snapshot, 4 if service.scans[str(root)] == 1 else 1)
         if command == 'rereview':
             review['ratings']['testing']['capability'] = 1
-            review['ratings']['security'].update(burden_basis='observed', burden_confidence='high')
+            review['ratings']['security'].update(burden_basis='observed', burden_confidence='medium')
         service.submit_review(assessment_id, review)
         print(json.dumps({'command': command}), flush=True)
 Thread(target=commands, daemon=True).start()
@@ -701,6 +701,17 @@ async function checkPlanningEvidence(browser, info) {
     await expect(page.locator("#query-state")).not.toContainText("Querying");
     await expect(page.locator("#query-results")).toContainText("control_file");
     await expect(page.locator("#scanner-security")).toContainText("eligible files");
+    await page.selectOption("#query-view", "burden");
+    await expect(page.locator("#query-dimension")).toBeEnabled();
+    await page.selectOption("#query-dimension", "maintainability");
+    const burdenRequest = page.waitForRequest((request) => request.url().includes("/api/evidence-query?") && new URL(request.url()).searchParams.get("view") === "burden");
+    await page.getByRole("button", { name: "Query evidence", exact: true }).click();
+    assert.equal(new URL((await burdenRequest).url()).searchParams.get("dimension"), "maintainability");
+    await expect(page.locator("#query-state")).not.toContainText("Querying");
+    await expect(page.locator("#query-burden-scope")).toContainText("leads retained");
+    await expect(page.locator("#query-burden-scope")).toContainText("not verified runs or wall waits");
+    await page.selectOption("#query-view", "controls");
+    await expect(page.locator("#query-dimension")).toHaveValue("");
     for (const id of ["query-kind", "query-role", "query-candidate"]) await page.selectOption(`#${id}`, savedControlFilters[id]);
     await page.fill("#query-path", savedControlFilters["query-path"]);
     await page.selectOption("#query-view", "snippets");
@@ -956,7 +967,7 @@ try {
   await fixtureCommand("rereview");
   await page.reload();
   await expect(page.locator("#progress-summary")).toContainText("Re-rating a snapshot adds no engineering progress");
-  await expect(ratingCard(page, "Security")).toContainText("Observed · declared high confidence");
+  await expect(ratingCard(page, "Security")).toContainText("Observed · declared medium confidence");
   await expect(ratingCard(page, "Testing")).toContainText("Estimated from source · declared medium confidence");
   await expect(page.locator("#progress-summary")).toContainText(`Assessed movement from baseline: +${improvementSteps - 1} steps closer`);
   await expect(page.locator("#progress-summary")).toContainText(`Engineering progress: +${improvementSteps} rubric steps`);

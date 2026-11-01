@@ -47,7 +47,7 @@ def parser():
         "--report",
         action="append",
         default=[],
-        help="Import bounded JUnit, coverage, test-value, Ruff JSON or SARIF 2.1 (.sarif/.sarif.json) evidence",
+        help="Import bounded JUnit, coverage, test-value, observation, burden-context, Ruff JSON or SARIF evidence",
     )
     commands.add_parser("list")
     commands.add_parser("rubric")
@@ -96,6 +96,7 @@ def parser():
             "areas",
             "area-dependencies",
             "controls",
+            "burden",
         ),
         default="index",
     )
@@ -109,7 +110,7 @@ def parser():
     query.add_argument("--line", type=int)
     query.add_argument(
         "--dimension",
-        choices=("security", "delivery", "operability", "extensibility", "performance"),
+        choices=DIMENSIONS,
     )
     query.add_argument("--offset", type=int, default=0)
     query.add_argument("--limit", type=int, default=20)

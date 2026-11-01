@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 
 from .rubric import DIMENSIONS
@@ -16,8 +17,186 @@ from .source_context import read_context
 SOURCE_KINDS = frozenset(
     {"python", "javascript", "source", "documentation", "manifest", "configuration"}
 )
-REPORT_KINDS = frozenset({"junit", "coverage", "cobertura", "test-value", "observation"})
+REPORT_KINDS = frozenset(
+    {"junit", "coverage", "cobertura", "test-value", "observation", "burden-context"}
+)
 MAX_FINDING_EXCERPT = 4000
+
+
+def _nonblank(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _observed_cost(entry):
+    """Recognize explicit supplied change-cost semantics, never testcase sums."""
+    stats = entry.get("stats", {})
+    if entry.get("kind") != "observation" or stats.get("type") != "change_cost":
+        return False
+    if stats.get("sourceIdentity", {}).get("overall") != "matched":
+        return False
+    names = {"wall_elapsed", "blocked_wait", "active_effort", "change_elapsed"}
+    units = {"s", "sec", "seconds", "ms", "minutes", "min", "hours", "h"}
+    return any(
+        result.get("name") in names
+        and result.get("unit") in units
+        and type(result.get("value")) in {int, float}
+        and math.isfinite(result["value"])
+        and result["value"] >= 0
+        and result.get("status") == "observed"
+        for result in stats.get("results", [])
+    )
+
+
+def _context_claims(entry, dimension):
+    """Return attributed dimension-specific experience, retaining supplied status."""
+    stats = entry.get("stats", {})
+    if entry.get("kind") != "burden-context":
+        return []
+    attribution = stats.get("attribution", {})
+    period = stats.get("period", {})
+    if not (
+        _nonblank(attribution.get("role"))
+        and _nonblank(attribution.get("label"))
+        and (period.get("start") or period.get("end"))
+    ):
+        return []
+    # Joint claims such as "slow tests OR security rework on most changes" do
+    # not establish that frequency or cost independently for either dimension.
+    return [
+        claim
+        for claim in stats.get("claims", [])
+        if set(claim.get("dimensions", [])) == {dimension}
+        and _nonblank(claim.get("statement"))
+        and claim.get("workflow_stage", "unknown") != "unknown"
+        and claim.get("duration", {}).get("semantics") not in {"summed_test_elapsed", "cpu"}
+        and (not claim.get("duration") or claim.get("completion") == "complete")
+    ]
+
+
+def burden_support_assessment(assessment, review, dimension):
+    """Check explicit support prerequisites, not the truth of a burden judgment.
+
+    No score or confidence is assigned here. A successful result records a
+    bounded, challenge-covered support declaration. Authorship, experience,
+    representativeness and semantic correctness remain review judgments.
+    """
+    review = review or {}
+    rating = review.get("ratings", {}).get(dimension, {})
+    support = rating.get("burden_support") or {}
+    result = {
+        "status": "not_requested",
+        "scope": support.get("scope"),
+        "claim": support.get("claim"),
+        "gaps": [],
+        "evidence_ids": list(support.get("observation_ids", [])),
+    }
+    if rating.get("burden_confidence") != "high":
+        return result
+    result["status"] = "withheld"
+    gaps = result["gaps"]
+    if rating.get("burden") is None or rating.get("burden_basis") != "observed":
+        gaps.append("High burden confidence requires a scored, observed burden claim.")
+    if not support:
+        gaps.append("No explicit burden support is recorded for the high-confidence claim.")
+        return result
+    for key in ("claim", "scope_description", "representativeness", "counterevidence", "freshness"):
+        if not _nonblank(support.get(key)):
+            gaps.append(f"Burden support must explicitly record {key}.")
+    scope = support.get("scope")
+    coverage = review.get("coverage", {})
+    status = coverage.get("dimension_reviews", {}).get(dimension, {}).get("status")
+    if scope == "project":
+        if coverage.get("scope") != "whole_project" or status != "reviewed":
+            gaps.append("Project-scoped burden confidence requires reviewed whole-project scope.")
+        if not assessment.get("complete", False):
+            gaps.append("Partial collection does not establish project-scoped burden support.")
+    elif scope == "workflow":
+        if status not in {"reviewed", "partial"}:
+            gaps.append("Workflow-scoped burden confidence requires an explicitly reviewed scope.")
+    else:
+        gaps.append("Burden support must declare project or workflow scope.")
+
+    entries = {entry["id"]: entry for entry in assessment.get("evidence", [])}
+    cited = set(rating.get("evidence_ids", []))
+    observation_ids = support.get("observation_ids", [])
+    observations = [entries[eid] for eid in observation_ids if eid in entries and eid in cited]
+    if not observation_ids or len(observations) != len(observation_ids):
+        gaps.append("Burden observations must be cited evidence from this captured assessment.")
+    contexts = [
+        (entry, claim) for entry in observations for claim in _context_claims(entry, dimension)
+    ]
+    costs = [entry for entry in observations if _observed_cost(entry)]
+    if not contexts and not costs:
+        gaps.append(
+            "No applicable dimension-specific attributed experience with a stated period or "
+            "source-matched explicit change-cost observation is cited; joint claims, JUnit "
+            "sums and source identity alone do not establish the cost."
+        )
+    if (
+        scope == "project"
+        and contexts
+        and not costs
+        and all(claim.get("frequency", "unknown") == "unknown" for _, claim in contexts)
+    ):
+        gaps.append("Project-scoped experienced burden needs an explicit change-frequency basis.")
+
+    traces = {trace["id"]: trace for trace in review.get("change_traces", [])}
+    trace_ids = support.get("change_trace_ids", [])
+    selected = [traces[tid] for tid in trace_ids if tid in traces]
+    if not trace_ids or len(selected) != len(trace_ids):
+        gaps.append("Burden support requires referenced representative change traces.")
+    source_ids = {
+        eid
+        for trace in selected
+        for step in trace.get("steps", [])
+        for eid in step.get("evidence_ids", [])
+        if eid in entries and entries[eid].get("kind") in SOURCE_KINDS
+    }
+    if not source_ids:
+        gaps.append("Change traces must corroborate the hurdle with captured current source.")
+    source_paths = {entries[eid].get("path") for eid in source_ids}
+    context_paths = {
+        path
+        for entry, claim in contexts
+        for path in (
+            entry.get("stats", {}).get("scope", {}).get("paths", [])
+            + [path for example in claim.get("examples", []) for path in example.get("paths", [])]
+        )
+    }
+    cost_paths = {
+        path
+        for entry in costs
+        for path in entry.get("stats", {}).get("scenario", {}).get("scope", [])
+    }
+    if (context_paths or cost_paths) and not source_paths.intersection(context_paths | cost_paths):
+        gaps.append(
+            "Observation scope is not corroborated by a current source change trace; "
+            "reconcile the scope before claiming high confidence."
+        )
+
+    method = review.get("methodology", {})
+    challenge = review.get("challenge", {})
+    author = method.get("reviewer_id", "")
+    challenger = challenge.get("reviewer_id", "")
+    if not (
+        challenge.get("status") == "completed"
+        and dimension in challenge.get("burden_dimensions", [])
+        and _nonblank(author)
+        and _nonblank(challenger)
+        and author.casefold() not in {"unassigned", challenger.casefold()}
+        and challenger.casefold() != "unassigned"
+    ):
+        gaps.append("A distinct declared reviewer must challenge this dimension's burden support.")
+    else:
+        # Reuse the service's canonical draft binding; a completed label alone
+        # cannot turn an old or unrelated challenge into current support.
+        from .service import _draft_digest
+
+        if challenge.get("draft_digest") != _draft_digest(assessment, review):
+            gaps.append("The burden challenge is not bound to this current draft and snapshot.")
+    if not gaps:
+        result["status"] = "structured_support_present_for_declared_scope"
+    return result
 
 
 def _digest(value):
@@ -193,6 +372,12 @@ def confidence_assessment(assessment, review):
             burden.append(
                 "Observed burden is declared, but no observation/report artifact is cited; source files alone do not verify measured or experienced upkeep."
             )
+        elif basis == "observed" and any(entry["kind"] == "burden-context" for entry in reports):
+            burden.append(
+                "Attributed maintainer experience is cited; distinguish reported experience "
+                "from independently measured timing, and inspect scope, recurrence, freshness "
+                "and current change traces. Source matching does not authenticate experience."
+            )
         elif basis == "observed" and not bound_reports:
             burden.append(
                 "Cited supplied reports lack established matching source identity; observed upkeep is unverified."
@@ -202,6 +387,11 @@ def confidence_assessment(assessment, review):
                 "Matching source identity does not establish observed upkeep: inspect the report's "
                 "actual change-cost, maintainer or feedback measurements and their relevance."
             )
+        burden_support = burden_support_assessment(assessment, review, dimension)
+        if burden_support["status"] == "structured_support_present_for_declared_scope":
+            burden = []
+        elif burden_support["status"] == "withheld":
+            burden.extend(burden_support["gaps"])
         dimensions[dimension] = {
             "capability": {
                 "declared_confidence": rating.get("confidence"),
@@ -213,6 +403,7 @@ def confidence_assessment(assessment, review):
                 "basis": basis,
                 "grounding": "authored_judgment",
                 "blockers": burden,
+                "support": burden_support,
             },
             "cited_report_count": len(reports),
             "source_matched_report_count": len(bound_reports),
@@ -233,5 +424,5 @@ def confidence_assessment(assessment, review):
                 for row in findings
             ),
         },
-        "caveat": "Finding confidence and dimension confidence are authored judgments. Verified source spans establish matching captured bytes and quoted ranges, not semantic correctness, reachability, runtime effectiveness or project-wide confidence. A completed challenge does not upgrade either axis.",
+        "caveat": "Finding confidence and dimension confidence are authored judgments. Verified source spans establish matching captured bytes and quoted ranges, not semantic correctness, reachability, runtime effectiveness or project-wide confidence. Structured burden support records prerequisites for the declared scope, not authenticated experience, verified timing or a certified score. A completed challenge does not upgrade either axis.",
     }

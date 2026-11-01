@@ -113,7 +113,7 @@ def create_mcp(service):
         limit: int = 20,
         max_chars: int = 24000,
     ) -> dict[str, Any]:
-        """Page captured evidence, complete area directories or controls. Controls accepts dimension and includes file coverage plus located signals; candidate_kind='file' selects coverage rows. Other filters retain their ordinary scope. Source is never reread; max_chars bounds serialized output."""
+        """Page captured evidence, area directories, controls or burden hurdles. Controls and burden accept dimension filters; burden separates static leads from attributed change experience. Controls candidate_kind='file' selects coverage rows. Source is never reread; max_chars bounds serialized output."""
         return service.query_evidence(
             assessment_id,
             view=view,

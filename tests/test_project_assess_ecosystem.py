@@ -230,3 +230,81 @@ def test_summary_is_deterministic_source_linked_and_bounded_without_mutating_inp
     monkeypatch.setattr(ecosystem, "MAX_INPUTS", 1)
     limited = ecosystem.summarize([first, second], [])
     assert any("input record limit" in gap for gap in limited["gaps"])
+
+
+def test_python_constraint_styles_keep_names_groups_and_never_raw_specifiers():
+    inventory = ecosystem.dependency_inventory(
+        "pyproject.toml",
+        {
+            "project": {
+                "dependencies": [
+                    "fixed==1.2.3",
+                    "wildcard==1.2.*",
+                    "bounded>=1,<3",
+                    "free",
+                    "origin @ https://user:PRIVATE_PASSWORD@private.example/wheel.whl",
+                ]
+            }
+        },
+    )
+    assert {row["name"]: row["style"] for row in inventory["constraint_styles"]} == {
+        "fixed": "exact_pin",
+        "wildcard": "range",
+        "bounded": "range",
+        "free": "unconstrained",
+        "origin": "direct_reference",
+    }
+    assert all(set(row) == {"name", "group"} for row in inventory["dependencies"])
+    assert not any(
+        raw in json.dumps(inventory)
+        for raw in ("1.2.3", "PRIVATE_PASSWORD", "private.example", ">=")
+    )
+
+
+@pytest.mark.parametrize(
+    "specifier,style",
+    [
+        ("1.2.3", "exact_pin"),
+        ("=1.2.3", "exact_pin"),
+        ("1.2.3-beta.1", "exact_pin"),
+        ("^1.2.3", "range"),
+        (">=1.2 <2", "range"),
+        ("1.2.x", "range"),
+        ("*", "unconstrained"),
+        ("latest", "tag"),
+        ("git+https://user:PRIVATE_PASSWORD@private.example/repo", "direct_reference"),
+        ("invalid PRIVATE_TEXT", "unsupported"),
+    ],
+)
+def test_javascript_constraint_style_is_sanitized_bounded_metadata(specifier, style, monkeypatch):
+    manifest = ecosystem.dependency_inventory(
+        "ui/package.json", {"dependencies": {"widget": specifier}}
+    )
+    summary = ecosystem.summarize(iter([manifest]), [])
+    assert summary["constraint_styles"] == [
+        {
+            "name": "widget",
+            "group": "runtime",
+            "style": style,
+            "path": "ui/package.json",
+            "line": None,
+        }
+    ]
+    assert summary["constraint_style_counts"] == {style: 1}
+    assert "PRIVATE_" not in json.dumps(summary)
+    monkeypatch.setattr(ecosystem, "MAX_REQUIREMENT_CHARACTERS", 4)
+    limited = ecosystem.dependency_inventory("package.json", {"dependencies": {"widget": "x" * 5}})
+    assert (
+        limited["constraint_styles"][0]["style"] == "unsupported" and limited["status"] == "partial"
+    )
+    monkeypatch.setattr(ecosystem, "MAX_PROJECT_DEPENDENCIES", 0)
+    assert ecosystem.summarize([manifest], [])["constraint_styles"] == []
+
+
+def test_lockfiles_are_not_reinterpreted_as_manifest_constraint_declarations():
+    assert (
+        ecosystem.dependency_inventory("package-lock.json", {"dependencies": {"widget": "1.2.3"}})[
+            "constraint_styles"
+        ]
+        == []
+    )

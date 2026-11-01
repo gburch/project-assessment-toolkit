@@ -151,6 +151,7 @@ _ANCHORS = {
                     "For a representative valuable change, which rule, test or workflow obstructs it?",
                     "What important current outcome would fail if that constraint were relaxed?",
                     "Could a simpler constraint preserve that protection with less change friction?",
+                    "Do package upgrades fail on obsolete exact-version assumptions rather than supported compatibility contracts?",
                 ],
                 "examples": [
                     "Tests coupled to private implementation details or cosmetic snapshots.",

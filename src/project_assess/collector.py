@@ -20,6 +20,9 @@ from pathlib import Path
 
 from .analyzer_registry import dedicated_phase_limits, run_analyzer, validate_analyzers
 from .budgets import get_budget, pattern_allocations
+from .burden_analysis import analyze_change_gates, summarize_burden
+from .burden_context import SCHEMA as BURDEN_CONTEXT_SCHEMA
+from .burden_context import import_burden_context
 from .capture_context import attach_source_windows
 from .control_inventory import ControlInventory
 from .delivery_analysis import analyze_delivery, is_delivery_input
@@ -1247,6 +1250,13 @@ def collect(
                 facts[kind]["files"] += 1
                 if kind == "python":
                     stats, tree = _python(text)
+                    change_gates = _redact_data(
+                        analyze_change_gates(
+                            path.as_posix(),
+                            tree,
+                            node_limit=min(100000, budget.metric_nodes_per_file),
+                        )
+                    )
                     control_record = analyze_python_controls(
                         path.as_posix(), tree, node_limit=budget.metric_nodes_per_file
                     )
@@ -1286,6 +1296,8 @@ def collect(
                     ecosystem_inputs.append(signals)
                 for key, value in stats.items():
                     facts[kind][key] += value
+                if kind == "python":
+                    stats["change_gates"] = change_gates
                 stats["is_test"] = _is_test(path)
             elif kind == "source":
                 captured_sources[path.as_posix()] = text
@@ -1778,16 +1790,18 @@ def collect(
             stats = ruff_report(payload, root, {entry["path"] for entry in manifest}, _redact)
             gaps.extend(stats["gaps"])
         elif is_json_report:
-            is_observation = False
+            label = "test-value"
             try:
                 document = _json(payload)
                 if isinstance(document, dict) and document.get("schema") == OBSERVATION_SCHEMA:
-                    is_observation = True
+                    label = "observation"
                     kind, stats = import_observation(payload, manifest, revision, _redact)
+                elif isinstance(document, dict) and document.get("schema") == BURDEN_CONTEXT_SCHEMA:
+                    label = "burden-context"
+                    kind, stats = import_burden_context(payload, manifest, revision, _redact)
                 else:
                     kind, stats = _test_value_report(payload, root, manifest, revision)
             except ValueError as exc:
-                label = "observation" if is_observation else "test-value"
                 gaps.append("Malformed or unsupported " + label + " report: " + _redact(str(exc)))
                 complete = False
                 kind, stats = (
@@ -1817,7 +1831,7 @@ def collect(
             if kind == "sarif":
                 previous["source_identity"] = "unverified"
                 previous["supplied"] = previous.get("supplied", 0) + stats["summary"]["supplied"]
-        elif kind in {"test-value", "observation"}:
+        elif kind in {"test-value", "observation", "burden-context"}:
             # The adapter already returns bounded nested summaries.  Keep one
             # per supplied artifact; never merge claims as if they were facts.
             previous.setdefault("schemas", []).append(stats.get("schema"))
@@ -1990,8 +2004,21 @@ def collect(
         context_bytes_used += result["source_context"]["retained_bytes"]
         optional_analyses[name] = result
         add_optional_evidence(name, result)
+    burden = _redact_data(summarize_burden({"evidence": evidence, "facts": facts}))
+    burden_id = add_evidence(
+        "<burden-analysis>",
+        json.dumps(burden, sort_keys=True).encode(),
+        "burden-analysis",
+        "",
+        burden,
+    )
+    facts["burden_analysis"] = {
+        key: burden[key] for key in ("version", "coverage", "gaps", "caveat")
+    }
+    facts["burden_analysis"]["evidence_id"] = burden_id
     scope = {
-        "collector_version": 10,
+        "collector_version": 11,
+        "burden_analysis_version": burden["version"],
         "control_inventory_version": controls["version"],
         "control_signal_limit": controls["limits"]["signals"],
         "rubric_version": RUBRIC_VERSION,

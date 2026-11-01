@@ -4,6 +4,7 @@ let dims = [];
 let titles = {};
 const $ = (id) => document.getElementById(id);
 const MAX_REVIEW_BYTES = 256 * 1024;
+const CONTROL_DIMENSIONS = new Set(["security", "delivery", "operability", "extensibility", "performance"]);
 const state = { token: null, rubric: null, projects: [], project: null, report: null, targets: {}, revision: 0, dirty: false, load: 0, loading: true, saving: false, reviewLoading: false, reviewDirty: false, reviewAssessment: null, reviewRequest: null };
 let queryLoad = 0;
 let queryNext = null;
@@ -71,6 +72,16 @@ function freshnessLabel(method, dim) {
   const labels = { reassessed: "Reassessed", carried_forward: "Carried forward", unreviewed: "Not reviewed", unestablished: "Freshness not established" };
   return origin?.label || labels[origin?.origin] || "Freshness not established";
 }
+function renderBurdenSupport(parent, support) {
+  const labels = { not_requested: "Not requested", withheld: "Incomplete", structured_support_present_for_declared_scope: "Present for declared scope" };
+  const detail = node("details");
+  detail.append(node("summary", `Burden support prerequisites · ${labels[support?.status] || "Not recorded"}`));
+  detail.append(node("p", `Declared scope: ${support?.scope || "Not recorded"}`));
+  if (support?.claim) detail.append(node("p", support.claim));
+  textList(detail, "Support gaps", support?.gaps || []);
+  detail.append(node("p", "These checks describe supporting evidence and review prerequisites. They do not verify confidence, reporter identity or the burden judgment. Source hurdles and reported change experience remain distinct.", "secondary"));
+  parent.append(detail);
+}
 function renderRatings(report) {
   $("ratings").replaceChildren();
   for (const dim of dims) {
@@ -105,6 +116,7 @@ function renderRatings(report) {
         textList(detail, "Evidence still needed", support.blockers);
         box.append(detail);
       }
+      if (axis === "burden") renderBurdenSupport(box, support?.support);
     }
     const controlCoverage = report.goal_alignment?.dimension_inputs?.dimensions?.[dim]?.control_coverage;
     if (controlCoverage) {
@@ -457,6 +469,8 @@ function resetEvidenceBrowser(assessment) {
   ++queryLoad;
   queryNext = queryParams = null;
   $("evidence-query-form").reset();
+  updateEvidenceDimensionFilter();
+  $("query-burden-scope")?.remove();
   $("query-results").replaceChildren();
   $("query-state").textContent = "Choose filters and query the saved snapshot.";
   $("query-submit").disabled = false;
@@ -469,6 +483,46 @@ function resetEvidenceBrowser(assessment) {
     $(id).firstChild.value = "";
     for (const value of values.sort()) { const option = node("option", value); option.value = value; $(id).append(option); }
   }
+}
+function updateEvidenceDimensionFilter() {
+  const view = $("query-view").value;
+  const filter = $("query-dimension");
+  filter.disabled = !["controls", "burden"].includes(view);
+  for (const option of filter.options) option.disabled = view === "controls" && !!option.value && !CONTROL_DIMENSIONS.has(option.value);
+  if (filter.selectedOptions[0]?.disabled) filter.value = "";
+}
+function renderBurdenScope(result) {
+  $("query-burden-scope")?.remove();
+  if (!result.burden_scope) return;
+  const detail = node("details");
+  detail.id = "query-burden-scope";
+  detail.open = true;
+  detail.append(node("summary", "Burden analysis scope"));
+  detail.append(node("p", "Counts cover the retained analysis; filters select evidence rows below.", "secondary"));
+  if (result.caveat) detail.append(node("p", result.caveat, "secondary"));
+  for (const scope of result.burden_scope.slice(0, 4)) {
+    const coverage = scope.coverage || {};
+    detail.append(node("p", `${scope.status || "unknown"} · ${coverage.leads_retained ?? "unknown"} / ${coverage.leads_observed ?? "unknown"} leads retained; ${coverage.leads_omitted ?? "unknown"} omitted. Input rows omitted: ${coverage.input_rows_omitted ?? "unknown"}.`));
+    detail.append(node("p", `Timing records: ${scope.timing_records ?? "unknown"} retained / ${coverage.timing_records_observed ?? "unknown"} observed; ${coverage.timing_records_omitted ?? "unknown"} omitted. These are supplied records, not verified runs or wall waits.`, "secondary"));
+    if (scope.timing_view) detail.append(node("p", scope.timing_view, "secondary"));
+    textList(detail, "Scope gaps", (scope.gaps || []).slice(0, 4));
+    const omittedGaps = Math.max(0, (scope.gaps || []).length - 4) + (scope.omitted_gaps || 0);
+    if (omittedGaps) detail.append(node("p", `${omittedGaps} additional scope gaps are in the captured evidence.`, "secondary"));
+    const button = node("button", "Inspect complete burden scope");
+    button.type = "button";
+    button.addEventListener("click", () => {
+      const record = Array.from($("evidence").children).find((entry) => entry.dataset.evidenceId === scope.evidence_id);
+      if (!record) return;
+      $("evidence-summary").parentElement.open = true;
+      record.open = true;
+      record.querySelector("summary").focus();
+      record.scrollIntoView({ block: "nearest" });
+    });
+    detail.append(button);
+  }
+  if (!result.burden_scope.length) detail.append(node("p", "Burden analysis was not collected in this snapshot.", "secondary"));
+  if (result.burden_scope.length > 4) detail.append(node("p", `${result.burden_scope.length - 4} additional analysis scopes are in the captured evidence.`, "secondary"));
+  $("query-results").before(detail);
 }
 function evidenceResult(row, load, assessmentId) {
   const item = node("details", undefined, "evidence-result");
@@ -511,14 +565,18 @@ async function queryEvidence(append = false) {
   if (!append) for (const [key, id] of [["view", "query-view"], ["kind", "query-kind"], ["role", "query-role"], ["candidate_kind", "query-candidate"], ["path", "query-path"]]) {
     if ($(id).value) parameters.set(key, $(id).value);
   }
-  if (!append && $("query-view").value === "controls" && $("query-dimension").value) parameters.set("dimension", $("query-dimension").value);
+  const view = $("query-view").value;
+  const dimension = $("query-dimension").value;
+  if (!append && dimension && (view === "burden" || view === "controls" && CONTROL_DIMENSIONS.has(dimension))) parameters.set("dimension", dimension);
   parameters.set("offset", String(append ? queryNext : 0));
   queryParams = parameters.toString();
   $("query-submit").disabled = $("query-more").disabled = true;
   $("query-state").textContent = "Querying captured evidence…";
+  if (!append) $("query-burden-scope")?.remove();
   try {
     const result = await api(`/api/evidence-query?${parameters}`);
     if (!currentSnapshot(load, assessmentId) || ticket !== queryLoad) return;
+    renderBurdenScope(result);
     if (!append) $("query-results").replaceChildren();
     $("query-results").append(...result.items.map((row) => evidenceResult(row, load, assessmentId)));
     queryNext = result.next_offset;
@@ -532,11 +590,12 @@ async function queryEvidence(append = false) {
   }
 }
 $("evidence-query-form").addEventListener("submit", (event) => { event.preventDefault(); queryEvidence(); });
-$("query-view").addEventListener("change", () => { $("query-dimension").disabled = $("query-view").value !== "controls"; });
+$("query-view").addEventListener("change", updateEvidenceDimensionFilter);
 $("query-more").addEventListener("click", () => queryEvidence(true));
 $("evidence-query-form").addEventListener("input", () => {
   ++queryLoad;
   queryNext = null;
+  $("query-burden-scope")?.remove();
   $("query-more").hidden = true;
   $("query-submit").disabled = false;
   $("query-state").textContent = "Filters changed. Query evidence to apply them.";

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import ast
 import re
+from collections import Counter
 from itertools import islice
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 
-VERSION = "1"
+VERSION = "2"
 MAX_DEPENDENCIES = 500
 MAX_GROUPS = 100
 MAX_REQUIREMENT_CHARACTERS = 4096
@@ -25,6 +26,8 @@ CAVEAT = (
     "Syntax hints do not establish reimplementation or excess burden; standard-library and "
     "direct DOM code can be appropriate. Review actual requirements, callers and upkeep "
     "before recommending reuse or a framework."
+    " Constraint styles describe manifests, not lockfile resolutions or demonstrated rigidity; "
+    "exact pins can be justified and counts never establish upgrade effort or a score."
 )
 
 
@@ -40,9 +43,26 @@ def _name(value, *, javascript=False):
     return value if re.fullmatch(pattern, value) else None
 
 
+def _javascript_constraint_style(value):
+    if len(value) > MAX_REQUIREMENT_CHARACTERS:
+        return "unsupported"
+    value = value.strip()
+    if value in {"", "*", "x", "X"}:
+        return "unconstrained"
+    if re.match(r"(?:[A-Za-z][A-Za-z0-9+.-]*:|git@|\.{0,2}/|[A-Za-z0-9_.-]+/)", value):
+        return "direct_reference"
+    suffix = r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
+    if re.fullmatch(r"[vV=]?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)" + suffix, value):
+        return "exact_pin"
+    token = r"(?:[~^]|[<>]=?|=)?[vV]?(?:\d+|[xX*])(?:\.(?:\d+|[xX*])){0,2}" + suffix
+    if all(re.fullmatch(token, part) for part in re.split(r"\s*\|\|\s*|\s+-\s+|\s+", value)):
+        return "range"
+    return "tag" if re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*", value) else "unsupported"
+
+
 def dependency_inventory(path: str, document: dict | str) -> dict:
-    """Capture declared names only; never expose constraints, URLs or directive text."""
-    dependencies, gaps, examined = set(), set(), 0
+    """Capture names and coarse styles, never raw constraints, URLs or directive text."""
+    dependencies, constraints, gaps, examined = set(), set(), set(), 0
 
     def add(entries, group, *, javascript=False):
         nonlocal examined
@@ -58,6 +78,8 @@ def dependency_inventory(path: str, document: dict | str) -> dict:
                 name = _name(entry, javascript=True)
                 if not isinstance(entries[entry], str):
                     name = None
+                else:
+                    style = _javascript_constraint_style(entries[entry])
             else:
                 if isinstance(entry, dict) and "include-group" in entry:
                     gaps.add("Dependency group includes were not resolved.")
@@ -74,12 +96,27 @@ def dependency_inventory(path: str, document: dict | str) -> dict:
                     gaps.add("A requirement declaration could not be parsed.")
                     continue
                 name = _name(requirement.name)
+                style = (
+                    "direct_reference"
+                    if requirement.url
+                    else "unconstrained"
+                    if not requirement.specifier
+                    else "exact_pin"
+                    if any(
+                        s.operator in {"==", "==="} and "*" not in s.version
+                        for s in requirement.specifier
+                    )
+                    else "range"
+                )
                 if requirement.url:
                     gaps.add("Direct-reference dependency origins were not verified.")
             if name is None:
                 gaps.add("An invalid dependency name or declaration was omitted.")
             else:
                 dependencies.add((name, group))
+                constraints.add((name, group, style))
+                if style == "unsupported":
+                    gaps.add("A dependency constraint style was unsupported or oversized.")
 
     def named_groups(groups, prefix):
         if not isinstance(groups, dict):
@@ -163,6 +200,10 @@ def dependency_inventory(path: str, document: dict | str) -> dict:
     return {
         "path": path,
         "dependencies": [{"name": name, "group": group} for name, group in sorted(dependencies)],
+        "constraint_styles": [
+            {"name": n, "group": g, "style": s} for n, g, s in sorted(constraints)
+        ],
+        "constraint_style_counts": dict(sorted(Counter(s for _, _, s in constraints).items())),
         "gaps": sorted(gaps),
         "status": "partial" if gaps else "complete",
     }
@@ -242,9 +283,11 @@ def javascript_signals(path: str, text: str) -> dict:
 
 def summarize(manifests, signalresults) -> dict:
     """Combine bounded captured inputs without selecting frameworks or assigning scores."""
-    gaps, dependencies, signals = set(), {}, {}
+    gaps, dependencies, constraints, signals = set(), {}, {}, {}
+    manifests = list(islice(manifests, MAX_INPUTS + 1))
     for inputs, target, cap, key in (
         (manifests, dependencies, MAX_PROJECT_DEPENDENCIES, "dependencies"),
+        (manifests, constraints, MAX_PROJECT_DEPENDENCIES, "constraint_styles"),
         (signalresults, signals, MAX_PROJECT_SIGNALS, "signals"),
     ):
         selected = list(islice(inputs, MAX_INPUTS + 1))
@@ -258,20 +301,19 @@ def summarize(manifests, signalresults) -> dict:
             gaps.update(item["gaps"])
             if item["status"] != "complete":
                 gaps.add("Some captured ecosystem inputs were incomplete.")
-            for row in item[key]:
+            for row in item.get(key, []):
                 if len(target) >= cap:
                     gaps.add("Project ecosystem output row limit reached.")
                     break
                 projected = (
-                    {**row, "path": item["path"], "line": None}
-                    if key == "dependencies"
-                    else dict(row)
+                    {**row, "path": item["path"], "line": None} if key != "signals" else dict(row)
                 )
                 identity = tuple(
                     projected[field]
                     for field in (
                         ("path", "group", "name")
-                        if key == "dependencies"
+                        + (("style",) if key == "constraint_styles" else ())
+                        if key != "signals"
                         else ("path", "line", "kind")
                     )
                 )
@@ -279,6 +321,10 @@ def summarize(manifests, signalresults) -> dict:
     return {
         "schema_version": 1,
         "dependencies": [dependencies[key] for key in sorted(dependencies)],
+        "constraint_styles": [constraints[key] for key in sorted(constraints)],
+        "constraint_style_counts": dict(
+            sorted(Counter(row["style"] for row in constraints.values()).items())
+        ),
         "signals": [signals[key] for key in sorted(signals)],
         "counts": {"dependencies": len(dependencies), "signals": len(signals)},
         "gaps": sorted(gaps),

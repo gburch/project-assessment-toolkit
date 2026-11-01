@@ -58,6 +58,10 @@ _PROVIDERS = {
         ("observation",),
         "Imported workload, recovery, delivery, change-cost, security or compatibility observations; identity matching does not authenticate execution.",
     ),
+    "burden": (
+        ("burden-analysis", "burden-context"),
+        "Required-gate selectors, change-surface leads and attributable experience; inspect scope, recurrence and timing semantics before judging upkeep.",
+    ),
 }
 
 # Shared providers are intentional. Their presence does not establish a control,
@@ -241,12 +245,13 @@ def dimension_inputs(assessment):
         "providers": providers,
         "dimensions": {
             dimension: {
-                "provider_ids": list(_DIMENSION_PROVIDERS[dimension]),
+                "provider_ids": [*_DIMENSION_PROVIDERS[dimension], "burden"],
                 "limitations": list(_GAPS[dimension]),
                 "control_coverage": facts.get("control_analysis", {})
                 .get("coverage", {})
                 .get("dimensions", {})
                 .get(dimension),
+                "burden_coverage": facts.get("burden_analysis", {}).get("coverage", {}),
             }
             for dimension in DIMENSIONS
         },

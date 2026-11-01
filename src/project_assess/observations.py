@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime
-from pathlib import PurePosixPath
 
 from jsonschema import Draft202012Validator
+
+from .report_identity import match_source_identity, normalize_report_path
 
 SCHEMA = "pat.observation.v1"
 MAX_BYTES = 1024 * 1024
@@ -80,20 +80,6 @@ _DOCUMENT = {
 }
 
 
-def _path(value):
-    path = PurePosixPath(value)
-    if (
-        path.is_absolute()
-        or path.as_posix() != value
-        or any(part in {".", ".."} for part in value.split("/"))
-        or "\\" in value
-        or re.match(r"^[A-Za-z]:", value)
-        or any(ord(char) < 32 for char in value)
-    ):
-        raise ValueError("Observation paths must be normalized project-relative paths")
-    return value
-
-
 def import_observation(payload, manifest, revision, redact=lambda value: value):
     """Validate declared observations and match only their explicit source scope."""
     if len(payload) > MAX_BYTES:
@@ -113,38 +99,15 @@ def import_observation(payload, manifest, revision, redact=lambda value: value):
     except ValueError as exc:
         raise ValueError("Observation timestamp requires ISO8601 timezone") from exc
     files = data["source"]["files"]
-    paths = [_path(row["path"]) for row in files]
-    scope = [_path(path) for path in data["scenario"]["scope"]]
+    paths = [normalize_report_path(row["path"]) for row in files]
+    scope = [normalize_report_path(path) for path in data["scenario"]["scope"]]
     if len(paths) != len(set(paths)) or len(scope) != len(set(scope)):
         raise ValueError("Observation source/scope paths must be unique")
     if not set(scope) <= set(paths):
         raise ValueError("Observation scenario scope needs matching declared file identities")
-    captured = {row["path"]: row["digest"] for row in manifest}
-    statuses = [
-        "unverified"
-        if row["path"] not in captured
-        else "matched"
-        if row["digest"] == captured[row["path"]]
-        else "mismatch"
-        for row in files
-    ]
-    declared_revision = data["source"]["revision"]
-    revision_status = (
-        "unverified"
-        if declared_revision is None or revision is None
-        else "matched"
-        if declared_revision == revision
-        else "mismatch"
-    )
-    overall = (
-        "mismatch"
-        if "mismatch" in statuses or revision_status == "mismatch"
-        else "matched"
-        if all(status == "matched" for status in statuses) and revision_status == "matched"
-        else "unverified"
-    )
+    identity, coverage = match_source_identity(data["source"], manifest, revision, redact)
     gaps = []
-    if overall != "matched":
+    if identity["overall"] != "matched":
         gaps.append(
             "Declared source identity is mismatched or not established against this capture"
         )
@@ -164,23 +127,8 @@ def import_observation(payload, manifest, revision, redact=lambda value: value):
             for row in data["results"]
         ],
         "limitations": [redact(value) for value in data["limitations"]],
-        "sourceIdentity": {
-            "overall": overall,
-            "revision": revision_status,
-            "declared_revision": declared_revision,
-            "captured_revision": revision,
-            "files": [
-                {"path": redact(row["path"]), "digest": row["digest"], "status": status}
-                for row, status in zip(files, statuses, strict=True)
-            ],
-            "scope": "Only declared file identities and revision, not the complete project or runtime environment",
-        },
-        "coverage": {
-            "declared_files": len(files),
-            "source_matched_files": statuses.count("matched"),
-            "source_unverified_files": statuses.count("unverified"),
-            "source_mismatched_files": statuses.count("mismatch"),
-        },
+        "sourceIdentity": identity,
+        "coverage": coverage,
         "gaps": gaps,
         "caveat": "An imported observation is evidence for contextual review, not an authenticated result, passing project grade or permission to execute assessed code.",
     }

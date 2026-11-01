@@ -152,6 +152,13 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 assert all(
                     "security" in row["dimensions"] for row in controls.structured_content["items"]
                 )
+                burden = await session.call_tool(
+                    "query_evidence",
+                    {"assessment_id": snapshot["id"], "view": "burden", "dimension": "testing"},
+                )
+                assert not burden.is_error
+                assert burden.structured_content["view"] == "burden"
+                assert "Static leads" in burden.structured_content["caveat"]
                 for view in ("areas", "area-dependencies"):
                     directory = await session.call_tool(
                         "query_evidence", {"assessment_id": snapshot["id"], "view": view}

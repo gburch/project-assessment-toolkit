@@ -245,6 +245,10 @@ def test_runtime_and_observed_upkeep_declarations_do_not_manufacture_evidence(ca
         burden_confidence="high",
         evidence_ids=review["findings"][0]["evidence_ids"],
     )
+    with pytest.raises(ValueError, match="High burden confidence lacks support"):
+        service.submit_review(snapshot["id"], review)
+    assert state_counts(service) == [0, 0]
+    review["ratings"]["testing"]["burden_confidence"] = "medium"
     saved = service.submit_review(snapshot["id"], review)
     axes = service.get_report(snapshot["id"])["confidence_assessment"]["dimensions"]["testing"]
     assert saved["ratings"]["testing"]["confidence"] == "high"

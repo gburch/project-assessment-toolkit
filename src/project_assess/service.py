@@ -16,7 +16,12 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 from .collector import collect
-from .confidence import MAX_FINDING_EXCERPT, confidence_assessment, validate_finding_support
+from .confidence import (
+    MAX_FINDING_EXCERPT,
+    burden_support_assessment,
+    confidence_assessment,
+    validate_finding_support,
+)
 from .control_inventory import DIMENSIONS as CONTROL_DIMENSIONS
 from .dimension_inputs import dimension_inputs
 from .review_context import build_challenge_evidence_index, get_system_map
@@ -77,6 +82,8 @@ def _ecosystem_fit(assessment):
     return {
         **summary,
         "dependencies": stats["dependencies"],
+        "constraint_styles": stats.get("constraint_styles", []),
+        "constraint_style_counts": stats.get("constraint_style_counts", {}),
         "signals": stats["signals"],
         "caveat": stats["caveat"],
     }
@@ -461,6 +468,24 @@ RATING_SCHEMA = _object(
         "recommendations": {"type": "array", "items": TEXT, "maxItems": 20},
         "burden_basis": {"enum": ["source_estimate", "observed", "unknown"]},
         "burden_confidence": {"enum": ["low", "medium", "high"]},
+        "burden_support": _object(
+            {
+                "claim": TEXT,
+                "scope": {"enum": ["project", "workflow"]},
+                "scope_description": TEXT,
+                "observation_ids": IDS,
+                "change_trace_ids": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "uniqueItems": True,
+                    "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$"},
+                },
+                "representativeness": TEXT,
+                "counterevidence": TEXT,
+                "freshness": TEXT,
+                "limitations": {"type": "array", "items": TEXT, "maxItems": 20},
+            }
+        ),
     },
     required=["capability", "burden", "confidence", "rationale", "evidence_ids", "recommendations"],
 )
@@ -575,6 +600,12 @@ CHALLENGE_SCHEMA = _object(
         "summary": TEXT,
         "evidence_ids": IDS,
         "gaps": {"type": "array", "items": TEXT, "maxItems": 20},
+        "burden_dimensions": {
+            "type": "array",
+            "uniqueItems": True,
+            "maxItems": len(DIMENSIONS),
+            "items": {"enum": list(DIMENSIONS)},
+        },
         "items": {
             "type": "array",
             "maxItems": 30,
@@ -889,6 +920,7 @@ class AssessmentService:
                     "cobertura",
                     "test-value",
                     "observation",
+                    "burden-context",
                     "ruff",
                     "sarif",
                 }:
@@ -1049,11 +1081,15 @@ class AssessmentService:
             "areas",
             "area-dependencies",
             "controls",
+            "burden",
         }
         if view not in views:
             raise ValueError("Unknown evidence query view")
-        if dimension is not None and (view != "controls" or dimension not in CONTROL_DIMENSIONS):
-            raise ValueError("Dimension filters require a supported control inventory dimension")
+        allowed_dimensions = CONTROL_DIMENSIONS if view == "controls" else DIMENSIONS
+        if dimension is not None and (
+            view not in {"controls", "burden"} or dimension not in allowed_dimensions
+        ):
+            raise ValueError("Dimension filters require a supported controls or burden dimension")
         if any(
             value is not None and (not isinstance(value, str) or len(value) > 256)
             for value in (kind, path, role, candidate_kind)
@@ -1193,6 +1229,33 @@ class AssessmentService:
                     {**row, "record_type": "control_signal", **common}
                     for row in stats.get("signals", [])
                 )
+            elif view == "burden" and entry["kind"] == "burden-analysis":
+                rows.extend({**row, **common} for row in stats.get("leads", []))
+                rows.extend(
+                    {
+                        **timing,
+                        **common,
+                        "kind": "burden_timing",
+                        "dimensions": ["testing", "delivery"],
+                        "reported_evidence_id": timing.get("evidence_id"),
+                    }
+                    for timing in stats.get("timings", [])
+                )
+            elif view == "burden" and entry["kind"] == "burden-context":
+                rows.extend(
+                    {
+                        **claim,
+                        **common,
+                        "kind": "attributed_change_experience",
+                        "attribution": stats.get("attribution"),
+                        "reported_at": stats.get("reported_at"),
+                        "period": stats.get("period"),
+                        "scope": stats.get("scope"),
+                        "sourceIdentity": stats.get("sourceIdentity"),
+                        "limitations": stats.get("limitations", []),
+                    }
+                    for claim in stats.get("claims", [])
+                )
             elif view == "candidates":
                 rows.extend(by_evidence.get(entry["id"], []))
             elif view == "snippets":
@@ -1276,7 +1339,7 @@ class AssessmentService:
         filtered = []
         seen_snippets = set()
         for row in rows:
-            if view == "controls":
+            if view in {"controls", "burden"}:
                 if dimension is not None and dimension not in row.get("dimensions", []):
                     continue
                 if candidate_kind is not None and row.get("kind") != candidate_kind:
@@ -1286,6 +1349,17 @@ class AssessmentService:
                 if "path" in row
                 else [location["path"] for location in row.get("locations", [])]
             )
+            if view == "burden" and row.get("kind") == "attributed_change_experience":
+                paths = list(
+                    dict.fromkeys(
+                        row.get("scope", {}).get("paths", [])
+                        + [
+                            p
+                            for example in row.get("examples", [])
+                            for p in example.get("paths", [])
+                        ]
+                    )
+                )
             if path and not any(path in location for location in paths):
                 continue
             roles = (
@@ -1305,7 +1379,7 @@ class AssessmentService:
                 continue
             if (
                 candidate_kind
-                and view not in {"candidates", "index", "details", "controls"}
+                and view not in {"candidates", "index", "details", "controls", "burden"}
                 and not any(location in candidate_paths for location in paths)
             ):
                 continue
@@ -1358,6 +1432,7 @@ class AssessmentService:
                     "source-analysis",
                     "analyzer-analysis",
                     "control-analysis",
+                    "burden-analysis",
                 }
             ],
         }
@@ -1367,6 +1442,35 @@ class AssessmentService:
                 "risk candidates or naming hints, not effective controls, defects or absence proof."
                 if any(entry["kind"] == "control-analysis" for entry in entries)
                 else "Control inventory was not collected in this snapshot."
+            )
+        if view == "burden":
+            result["burden_scope"] = [
+                {
+                    "evidence_id": entry["id"],
+                    **{
+                        key: entry["stats"].get(key)
+                        for key in ("status", "coverage", "limits", "caveat")
+                    },
+                    "gaps": entry["stats"].get("gaps", [])[:5],
+                    "omitted_gaps": max(0, len(entry["stats"].get("gaps", [])) - 5),
+                    "dimensions": {
+                        d: {
+                            key: value
+                            for key, value in summary.items()
+                            if key in {"lead_count", "retained_leads", "cost_status"}
+                        }
+                        for d, summary in entry["stats"].get("dimensions", {}).items()
+                    },
+                    "timing_records": len(entry["stats"].get("timings", [])),
+                    "timing_view": "Paginated burden_timing rows retain declared semantics; they are not whole-gate wall time by default.",
+                }
+                for entry in entries
+                if entry["kind"] == "burden-analysis"
+            ]
+            result["caveat"] = (
+                "Source mechanisms and attributed experience are distinct. Static leads do not "
+                "establish actual waits, recurrence or burden scores. Inspect declared scope, "
+                "timing semantics, counterevidence and confidence support."
             )
         if navigation is not None:
             result["navigation_scope"] = {
@@ -1832,6 +1936,7 @@ class AssessmentService:
             "goal_alignment": alignment,
             "test_value_static": inventory,
             "ecosystem_fit": ecosystem,
+            "burden_analysis": assessment["facts"].get("burden_analysis", {}),
             "gaps": sorted(set(gaps)),
             "verification": "Trace actual callers and choose relevant behavior checks before an authorized edit; rescan afterward to assess the change.",
             "caveat": "Static candidates and supplied diagnostics require review. Empty groups are not a clean bill of health; this operation assigns no grades and applies no fixes.",
@@ -1978,6 +2083,12 @@ class AssessmentService:
         for trace in traces:
             for step in trace["steps"]:
                 cites(step["evidence_ids"])
+        for rating in review["ratings"].values():
+            burden_support = rating.get("burden_support")
+            if burden_support:
+                cites(burden_support["observation_ids"])
+                if not set(burden_support["change_trace_ids"]) <= {t["id"] for t in traces}:
+                    raise ValueError("Burden support cites unknown change traces")
         challenge = review.get("challenge")
         if challenge and final:
             if challenge["status"] == "completed":
@@ -2025,6 +2136,17 @@ class AssessmentService:
                 raise ValueError(
                     "Fresh whole-project scores require a change trace and challenge or explicit unavailability"
                 )
+        if final:
+            for dimension, rating in review["ratings"].items():
+                if rating.get("burden_confidence") == "high":
+                    support = burden_support_assessment(assessment, review, dimension)
+                    if support["status"] != "structured_support_present_for_declared_scope":
+                        raise ValueError(
+                            "High burden confidence lacks support for "
+                            + dimension
+                            + ": "
+                            + "; ".join(support["gaps"])
+                        )
         return support_verification
 
     def challenge_template(self, assessment_id, review):
@@ -2057,9 +2179,29 @@ class AssessmentService:
                 "omitted_evidence": selected_evidence["selection"]["omitted"],
             },
             "change_traces": review.get("change_traces", []),
+            "burden_review": {
+                dimension: {
+                    key: support[key]
+                    for key in (
+                        "scope",
+                        "scope_description",
+                        "claim",
+                        "observation_ids",
+                        "change_trace_ids",
+                        "representativeness",
+                        "counterevidence",
+                        "freshness",
+                        "limitations",
+                    )
+                    if key in support
+                }
+                for dimension, rating in review["ratings"].items()
+                if (support := rating.get("burden_support"))
+            },
             "rubric": rubric(),
             "targets": (goals or {}).get("targets"),
             "instructions": [
+                "Form your independent judgment first. Then inspect burden_review scopes and query their observation_ids from this snapshot; challenge recurrence, actual cost, applicability and contrary paths. These references contain no proposed scores. Do not declare burden_dimensions unless you reviewed that dimension's support.",
                 "Use a separate reviewer. Form an independent judgment from current captured evidence before seeing proposed grades, rationales, findings or plans.",
                 "Challenge missing debt, favorable counterevidence, source freshness, change traces and the proportionality of improvements. Query evidence and inspect source context where needed.",
                 "Return cited concerns, inspected evidence IDs, reviewer identity and limitations. The author records an accepted, rejected or deferred response with rationale and citations for every concern.",
@@ -2386,6 +2528,15 @@ def _confidence_markdown(assessment, review):
                 + _markdown_text(value.get("declared_confidence") or "unestablished")
             )
             lines.extend("  - " + _markdown_text(blocker) for blocker in value["blockers"])
+            if axis == "burden" and value.get("support"):
+                support = value["support"]
+                lines.append(
+                    "  - Structured burden support: "
+                    + _markdown_text(support["status"])
+                    + "; scope: "
+                    + _markdown_text(support.get("scope") or "undeclared")
+                )
+                lines.extend("  - " + _markdown_text(gap) for gap in support.get("gaps", []))
     for row in confidence["findings"]:
         lines += [
             "",
@@ -2672,7 +2823,9 @@ def markdown_report(report):
             basis = (
                 "observed" if rating.get("burden_basis") == "observed" else "estimated from source"
             )
-            burden_text = f"{burden} ({basis}; {rating.get('burden_confidence', 'low')} confidence)"
+            burden_text = (
+                f"{burden} ({basis}; declared {rating.get('burden_confidence', 'low')} confidence)"
+            )
         lines.append(
             f"| {dimension} | {rating.get('capability') if rating.get('capability') is not None else 'unknown'} | {burden_text} | {rating.get('confidence', 'unknown')} |"
         )
