@@ -140,9 +140,14 @@ def create_mcp(service):
         )
 
     @server.tool(annotations={"readOnlyHint": True})
-    def review_template(assessment_id: str) -> dict[str, Any]:
-        """Read an unscored review template bound to a source snapshot."""
-        return service.review_template(assessment_id)
+    def review_template(assessment_id: str, mode: str | None = None) -> dict[str, Any]:
+        """Read an unscored snapshot-bound template; mode fresh/refresh records judgment origins."""
+        return service.review_template(assessment_id, mode=mode)
+
+    @server.tool(annotations={"readOnlyHint": True})
+    def challenge_template(assessment_id: str, review: dict) -> dict[str, Any]:
+        """Prepare captured context for a separate reviewer, hiding draft grades and plan. No AI is invoked and no review is saved."""
+        return service.challenge_template(assessment_id, review)
 
     @server.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
     def submit_review(

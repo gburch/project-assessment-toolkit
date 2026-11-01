@@ -68,6 +68,7 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                     "query_evidence",
                     "inspect_source_context",
                     "list_analyzers",
+                    "challenge_template",
                 } <= names
                 assert all(
                     tool.annotations.read_only_hint
@@ -80,6 +81,7 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                         "evolve",
                         "get_tool_info",
                         "query_evidence",
+                        "challenge_template",
                     }
                 )
                 assert not next(
@@ -203,6 +205,23 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 template = await session.call_tool(
                     "review_template", {"assessment_id": snapshot["id"]}
                 )
+                fresh_template = await session.call_tool(
+                    "review_template", {"assessment_id": snapshot["id"], "mode": "fresh"}
+                )
+                fresh = fresh_template.structured_content
+                fresh["methodology"]["reviewer_id"] = "mcp-fixture-reviewer"
+                challenge = await session.call_tool(
+                    "challenge_template", {"assessment_id": snapshot["id"], "review": fresh}
+                )
+                assert not challenge.is_error
+                assert challenge.structured_content["assessment_id"] == snapshot["id"]
+                assert challenge.structured_content["draft_digest"]
+                assert "ratings" not in challenge.structured_content
+                assert "plan" not in challenge.structured_content
+                mismatched = await session.call_tool(
+                    "challenge_template", {"assessment_id": "unknown", "review": fresh}
+                )
+                assert mismatched.is_error
                 reviewed = await session.call_tool(
                     "submit_review",
                     {

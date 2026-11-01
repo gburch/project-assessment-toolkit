@@ -183,6 +183,102 @@ def _review_coverage(review):
     }
 
 
+def _normalized_ratings(ratings):
+    """Use the same burden defaults for storage and challenge identity."""
+    result = json.loads(canonical(ratings))
+    for rating in result.values():
+        if rating["burden"] is None:
+            rating["burden_basis"] = "unknown"
+            rating["burden_confidence"] = "low"
+        else:
+            if rating.get("burden_basis", "unknown") == "unknown":
+                rating["burden_basis"] = "source_estimate"
+            rating.setdefault("burden_confidence", "low")
+    return result
+
+
+def _draft_digest(assessment, review):
+    draft = {
+        key: value
+        for key, value in review.items()
+        if key not in {"challenge", "id", "created_at", "provenance", "schema_version"}
+    }
+    draft["ratings"] = _normalized_ratings(draft["ratings"])
+    bound = {
+        "assessment_id": assessment["id"],
+        "source": assessment["source"],
+        "scope_digest": assessment["scope_digest"],
+        "rubric_version": assessment["rubric_version"],
+        "draft": draft,
+    }
+    return hashlib.sha256(canonical(bound).encode()).hexdigest()
+
+
+def _assessment_method(review, *, compact=False):
+    """Label recorded review provenance; never infer freshness or independence."""
+    method = (review or {}).get("methodology", {})
+    origins = method.get("dimensions", {})
+    labels = {
+        "reassessed": "Freshly reassessed",
+        "carried_forward": "Carried forward",
+        "unreviewed": "Unreviewed",
+        "unestablished": "Freshness unestablished",
+    }
+    dimensions = {
+        dimension: {
+            "origin": origins.get(dimension, "unestablished"),
+            "label": labels[origins.get(dimension, "unestablished")],
+        }
+        for dimension in DIMENSIONS
+    }
+    challenge = (review or {}).get("challenge", {"status": "unrecorded"})
+    traces = (review or {}).get("change_traces", [])
+    needs_trace = (
+        method.get("mode") == "fresh"
+        and (review or {}).get("coverage", {}).get("scope") == "whole_project"
+    )
+    completed = (
+        bool(method) and challenge["status"] == "completed" and (not needs_trace or bool(traces))
+    )
+    gaps = []
+    if not method:
+        gaps.append("Freshness was not recorded; existing scores have not been reclassified.")
+    if challenge["status"] != "completed":
+        gaps.append("No completed independent challenge is recorded; this review is provisional.")
+    if needs_trace and not traces:
+        gaps.append("No representative change trace is recorded; this review is provisional.")
+    result = {
+        "schema_version": 1,
+        "status": method.get("mode", "unestablished"),
+        "completion": "completed" if completed else "provisional" if method else "unestablished",
+        "reviewer_id": method.get("reviewer_id"),
+        "based_on_review_id": method.get("based_on_review_id"),
+        "dimensions": dimensions,
+        "counts": {
+            origin: sum(row["origin"] == origin for row in dimensions.values()) for origin in labels
+        },
+        "trace_count": len(traces),
+        "challenge": challenge,
+        "gaps": gaps,
+        "caveat": "Freshness and reviewer independence are declarations bound to captured evidence, not authenticated approval. Accepted challenge responses do not mean engineering changes are complete.",
+    }
+    if compact:
+        items = challenge.get("items", [])
+        result["challenge"] = {
+            "status": challenge["status"],
+            "reviewer_id": challenge.get("reviewer_id"),
+            "independence": challenge.get("independence"),
+            "item_count": len(items),
+            "response_counts": {
+                decision: sum(item["response"]["decision"] == decision for item in items)
+                for decision in ("accepted", "rejected", "deferred")
+            },
+        }
+    else:
+        result["change_traces"] = traces
+    return result
+
+
 def _goal_alignment(assessment, review, goals, goal_rubric_version):
     """Suggest a direction from saved judgments, without assigning or changing them."""
     targets = (goals or {}).get("targets", {})
@@ -310,6 +406,7 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
         "dimensions": dimensions,
         "coverage": (review or {}).get("coverage"),
         "review_coverage": _review_coverage(review),
+        "assessment_method": _assessment_method(review),
         "system_map": get_system_map(assessment),
         "plan": plan,
         "planning_status": planning_status,
@@ -428,6 +525,64 @@ PLAN_SCHEMA = _object(
     },
     required=["schema_version", "diagnosis", "target_state", "initiatives"],
 )
+METHODOLOGY_SCHEMA = _object(
+    {
+        "schema_version": {"const": 1},
+        "mode": {"enum": ["fresh", "refresh"]},
+        "reviewer_id": {"type": "string", "minLength": 1, "maxLength": 200},
+        "based_on_review_id": {"type": ["string", "null"], "maxLength": 100},
+        "dimensions": _object(
+            {dim: {"enum": ["reassessed", "carried_forward", "unreviewed"]} for dim in DIMENSIONS}
+        ),
+    }
+)
+CHANGE_TRACE_SCHEMA = _object(
+    {
+        "id": INITIATIVE_ID,
+        "title": TEXT,
+        "steps": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": _object({"owner": TEXT, "change": TEXT, "evidence_ids": IDS}),
+        },
+        "cost": TEXT,
+        "invariant": TEXT,
+        "counterevidence": TEXT,
+        "gaps": {"type": "array", "items": TEXT, "maxItems": 20},
+    }
+)
+CHALLENGE_SCHEMA = _object(
+    {
+        "schema_version": {"const": 1},
+        "status": {"enum": ["completed", "unavailable"]},
+        "reviewer_id": {"type": "string", "minLength": 1, "maxLength": 200},
+        "independence": {"const": "declared"},
+        "draft_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "summary": TEXT,
+        "evidence_ids": IDS,
+        "gaps": {"type": "array", "items": TEXT, "maxItems": 20},
+        "items": {
+            "type": "array",
+            "maxItems": 30,
+            "items": _object(
+                {
+                    "id": INITIATIVE_ID,
+                    "concern": TEXT,
+                    "evidence_ids": IDS,
+                    "response": _object(
+                        {
+                            "decision": {"enum": ["accepted", "rejected", "deferred"]},
+                            "rationale": TEXT,
+                            "evidence_ids": IDS,
+                        }
+                    ),
+                }
+            ),
+        },
+    },
+    required=["schema_version", "status", "summary", "gaps"],
+)
 REVIEW_SCHEMA = _object(
     {
         "assessment_id": {"type": "string", "maxLength": 100},
@@ -447,6 +602,9 @@ REVIEW_SCHEMA = _object(
         },
         "coverage": COVERAGE_SCHEMA,
         "plan": PLAN_SCHEMA,
+        "methodology": METHODOLOGY_SCHEMA,
+        "change_traces": {"type": "array", "maxItems": 10, "items": CHANGE_TRACE_SCHEMA},
+        "challenge": CHALLENGE_SCHEMA,
         "review_context": _object(
             {
                 "tool_code_digest": {"type": ["string", "null"], "maxLength": 100},
@@ -780,6 +938,7 @@ class AssessmentService:
             },
             "review_id": (review or {}).get("id"),
             "review_coverage": alignment["review_coverage"],
+            "assessment_method": _assessment_method(review, compact=True),
             "system_map": alignment["system_map"],
             "urgent_findings": [
                 {key: row.get(key) for key in ("severity", "title", "evidence_ids")}
@@ -1559,10 +1718,12 @@ class AssessmentService:
             "caveat": "Static candidates and supplied diagnostics require review. Empty groups are not a clean bill of health; this operation assigns no grades and applies no fixes.",
         }
 
-    def review_template(self, assessment_id):
+    def review_template(self, assessment_id, mode=None):
+        if mode not in {None, "fresh", "refresh"}:
+            raise ValueError("Review mode must be fresh or refresh")
         with self._db() as db:
             assessment = self._assessment(db, assessment_id)
-        return {
+        result = {
             "assessment_id": assessment_id,
             "source_digest": assessment["source"]["manifest_digest"],
             "rubric_version": assessment["rubric_version"],
@@ -1606,6 +1767,182 @@ class AssessmentService:
                 "loaded_instructions": [],
             },
         }
+        if mode is not None:
+            result["methodology"] = {
+                "schema_version": 1,
+                "mode": mode,
+                "reviewer_id": "unassigned",
+                "based_on_review_id": None,
+                "dimensions": {dimension: "unreviewed" for dimension in DIMENSIONS},
+            }
+            result["change_traces"] = []
+        return result
+
+    def _validate_review_document(self, db, assessment, review, *, final=True):
+        _validate(review, REVIEW_SCHEMA)
+        if (
+            review["assessment_id"] != assessment["id"]
+            or review["source_digest"] != assessment["source"]["manifest_digest"]
+            or review["rubric_version"] != assessment["rubric_version"]
+        ):
+            raise ConflictError("Review identity does not match the captured assessment")
+        evidence_ids = {item["id"] for item in assessment["evidence"]}
+
+        def cites(ids):
+            if not ids or not set(ids) <= evidence_ids:
+                raise ValueError("Authored review claims require evidence from this snapshot")
+
+        for rating in review["ratings"].values():
+            if not set(rating["evidence_ids"]) <= evidence_ids:
+                raise ValueError("Review cites evidence outside its captured snapshot")
+            if any(rating[key] is not None for key in ("capability", "burden")):
+                cites(rating["evidence_ids"])
+        for finding in review["findings"]:
+            cites(finding["evidence_ids"])
+        _validate_planning(review, evidence_ids)
+        method = review.get("methodology")
+        if method:
+            if (
+                not method["reviewer_id"].strip()
+                or method["reviewer_id"] != method["reviewer_id"].strip()
+            ):
+                raise ValueError(
+                    "Reviewer identity must be nonempty without surrounding whitespace"
+                )
+            origins = method["dimensions"]
+            carried = [dim for dim, origin in origins.items() if origin == "carried_forward"]
+            if method["mode"] == "fresh" and carried:
+                raise ValueError("A fresh review cannot carry forward judgments")
+            prior_id = method["based_on_review_id"]
+            if method["mode"] == "refresh" and not prior_id:
+                raise ValueError("A refresh must identify its prior review")
+            prior = prior_assessment = None
+            if prior_id:
+                row = db.execute("SELECT data FROM reviews WHERE id=?", (prior_id,)).fetchone()
+                if row is None:
+                    raise ValueError("Unknown prior review")
+                prior = json.loads(row[0])
+                prior_assessment = self._assessment(db, prior["assessment_id"])
+                same_snapshot = (
+                    prior_assessment["rubric_version"] == assessment["rubric_version"]
+                    and prior_assessment["scope_digest"] == assessment["scope_digest"]
+                    and all(
+                        prior_assessment["source"][key] == assessment["source"][key]
+                        for key in ("revision", "manifest_digest")
+                    )
+                )
+                if prior_assessment["project_id"] != assessment["project_id"] and not same_snapshot:
+                    raise ValueError("Prior review belongs to a different project and snapshot")
+                if carried and not same_snapshot:
+                    raise ConflictError("Changed source, scope or rubric requires reassessment")
+            if carried:
+                previous = _normalized_ratings(prior["ratings"])
+                current = _normalized_ratings(review["ratings"])
+                keys = ("capability", "burden", "confidence", "burden_basis", "burden_confidence")
+                for dimension in carried:
+                    if any(
+                        current[dimension].get(key) != previous[dimension].get(key) for key in keys
+                    ):
+                        raise ValueError(
+                            "Carried-forward judgments must preserve prior axes and confidence"
+                        )
+            for dimension, origin in origins.items():
+                if origin == "unreviewed" and any(
+                    review["ratings"][dimension][key] is not None
+                    for key in ("capability", "burden")
+                ):
+                    raise ValueError("Unreviewed dimensions must retain unknown scores")
+        traces = review.get("change_traces", [])
+        if len({trace["id"] for trace in traces}) != len(traces):
+            raise ValueError("Change trace IDs must be unique")
+        for trace in traces:
+            for step in trace["steps"]:
+                cites(step["evidence_ids"])
+        challenge = review.get("challenge")
+        if challenge and final:
+            if challenge["status"] == "completed":
+                required = {"reviewer_id", "independence", "draft_digest", "items", "evidence_ids"}
+                if not required <= challenge.keys():
+                    raise ValueError(
+                        "Completed challenge is missing its reviewer, binding or evidence"
+                    )
+                if (
+                    not method
+                    or method["reviewer_id"].casefold() == "unassigned"
+                    or not challenge["reviewer_id"].strip()
+                    or challenge["reviewer_id"] != challenge["reviewer_id"].strip()
+                    or challenge["reviewer_id"].casefold()
+                    in {"unassigned", method["reviewer_id"].casefold()}
+                ):
+                    raise ValueError("Challenge requires distinct declared reviewer identities")
+                if challenge["draft_digest"] != _draft_digest(assessment, review):
+                    raise ConflictError(
+                        "Challenge is stale; challenge the current draft and snapshot"
+                    )
+                cites(challenge["evidence_ids"])
+                if len({item["id"] for item in challenge["items"]}) != len(challenge["items"]):
+                    raise ValueError("Challenge item IDs must be unique")
+                for item in challenge["items"]:
+                    cites(item["evidence_ids"])
+                    cites(item["response"]["evidence_ids"])
+            elif set(challenge) - {"schema_version", "status", "summary", "gaps"}:
+                raise ValueError(
+                    "Unavailable challenge must state its limitation without a completion receipt"
+                )
+        scored = any(
+            rating[axis] is not None
+            for rating in review["ratings"].values()
+            for axis in ("capability", "burden")
+        )
+        if (
+            final
+            and method
+            and method["mode"] == "fresh"
+            and scored
+            and review.get("coverage", {}).get("scope") == "whole_project"
+        ):
+            if not traces or challenge is None:
+                raise ValueError(
+                    "Fresh whole-project scores require a change trace and challenge or explicit unavailability"
+                )
+
+    def challenge_template(self, assessment_id, review):
+        """Prepare a bounded, score-free handoff; the caller runs a separate reviewer."""
+        with self._db() as db:
+            assessment = self._assessment(db, assessment_id)
+            if self._latest(db, assessment["project_id"])["id"] != assessment_id:
+                raise ConflictError("Assessment is stale; challenge the latest snapshot")
+            self._validate_review_document(db, assessment, review, final=False)
+            goals = self._goals(db, assessment["project_id"])
+        evidence = assessment["evidence"]
+        return {
+            "schema_version": 1,
+            "assessment_id": assessment_id,
+            "source": assessment["source"],
+            "scope_digest": assessment["scope_digest"],
+            "rubric_version": assessment["rubric_version"],
+            "draft_digest": _draft_digest(assessment, review),
+            "context": {
+                "complete": assessment["complete"],
+                "collection_gaps": assessment["gaps"][:50],
+                "omitted_collection_gaps": max(0, len(assessment["gaps"]) - 50),
+                "inventory": assessment["facts"].get("inventory", {}),
+                "system_map": get_system_map(assessment),
+                "evidence_index": [
+                    {key: item[key] for key in ("id", "kind", "path")} for item in evidence[:80]
+                ],
+                "omitted_evidence": max(0, len(evidence) - 80),
+            },
+            "change_traces": review.get("change_traces", []),
+            "rubric": rubric(),
+            "targets": (goals or {}).get("targets"),
+            "instructions": [
+                "Use a separate reviewer. Form an independent judgment from current captured evidence before seeing proposed grades, rationales, findings or plans.",
+                "Challenge missing debt, favorable counterevidence, source freshness, change traces and the proportionality of improvements. Query evidence and inspect source context where needed.",
+                "Return cited concerns, inspected evidence IDs, reviewer identity and limitations. The author records an accepted, rejected or deferred response with rationale and citations for every concern.",
+                "Independence is declared, not authenticated. Any draft score, rationale, plan, trace or source change requires a follow-up challenge bound to the new digest.",
+            ],
+        }
 
     @staticmethod
     def _replay(db, request_id, operation, payload):
@@ -1645,19 +1982,7 @@ class AssessmentService:
                 return replay
             if self._latest(db, assessment["project_id"])["id"] != assessment_id:
                 raise ConflictError("Assessment is stale; review the latest snapshot")
-            evidence_ids = {item["id"] for item in assessment["evidence"]}
-            for rating in review["ratings"].values():
-                if not set(rating["evidence_ids"]) <= evidence_ids:
-                    raise ValueError("Review cites evidence outside its captured snapshot")
-                if (
-                    any(rating[key] is not None for key in ("capability", "burden"))
-                    and not rating["evidence_ids"]
-                ):
-                    raise ValueError("Scored ratings require evidence citations")
-            for finding in review["findings"]:
-                if not finding["evidence_ids"] or not set(finding["evidence_ids"]) <= evidence_ids:
-                    raise ValueError("Findings require evidence from this snapshot")
-            _validate_planning(review, evidence_ids)
+            self._validate_review_document(db, assessment, review)
             result = {
                 **review,
                 "schema_version": 1,
@@ -1665,17 +1990,7 @@ class AssessmentService:
                 "created_at": now(),
                 "provenance": "agent_judgment",
             }
-            # Missing methodology never means measured toil. Keep older clients
-            # valid while qualifying estimates separately from capability.
-            result["ratings"] = json.loads(canonical(review["ratings"]))
-            for rating in result["ratings"].values():
-                if rating["burden"] is None:
-                    rating["burden_basis"] = "unknown"
-                    rating["burden_confidence"] = "low"
-                else:
-                    if rating.get("burden_basis", "unknown") == "unknown":
-                        rating["burden_basis"] = "source_estimate"
-                    rating.setdefault("burden_confidence", "low")
+            result["ratings"] = _normalized_ratings(review["ratings"])
             db.execute(
                 "INSERT INTO reviews(id,assessment_id,data) VALUES (?,?,?)",
                 (result["id"], assessment_id, canonical(result)),
@@ -1869,6 +2184,7 @@ class AssessmentService:
                 "progress": self._progress(db, assessment["project_id"]),
                 "goal_alignment": alignment,
                 "review_coverage": alignment["review_coverage"],
+                "assessment_method": alignment["assessment_method"],
                 "system_map": alignment["system_map"],
             }
 
@@ -1931,7 +2247,62 @@ def _markdown_text(value):
 
 
 def _planning_markdown(alignment):
-    lines = ["", "## Review coverage", ""]
+    lines = ["", "## Assessment method", ""]
+    method = alignment.get("assessment_method", {})
+    lines += [
+        "Freshness: "
+        + _markdown_text(method.get("status", "unestablished"))
+        + "; completion: "
+        + _markdown_text(method.get("completion", "unestablished"))
+        + ".",
+        "",
+        _markdown_text(method.get("caveat", "Freshness was not recorded.")),
+        "",
+    ]
+    for dimension, row in method.get("dimensions", {}).items():
+        lines.append("- " + _markdown_text(dimension) + ": " + _markdown_text(row["label"]))
+    for gap in method.get("gaps", []):
+        lines.append("- Limitation: " + _markdown_text(gap))
+    for trace in method.get("change_traces", []):
+        lines += ["", "### Change trace: " + _markdown_text(trace["title"]), ""]
+        for step in trace["steps"]:
+            lines.append(
+                "- "
+                + _markdown_text(step["owner"])
+                + ": "
+                + _markdown_text(step["change"])
+                + "; evidence: "
+                + _markdown_text(", ".join(step["evidence_ids"]))
+            )
+        for label, key in (
+            ("Change cost", "cost"),
+            ("Invariant", "invariant"),
+            ("Counterevidence", "counterevidence"),
+        ):
+            lines.append(label + ": " + _markdown_text(trace[key]))
+        lines.extend("- Trace gap: " + _markdown_text(gap) for gap in trace["gaps"])
+    challenge = method.get("challenge", {})
+    lines += ["", "Challenge: " + _markdown_text(challenge.get("status", "unrecorded")) + "."]
+    if challenge.get("reviewer_id"):
+        lines.append("Declared challenger: " + _markdown_text(challenge["reviewer_id"]))
+    if challenge.get("summary"):
+        lines.append(_markdown_text(challenge["summary"]))
+    for item in challenge.get("items", []):
+        response = item["response"]
+        lines += [
+            "- Concern: "
+            + _markdown_text(item["concern"])
+            + "; evidence: "
+            + _markdown_text(", ".join(item["evidence_ids"])),
+            "  Response: "
+            + _markdown_text(response["decision"])
+            + "; "
+            + _markdown_text(response["rationale"])
+            + "; evidence: "
+            + _markdown_text(", ".join(response["evidence_ids"])),
+        ]
+    lines.extend("- Challenge gap: " + _markdown_text(gap) for gap in challenge.get("gaps", []))
+    lines += ["", "## Review coverage", ""]
     summary = alignment.get("review_coverage")
     if summary:
         lines += [

@@ -66,6 +66,11 @@ function jsonText(value) { return JSON.stringify(value, null, 2); }
 function rubDescription(dim, axis, value) {
   return Number.isInteger(value) ? state.rubric.dimensions?.[dim]?.[axis]?.[value] || "" : "Evidence is insufficient to assign a value.";
 }
+function freshnessLabel(method, dim) {
+  const origin = method?.dimensions?.[dim];
+  const labels = { reassessed: "Reassessed", carried_forward: "Carried forward", unreviewed: "Not reviewed", unestablished: "Freshness not established" };
+  return origin?.label || labels[origin?.origin] || "Freshness not established";
+}
 function renderRatings(report) {
   $("ratings").replaceChildren();
   for (const dim of dims) {
@@ -74,6 +79,7 @@ function renderRatings(report) {
     const header = node("header");
     header.append(node("h3", titles[dim]), node("span", rating ? `Capability · ${rating.confidence} confidence` : "Not reviewed", "confidence"));
     box.append(header);
+    box.append(node("p", freshnessLabel(report.assessment_method, dim), "evidence-meta"));
     for (const axis of ["capability", "burden"]) {
       const value = rating?.[axis];
       const row = node("div", undefined, "score-row");
@@ -142,8 +148,10 @@ function updateControls() {
   for (const input of $("goal-controls").querySelectorAll("input")) input.disabled = busy;
   $("save").disabled = busy || !state.dirty || missingTargets().length > 0;
   $("rescan").disabled = busy;
-  for (const id of ["review-load", "review-file", "review-json"]) $(id).disabled = busy || state.reviewLoading;
+  for (const id of ["review-mode", "review-load", "review-file", "review-json"]) $(id).disabled = busy || state.reviewLoading;
   $("review-submit").disabled = busy || state.reviewLoading || !state.reviewDirty ||
+    state.reviewAssessment !== state.report?.assessment.id || !$("review-json").value.trim();
+  $("challenge-load").disabled = busy || state.reviewLoading ||
     state.reviewAssessment !== state.report?.assessment.id || !$("review-json").value.trim();
 }
 function allowDiscard() {
@@ -159,6 +167,12 @@ function resetReview() {
   $("review-file").value = "";
   $("review-editor").open = false;
   $("review-state").textContent = "Load a template or import a review for this snapshot.";
+  resetChallenge();
+}
+function resetChallenge() {
+  $("challenge-result").hidden = true;
+  $("challenge-result").open = false;
+  $("challenge-json").textContent = "";
 }
 function currentSnapshot(load, id) {
   return load === state.load && state.report?.assessment.id === id;
@@ -277,6 +291,44 @@ function textList(parent, heading, items) {
   list.append(...items.map((item) => node("li", item)));
   parent.append(list);
 }
+function renderAssessmentMethod(parent, method) {
+  const status = { fresh: "Fresh assessment", refresh: "Assessment refresh", unestablished: "Assessment freshness not established" };
+  const completion = { completed: "completed", provisional: "provisional", unestablished: "completion not established" };
+  const summary = node("p", `${status[method?.status] || status.unestablished} · ${completion[method?.completion] || completion.unestablished}`);
+  summary.id = "assessment-method";
+  parent.append(summary);
+  if (!method) return;
+  if (method.reviewer_id) parent.append(node("p", `Reviewer: ${method.reviewer_id}${method.based_on_review_id ? ` · Based on review: ${method.based_on_review_id}` : ""}`, "evidence-meta"));
+  if (method.counts) parent.append(node("p", `${method.counts.reassessed || 0} reassessed · ${method.counts.carried_forward || 0} carried forward · ${method.counts.unreviewed || 0} unreviewed · ${method.counts.unestablished || 0} without freshness records`, "secondary"));
+  const traces = method.change_traces || [];
+  const traceDetails = node("details");
+  traceDetails.append(node("summary", `Change traces (${traces.length})`));
+  for (const trace of traces) {
+    const item = node("article", undefined, "initiative");
+    item.append(node("h3", trace.title || trace.id));
+    textList(item, "Change path", (trace.steps || []).map((step) => `${step.owner}: ${step.change} · Evidence: ${(step.evidence_ids || []).join(", ") || "none"}`));
+    item.append(node("p", `Change cost: ${trace.cost}`), node("p", `Preserve: ${trace.invariant}`), node("p", `Counterevidence: ${trace.counterevidence}`));
+    textList(item, "Trace gaps", trace.gaps || []);
+    traceDetails.append(item);
+  }
+  if (!traces.length) traceDetails.append(node("p", "No change traces recorded.", "secondary"));
+  parent.append(traceDetails);
+  const challenge = method.challenge || { status: "unrecorded" };
+  const details = node("details");
+  details.append(node("summary", `Independent challenge · ${challenge.status}`));
+  if (challenge.reviewer_id) details.append(node("p", `Reviewer: ${challenge.reviewer_id} · Independence: ${challenge.independence || "unestablished"}`, "evidence-meta"));
+  if (challenge.summary) details.append(node("p", challenge.summary));
+  for (const item of challenge.items || []) {
+    const entry = node("article", undefined, "initiative");
+    entry.append(node("h3", item.concern), node("p", `Evidence: ${(item.evidence_ids || []).join(", ") || "none"}`, "evidence-meta"));
+    if (item.response) entry.append(node("p", `${item.response.decision}: ${item.response.rationale}`), node("p", `Response evidence: ${(item.response.evidence_ids || []).join(", ") || "none"}`, "evidence-meta"));
+    details.append(entry);
+  }
+  textList(details, "Challenge gaps", challenge.gaps || []);
+  parent.append(details);
+  if (method.gaps?.length) textList(parent, "Assessment method gaps", method.gaps);
+  if (method.caveat) parent.append(node("p", method.caveat, "secondary"));
+}
 function renderAlignment(alignment) {
   const states = {
     no_review: "No saved review. Diagnosis, coverage and an improvement plan remain unknown.",
@@ -293,6 +345,7 @@ function renderAlignment(alignment) {
   }
   const coverage = $("review-coverage");
   coverage.replaceChildren();
+  renderAssessmentMethod(coverage, alignment?.assessment_method);
   const breadth = alignment?.review_coverage;
   const breadthLabels = { broad: "Broad review recorded", partial: "Partial project review", focused: "Focused review", unestablished: "Review breadth not established", unreviewed: "Project not reviewed" };
   coverage.append(node("p", breadthLabels[breadth?.status] || "Review breadth not established"));
@@ -718,12 +771,13 @@ $("review-load").addEventListener("click", async () => {
   state.reviewLoading = true;
   updateControls();
   try {
-    const review = await api(`/api/review-template?assessment_id=${encodeURIComponent(id)}`);
+    const review = await api(`/api/review-template?assessment_id=${encodeURIComponent(id)}&mode=${encodeURIComponent($("review-mode").value)}`);
     if (!currentSnapshot(load, id)) return;
     $("review-json").value = jsonText(review);
     state.reviewAssessment = id;
     state.reviewRequest = null;
     state.reviewDirty = true;
+    resetChallenge();
     $("review-state").textContent = "Unsaved review template. Edit judgments and evidence citations before submitting.";
   } catch (error) {
     if (currentSnapshot(load, id)) message(error.message, true);
@@ -749,6 +803,7 @@ $("review-file").addEventListener("change", async () => {
     state.reviewAssessment = id;
     state.reviewRequest = null;
     state.reviewDirty = true;
+    resetChallenge();
     $("review-state").textContent = "Imported JSON is unsaved. Check its snapshot identity, judgments and citations, then submit explicitly.";
   } catch (error) {
     if (currentSnapshot(load, id)) message(error.message, true);
@@ -765,8 +820,44 @@ $("review-json").addEventListener("input", () => {
   state.reviewAssessment = state.report.assessment.id;
   state.reviewRequest = null;
   state.reviewDirty = true;
+  resetChallenge();
   $("review-state").textContent = "Unsaved review JSON";
   updateControls();
+});
+function reviewDraft() {
+  if (new TextEncoder().encode($("review-json").value).length > MAX_REVIEW_BYTES) throw new Error("Review JSON must be at most 256 KiB");
+  return JSON.parse($("review-json").value);
+}
+$("challenge-load").addEventListener("click", async () => {
+  if (!state.report || state.loading || state.saving || state.reviewLoading ||
+      state.reviewAssessment !== state.report.assessment.id) return;
+  const load = state.load;
+  const id = state.report.assessment.id;
+  let review;
+  try {
+    review = reviewDraft();
+  } catch (error) {
+    message(error.message, true);
+    return;
+  }
+  state.reviewLoading = true;
+  resetChallenge();
+  updateControls();
+  try {
+    const packet = await api("/api/challenge-template", { assessment_id: id, review });
+    if (!currentSnapshot(load, id)) return;
+    $("challenge-json").textContent = jsonText(packet);
+    $("challenge-result").hidden = false;
+    $("challenge-result").open = true;
+    message("Challenge packet prepared. Give it to a separate reviewer, then record the challenge and responses in your review JSON.");
+  } catch (error) {
+    if (currentSnapshot(load, id)) message(error.message, true);
+  } finally {
+    if (currentSnapshot(load, id)) {
+      state.reviewLoading = false;
+      updateControls();
+    }
+  }
 });
 $("review-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -776,8 +867,7 @@ $("review-form").addEventListener("submit", async (event) => {
   const id = state.report.assessment.id;
   let review;
   try {
-    if (new TextEncoder().encode($("review-json").value).length > MAX_REVIEW_BYTES) throw new Error("Review JSON must be at most 256 KiB");
-    review = JSON.parse($("review-json").value);
+    review = reviewDraft();
   } catch (error) {
     message(error.message, true);
     return;
@@ -795,6 +885,7 @@ $("review-form").addEventListener("submit", async (event) => {
     saved = await api("/api/review", payload);
     if (!currentSnapshot(load, id)) return;
     state.report.review = saved;
+    state.report.assessment_method = null;
     state.reviewDirty = false;
     $("review-state").textContent = `Saved review ${saved.id}`;
     renderRatings(state.report);
@@ -809,6 +900,8 @@ $("review-form").addEventListener("submit", async (event) => {
     renderProgress(progress);
     renderHistory(history);
     state.report.goal_alignment = evolve.goal_alignment;
+    state.report.assessment_method = evolve.goal_alignment.assessment_method;
+    renderRatings(state.report);
     renderAlignment(evolve.goal_alignment);
     message("Review saved. Collected facts and project files are unchanged.");
   } catch (error) {

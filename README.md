@@ -55,7 +55,7 @@ Version **0.3.0** adds standard/deep collection budgets, broad complexity metric
 
 Version **0.3.2** rejects unsupported or incomplete state before writing and initializes new state atomically. Static test evidence labels bare `assert` counts separately from recognized unittest-style calls; changed counting semantics start a new comparison scope. Vulture's redundant conditions remain distinct from unreachable statements.
 
-Version **0.5.2** keeps brief and coverage views compact while retaining full per-file details in captured evidence.
+Version **0.6.0** labels review freshness, records cited change traces and binds an independent challenge to the exact draft. Legacy reviews remain readable; declared independence and structural validation do not certify judgment quality. See the [review workflow](.agents/skills/project-assess/references/evolve-review.md#freshness-change-traces-and-independent-challenge).
 
 Version **0.5.1** fixes Joern conversion of numeric TypeScript interface keys and allocates bounded method samples fairly across source files. Per-file sample coverage distinguishes omitted rows from absent methods. Captured code stays unchanged; source/AST provenance and unsupported cases remain explicit.
 

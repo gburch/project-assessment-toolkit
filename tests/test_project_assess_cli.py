@@ -81,6 +81,13 @@ def test_installed_cli_roundtrip_without_source_path_imports(tmp_path):
     assert plan["goal_alignment"] == diagnosis["goal_alignment"]
     review = json.loads(command("review-template", snapshot["id"]))
     path = tmp_path / "review.json"
+    fresh = json.loads(command("review-template", snapshot["id"], "--mode", "fresh"))
+    fresh["methodology"]["reviewer_id"] = "cli-fixture-reviewer"
+    path.write_text(json.dumps(fresh))
+    challenge = json.loads(command("challenge-template", snapshot["id"], "--input", str(path)))
+    assert challenge["assessment_id"] == snapshot["id"] and challenge["draft_digest"]
+    assert "ratings" not in challenge and "plan" not in challenge
+    assert json.loads(command("report", snapshot["id"]))["review"] is None
     path.write_text(json.dumps(review))
     command("review", snapshot["id"], "--input", str(path))
     command(

@@ -25,6 +25,8 @@ class Service:
         self.reviews = []
         self.queries = []
         self.contexts = []
+        self.templates = []
+        self.challenges = []
 
     def list_projects(self):
         return [
@@ -65,9 +67,14 @@ class Service:
         self.scan_options.append(options)
         return {"id": "a2"}
 
-    def review_template(self, assessment_id):
+    def review_template(self, assessment_id, mode=None):
         self.get_report(assessment_id)
+        self.templates.append((assessment_id, mode))
         return {"assessment_id": assessment_id, "ratings": {}}
+
+    def challenge_template(self, **document):
+        self.challenges.append(deepcopy(document))
+        return {"assessment_id": document["assessment_id"], "draft_digest": "sha256:fixture"}
 
     def submit_review(self, **document):
         self.reviews.append(deepcopy(document))
@@ -160,6 +167,7 @@ def test_session_rejects_rebinding_and_cross_site_reads(running_report, headers)
         ("/api/targets", {"project_id": "p1", "targets": {}, "expected_revision": 0}),
         ("/api/scan", {"root": "/registered/source"}),
         ("/api/review", {"assessment_id": "a1", "review": {}}),
+        ("/api/challenge-template", {"assessment_id": "a1", "review": {}}),
     ],
 )
 @pytest.mark.parametrize(
@@ -174,7 +182,7 @@ def test_session_rejects_rebinding_and_cross_site_reads(running_report, headers)
 def test_writes_require_exact_origin_and_session_token(running_report, headers, path, document):
     service, server = running_report
     assert request(server, "POST", path, document, headers)[0] == 403
-    assert service.calls == service.scans == service.reviews == []
+    assert service.calls == service.scans == service.reviews == service.challenges == []
 
 
 def test_target_write_and_stale_revision_conflict(running_report):
@@ -239,8 +247,14 @@ def test_query_contract_and_method_rejection(running_report):
     assert request(server, path="/api/report?assessment_id=a1&assessment_id=a2")[0] == 400
     assert request(server, path="/api/report?path=/etc/passwd")[0] == 400
     assert request(server, path="/api/review-template?assessment_id=a1")[0] == 200
+    assert request(server, path="/api/review-template?assessment_id=a1&mode=fresh")[0] == 200
+    assert service.templates == [("a1", None), ("a1", "fresh")]
     assert request(server, path="/api/review-template?assessment_id=absent")[0] == 400
     assert request(server, path="/api/review-template?assessment_id=a1&assessment_id=a2")[0] == 400
+    assert (
+        request(server, path="/api/review-template?assessment_id=a1&mode=fresh&mode=refresh")[0]
+        == 400
+    )
     assert request(server, path="/api/history?project_id=p1")[0] == 200
     assert service.history_calls == [("p1", True)]
     assert request(server, path="/api/progress?project_id=p1")[0] == 200
@@ -383,12 +397,61 @@ def test_real_evidence_query_and_context_reject_stale_bytes_and_preserve_state(t
         ("/api/review", {"assessment_id": [], "review": {}}),
         ("/api/review", {"assessment_id": "a1", "review": []}),
         ("/api/review", {"assessment_id": "a1", "review": {}, "facts": {}}),
+        ("/api/challenge-template", {"assessment_id": "a1"}),
+        ("/api/challenge-template", {"assessment_id": [], "review": {}}),
+        ("/api/challenge-template", {"assessment_id": "a1", "review": []}),
+        ("/api/challenge-template", {"assessment_id": "a1", "review": {}, "request_id": "x"}),
     ],
 )
 def test_scan_and_review_reject_ambiguous_or_unsupported_fields(running_report, path, document):
     service, server = running_report
     assert request(server, "POST", path, document)[0] == 400
-    assert service.scans == service.reviews == []
+    assert service.scans == service.reviews == service.challenges == []
+
+
+def test_challenge_packet_delegates_without_saving_a_review(running_report):
+    service, server = running_report
+    document = {"assessment_id": "a1", "review": {"source_digest": "captured"}}
+    status, _, body = request(server, "POST", "/api/challenge-template", document)
+    assert status == 200 and json.loads(body)["draft_digest"] == "sha256:fixture"
+    assert service.challenges == [document]
+    assert service.reviews == service.calls == service.scans == []
+    assert request(server, path="/api/challenge-template?assessment_id=a1")[0] == 404
+    assert request(server, "POST", "/api/challenge-template?mode=fresh", document)[0] == 404
+
+
+def test_real_challenge_packet_is_snapshot_bound_and_does_not_persist(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "app.py").write_text("def run():\n    return 1\n")
+    service = AssessmentService(tmp_path / "state", [root])
+    snapshot = service.scan(root)
+    before = service.history(snapshot["project_id"])
+    with create_server(service) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            status, _, body = request(
+                server, path="/api/review-template?assessment_id=" + snapshot["id"] + "&mode=fresh"
+            )
+            assert status == 200
+            review = json.loads(body)
+            review["methodology"]["reviewer_id"] = "http-fixture-reviewer"
+            document = {"assessment_id": snapshot["id"], "review": review}
+            status, _, body = request(server, "POST", "/api/challenge-template", document)
+            packet = json.loads(body)
+            assert status == 200 and packet["draft_digest"]
+            assert packet["assessment_id"] == snapshot["id"]
+            assert "ratings" not in packet and "plan" not in packet
+            assert service.history(snapshot["project_id"]) == before
+            review["source_digest"] = "changed"
+            assert request(server, "POST", "/api/challenge-template", document)[0] == 409
+            review["source_digest"] = snapshot["source"]["manifest_digest"]
+            service.scan(root)
+            assert request(server, "POST", "/api/challenge-template", document)[0] == 409
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
 
 
 def test_invalid_analysis_options_reject_before_registering_project(tmp_path):

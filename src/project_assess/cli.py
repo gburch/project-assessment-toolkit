@@ -51,7 +51,15 @@ def parser():
     )
     commands.add_parser("list")
     commands.add_parser("rubric")
-    for name in ("report", "evidence", "review-template", "review", "doctor", "evolve"):
+    for name in (
+        "report",
+        "evidence",
+        "review-template",
+        "challenge-template",
+        "review",
+        "doctor",
+        "evolve",
+    ):
         command = commands.add_parser(name)
         command.add_argument("assessment_id")
         if name == "report":
@@ -66,8 +74,11 @@ def parser():
                 default=100,
                 help="Share 1..100 candidates across evidence families; 20 is useful for a first pass",
             )
-        if name == "review":
+        if name == "review-template":
+            command.add_argument("--mode", choices=("fresh", "refresh"))
+        if name in {"review", "challenge-template"}:
             command.add_argument("--input", required=True)
+        if name == "review":
             command.add_argument("--request-id")
     query = commands.add_parser("evidence-query", help="Browse bounded captured evidence")
     query.add_argument("assessment_id")
@@ -239,7 +250,9 @@ def main(argv=None):
                 max_chars=args.max_chars,
             )
         elif args.command == "review-template":
-            output = service.review_template(args.assessment_id)
+            output = service.review_template(args.assessment_id, mode=args.mode)
+        elif args.command == "challenge-template":
+            output = service.challenge_template(args.assessment_id, _input(args.input))
         elif args.command == "review":
             output = service.submit_review(args.assessment_id, _input(args.input), args.request_id)
         elif args.command == "targets":

@@ -115,7 +115,9 @@ def create_server(service, port=0):
                 elif parsed.path == "/api/report":
                     result = service.get_report(self._query(parsed.query, "assessment_id"))
                 elif parsed.path == "/api/review-template":
-                    result = service.review_template(self._query(parsed.query, "assessment_id"))
+                    result = service.review_template(
+                        **self._parameters(parsed.query, {"assessment_id"}, {"mode"})
+                    )
                 elif parsed.path == "/api/evolve":
                     result = service.evolve(self._query(parsed.query, "assessment_id"))
                 elif parsed.path == "/api/evidence-query":
@@ -159,7 +161,12 @@ def create_server(service, port=0):
             if self.command != "POST":
                 self._error(405, "Method not allowed")
                 return
-            if parsed.query or parsed.path not in {"/api/targets", "/api/scan", "/api/review"}:
+            if parsed.query or parsed.path not in {
+                "/api/targets",
+                "/api/scan",
+                "/api/review",
+                "/api/challenge-template",
+            }:
                 self._error(404, "Report route not found")
                 return
             if self.headers.get("Origin") != self.server.origin or not secrets.compare_digest(
@@ -198,17 +205,22 @@ def create_server(service, port=0):
                 }:
                     raise ValueError("Unsupported target fields")
                 result = service.set_targets(**document)
-            elif parsed.path == "/api/review":
+            elif parsed.path in {"/api/review", "/api/challenge-template"}:
+                optional = {"request_id"} if parsed.path == "/api/review" else set()
                 if (
                     not {"assessment_id", "review"} <= document.keys()
-                    or document.keys() - {"assessment_id", "review", "request_id"}
+                    or document.keys() - {"assessment_id", "review"} - optional
                     or not isinstance(document["assessment_id"], str)
                     or not isinstance(document["review"], dict)
                 ):
                     raise ValueError(
-                        "Review requires assessment_id, review, and optional request_id"
+                        "Review requests require assessment_id, review, and only supported metadata"
                     )
-                result = service.submit_review(**document)
+                result = (
+                    service.submit_review(**document)
+                    if parsed.path == "/api/review"
+                    else service.challenge_template(**document)
+                )
             else:
                 identity_fields = document.keys() - {"analysis_profile", "analyzers"}
                 if identity_fields == {"root"} and isinstance(document["root"], str):

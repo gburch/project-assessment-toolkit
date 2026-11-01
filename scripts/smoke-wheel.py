@@ -216,6 +216,19 @@ def main():
             "core scan preserves facts and explicit unavailable Joern evidence without external tools",
         )
         review = cli("review-template", snapshot["id"])
+        fresh = cli("review-template", snapshot["id"], "--mode", "fresh")
+        fresh["methodology"]["reviewer_id"] = "wheel-fixture-reviewer"
+        review_file = output / "review.json"
+        review_file.write_text(json.dumps(fresh))
+        challenge = cli("challenge-template", snapshot["id"], "--input", review_file)
+        check(
+            challenge["assessment_id"] == snapshot["id"]
+            and challenge["draft_digest"]
+            and "ratings" not in challenge
+            and "plan" not in challenge
+            and cli("report", snapshot["id"])["review"] is None,
+            "fresh template and score-free challenge packet preserve unsaved review state",
+        )
         review["coverage"]["scope"] = "focused"
         for rating in review["ratings"].values():
             rating.update(
@@ -225,7 +238,6 @@ def main():
                 rationale="Synthetic delivery fixture judgment.",
                 evidence_ids=[snapshot["evidence"][0]["id"]],
             )
-        review_file = output / "review.json"
         review_file.write_text(json.dumps(review))
         saved = cli("review", snapshot["id"], "--input", review_file)
         goals = cli(

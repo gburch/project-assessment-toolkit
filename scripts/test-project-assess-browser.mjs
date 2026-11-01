@@ -392,6 +392,10 @@ async function checkFirstScanAndReview(browser, info) {
   const scored = (template, snapshot, capability = 3) => {
     const result = structuredClone(template);
     result.coverage.scope = "focused";
+    if (result.methodology) {
+      result.methodology.reviewer_id = "browser-fixture-reviewer";
+      result.methodology.dimensions.testing = "reassessed";
+    }
     Object.assign(result.ratings.testing, { capability, burden: 2, confidence: "medium", burden_basis: "source_estimate", burden_confidence: "low",
       rationale: "Synthetic browser review <img src=x onerror=window.reviewPwned=1>",
       evidence_ids: [snapshot.evidence.find((entry) => entry.kind === "python").id] });
@@ -415,7 +419,7 @@ async function checkFirstScanAndReview(browser, info) {
     await expect(page.locator("#ratings")).toContainText("Not reviewed");
     assert.equal((await page.request.get(`${origin}/api/report?assessment_id=${initial.id}`)).status(), 200);
     assert(!JSON.stringify(initial).includes("never-return-this-value"), "secret files must stay excluded");
-    await page.locator("#review-editor summary").click();
+    await page.locator("#review-editor > summary").click();
     await page.getByRole("button", { name: "Load review template", exact: true }).click();
     await expect(page.locator("#review-state")).toContainText("Unsaved review template");
     const template = JSON.parse(await page.locator("#review-json").inputValue());
@@ -429,6 +433,14 @@ async function checkFirstScanAndReview(browser, info) {
     await page.getByLabel("Import review JSON", { exact: true }).setInputFiles({ name: "review.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(draft)) });
     await expect(page.locator("#review-state")).toContainText("Imported JSON is unsaved");
     assert.equal((await history(initial.project_id)).reviews.length, 0, "import must not submit automatically");
+    await page.getByRole("button", { name: "Create challenge packet", exact: true }).click();
+    await expect(page.locator("#challenge-result")).toBeVisible();
+    const packet = JSON.parse(await page.locator("#challenge-json").textContent());
+    assert.equal(packet.assessment_id, initial.id);
+    assert(packet.draft_digest && !packet.ratings && !packet.plan);
+    assert(!JSON.stringify(packet).includes("Synthetic browser review"), "challenge must not anchor on draft score rationales");
+    assert.equal((await history(initial.project_id)).reviews.length, 0, "challenge packet must not save a review");
+    assert.deepEqual(JSON.parse(await page.locator("#review-json").inputValue()), draft);
     dismissNext = true;
     await page.getByRole("button", { name: "Scan again", exact: true }).click();
     assert.equal((await projects())[0].latest_assessment_id, initial.id, "declining discard keeps the snapshot and draft");
@@ -455,7 +467,7 @@ async function checkFirstScanAndReview(browser, info) {
     await page.reload();
     await expect(page.locator("#status")).toContainText(newer.id);
     await expect(page.locator("#review-json")).toHaveValue("");
-    await page.locator("#review-editor summary").click();
+    await page.locator("#review-editor > summary").click();
     await page.getByRole("button", { name: "Load review template", exact: true }).click();
     await expect(page.locator("#review-state")).toContainText("Unsaved review template");
     const currentTemplate = JSON.parse(await page.locator("#review-json").inputValue());
@@ -467,6 +479,8 @@ async function checkFirstScanAndReview(browser, info) {
     await expect(page.locator("#review-state")).toContainText(saved.id);
     await expect(ratingCard(page, "Testing")).toContainText("3 / 5");
     await expect(ratingCard(page, "Testing")).toContainText("2 / 5");
+    await expect(ratingCard(page, "Testing")).toContainText("Freshly reassessed");
+    await expect(page.locator("#assessment-method")).toContainText("Fresh assessment · provisional");
     await expect(ratingCard(page, "Operability")).toContainText("Unknown");
     await expect(page.locator("#review-submit")).toBeDisabled();
     await expect(page.locator("#goal-state")).toContainText("Unsaved targets");
@@ -484,8 +498,8 @@ async function checkFirstScanAndReview(browser, info) {
     const second = (await projects()).find((project) => project.name === "second-project");
     await page.selectOption("#project", initial.project_id);
     await expect(page.locator("#status")).toContainText(newer.id);
-    await page.locator("#review-editor summary").click();
-    const pendingTemplate = await holdResponse(page, `**/api/review-template?assessment_id=${newer.id}`);
+    await page.locator("#review-editor > summary").click();
+    const pendingTemplate = await holdResponse(page, `**/api/review-template?assessment_id=${newer.id}&mode=fresh`);
     await page.getByRole("button", { name: "Load review template", exact: true }).click();
     await pendingTemplate.entered;
     await page.selectOption("#project", second.id);
@@ -494,7 +508,7 @@ async function checkFirstScanAndReview(browser, info) {
     await expect(page.locator("#review-json")).toHaveValue("");
     await page.selectOption("#project", initial.project_id);
     await expect(page.locator("#status")).toContainText(newer.id);
-    await page.locator("#review-editor summary").click();
+    await page.locator("#review-editor > summary").click();
     await page.locator("#review-json").fill(JSON.stringify(scored(currentTemplate, newer, 4)));
     const pendingReview = await holdResponse(page, "**/api/review");
     await page.getByRole("button", { name: "Submit review", exact: true }).click();
@@ -505,7 +519,7 @@ async function checkFirstScanAndReview(browser, info) {
     await page.selectOption("#project", initial.project_id);
     await expect(page.locator("#status")).toContainText(newer.id);
     await expect(ratingCard(page, "Testing")).toContainText("4 / 5");
-    await page.locator("#review-editor summary").click();
+    await page.locator("#review-editor > summary").click();
     const returnedDraft = JSON.stringify({ ...current, findings: [] }, null, 2);
     await page.locator("#review-json").fill(returnedDraft);
     await pendingReview.release();
@@ -520,7 +534,7 @@ async function checkFirstScanAndReview(browser, info) {
     await expect(page.locator("#error")).toBeHidden();
     assert.equal((await history(second.id)).reviews.length, 0, "late review responses must not write to the selected project");
     assert(reviews.every((request) => request.assessment_id === request.review.assessment_id));
-    await page.locator("#review-editor summary").click();
+    await page.locator("#review-editor > summary").click();
     const overflow = await page.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth,
       elements: Array.from(document.querySelectorAll("main *")).map((element) => ({ tag: element.tagName, id: element.id, width: element.getBoundingClientRect().width, right: element.getBoundingClientRect().right })).filter((element) => element.right > innerWidth + 1) }));
     assert(overflow.scrollWidth <= overflow.width, `expanded review editor must fit mobile: ${JSON.stringify(overflow)}`);
@@ -574,12 +588,15 @@ async function checkPlanningEvidence(browser, info) {
     await expect(page.locator("#goal-state")).toContainText("Saved goal version");
     const report = await (await page.request.get(`${origin}/api/report?assessment_id=${project.latest_assessment_id}`)).json();
     const source = report.assessment.evidence.find((entry) => entry.path === "src/dead.py");
-    const review = await (await page.request.get(`${origin}/api/review-template?assessment_id=${project.latest_assessment_id}`)).json();
+    const review = await (await page.request.get(`${origin}/api/review-template?assessment_id=${project.latest_assessment_id}&mode=fresh`)).json();
     for (const rating of Object.values(review.ratings)) Object.assign(rating, {
       capability: 3, burden: 1, confidence: "medium", burden_basis: "source_estimate", burden_confidence: "low",
       rationale: "Synthetic full review, not an automatically calculated grade.", evidence_ids: [source.id], recommendations: ["Consolidate responsibility across the supported paths."]
     });
     const hostile = "<img src=x onerror=window.planPwned=1>";
+    review.methodology.reviewer_id = "browser-planning-reviewer";
+    review.methodology.dimensions = Object.fromEntries(Object.keys(review.ratings).map((dim) => [dim, "reassessed"]));
+    review.change_traces = [{ id: "creation", title: `Trace a meaningful change ${hostile}`, steps: [{ owner: "Request handler", change: "Follow creation into persisted authority", evidence_ids: [source.id] }], cost: "Two responsibilities need coordinated edits", invariant: "Preserve source-bound authority", counterevidence: "The direct helper is already simple", gaps: ["Provider execution not observed"] }];
     review.coverage = { schema_version: 1, scope: "whole_project", examined: [{ area: "Production lifecycle", evidence_ids: [source.id] }], unexamined: [{ area: "Provider recovery", reason: "No runtime receipt supplied" }], limitations: ["Source-only review"], validation: [{ check: "Provider recovery", status: "not_run", evidence_ids: [] }] };
     review.coverage.dimension_reviews = Object.fromEntries(Object.keys(review.ratings).map((dim) => [dim, { status: "partial", rationale: "Synthetic source-only coverage; provider execution is unverified.", evidence_ids: [source.id] }]));
     review.plan = { schema_version: 1, goal_revision: report.goals.revision, diagnosis: `Shared lifecycle ownership needs consolidation ${hostile}`, target_state: "One supported lifecycle across all entry points with source-linked failure verification", initiatives: [
@@ -587,7 +604,12 @@ async function checkPlanningEvidence(browser, info) {
       { id: "recovery", title: "Verify recovery guidance", priority: "medium", root_cause: "Guidance can drift from lifecycle ownership", scope: "Supported operator recovery workflows", dimension_impacts: { documentation: "Reliable recovery task" }, evidence_ids: [source.id], acceptance: ["A reader completes the recovery task"], burden_effect: "Maintain one canonical explanation", depends_on: ["consolidate"], first_slice: "Trace the documented recovery path" }
     ] };
     review.findings = [{ severity: "critical", title: "Synthetic critical finding remains visible despite met goals", evidence_ids: [source.id] }];
-    await page.locator("#review-editor summary").click();
+    const session = await (await page.request.get(`${origin}/api/session`)).json();
+    const challengeResponse = await page.request.post(`${origin}/api/challenge-template`, { data: { assessment_id: project.latest_assessment_id, review }, headers: { Origin: origin, "X-Project-Assess-Token": session.token } });
+    assert.equal(challengeResponse.status(), 200);
+    const challengePacket = await challengeResponse.json();
+    review.challenge = { schema_version: 1, status: "completed", reviewer_id: "browser-independent-reviewer", independence: "declared", draft_digest: challengePacket.draft_digest, evidence_ids: [source.id], items: [{ id: "scope", concern: `Check remaining callers ${hostile}`, evidence_ids: [source.id], response: { decision: "accepted", rationale: "Keep the full supported caller scope", evidence_ids: [source.id] } }], summary: "Independent fixture challenge completed", gaps: ["Source-only review"] };
+    await page.locator("#review-editor > summary").click();
     await page.locator("#review-json").fill(JSON.stringify(review));
     await page.getByRole("button", { name: "Submit review", exact: true }).click();
     await expect(page.locator("#review-state")).toContainText("Saved review");
@@ -601,6 +623,13 @@ async function checkPlanningEvidence(browser, info) {
     assert(roadmap.indexOf("Full target state") < roadmap.indexOf("First implementation slice"));
     assert(roadmap.indexOf("Acceptance for the full outcome") < roadmap.indexOf("First implementation slice"));
     await expect(page.locator("#review-coverage")).toContainText("Partial project review");
+    await expect(page.locator("#assessment-method")).toContainText("Fresh assessment · completed");
+    await page.locator("#review-coverage summary").filter({ hasText: "Change traces (1)" }).click();
+    await expect(page.locator("#review-coverage")).toContainText(`Trace a meaningful change ${hostile}`);
+    await expect(page.locator("#review-coverage")).toContainText("Two responsibilities need coordinated edits");
+    await page.locator("#review-coverage summary").filter({ hasText: "Independent challenge · completed" }).click();
+    await expect(page.locator("#review-coverage")).toContainText("Independence: declared");
+    await expect(page.locator("#review-coverage")).toContainText("accepted: Keep the full supported caller scope");
     await page.locator("#review-coverage summary").filter({ hasText: "Production system overview" }).click();
     await expect(page.locator("#review-coverage")).toContainText("captured production file(s)");
     await page.locator("#review-coverage summary").filter({ hasText: "Review coverage by dimension" }).click();

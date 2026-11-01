@@ -53,7 +53,8 @@ uv run --locked pat --state-dir /path/outside/repos/assessment-state source-cont
 uv run --locked pat --state-dir /path/outside/repos/assessment-state doctor ASSESSMENT_ID
 uv run --locked pat --state-dir /path/outside/repos/assessment-state evolve ASSESSMENT_ID
 uv run --locked pat --state-dir /path/outside/repos/assessment-state rubric
-uv run --locked pat --state-dir /path/outside/repos/assessment-state review-template ASSESSMENT_ID
+uv run --locked pat --state-dir /path/outside/repos/assessment-state review-template ASSESSMENT_ID --mode fresh
+uv run --locked pat --state-dir /path/outside/repos/assessment-state challenge-template ASSESSMENT_ID --input /path/outside/repos/review.json
 uv run --locked pat --state-dir /path/outside/repos/assessment-state review ASSESSMENT_ID --input /path/outside/repos/review.json
 uv run --locked pat --state-dir /path/outside/repos/assessment-state serve
 ```
@@ -65,6 +66,10 @@ Use the URL printed by `serve` to scan a new project path, inspect saved evidenc
 In the app, open the review editor for the current snapshot, load its template or import review JSON, and fill it using the captured evidence and rubric. Submit explicitly when ready. A rescan needs a review bound to the new snapshot; an old or mismatched review is rejected. Each numeric judgment needs cited evidence; inspection can support a labeled burden estimate without execution or time records.
 
 For the CLI workflow, save the JSON printed by `review-template` to a file outside the assessed repository, fill it, then pass it to `review --input`.
+
+PAT 0.6.0 adds explicit **review freshness**, **change traces** and an **independent challenge**. Select `fresh` to reassess the current snapshot or `refresh` to declare retained judgments. Every dimension records reassessed, carried-forward or unreviewed origin. Carry-forward requires an authorized earlier review with identical source revision, manifest, collection scope and rubric; legacy reviews keep freshness unestablished. These labels describe the review method, not a time-based claim that source or runtime is current.
+
+Change traces cite ordered owners and edits for representative valuable changes, their cost, protected invariants, counterevidence and gaps. `challenge-template` validates a draft and returns a score-free source-bound packet for an independent agent or human. PAT does not call an AI service. Save the critic's cited concerns and explicit accepted/rejected/deferred responses in the review; a substantive draft amendment requires a new digest and follow-up. Reviewer independence is declared, not authenticated. A fresh whole-project assessment needs a trace and completed challenge for its completed method label; an unavailable challenge stays provisional. Partial source coverage, unknown grades and unresolved concerns remain visible. See the [workflow and field reference](../.agents/skills/project-assess/references/evolve-review.md#freshness-change-traces-and-independent-challenge).
 
 The [project-assess skill](../.agents/skills/project-assess/SKILL.md) guides evidence review and judgment. Its structured review is bound to an assessment ID, source digest and rubric version. It supplies each dimension's scores, confidence, rationale, evidence IDs and recommendations; findings retain separate severity and evidence. Review submission cannot overwrite collected metrics or source identity. Its validation checks structure and provenance, not the truth of an agent's conclusion.
 
