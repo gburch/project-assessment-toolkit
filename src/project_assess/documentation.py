@@ -133,6 +133,80 @@ def _maintenance_sample(leads):
     return selected
 
 
+def maintenance_candidates(entry, sources):
+    """Project retained lexical leads with captured identities, never confirmed drift."""
+    stats = entry.get("stats", {})
+    if stats.get("schema") != SCHEMA or not isinstance(stats.get("maintenanceLeads"), list):
+        return {
+            "status": "not_collected",
+            "candidates": [],
+            "omitted": 0,
+            "gaps": ["Documentation maintenance leads are unavailable for this captured schema."],
+        }
+    leads = stats["maintenanceLeads"]
+    candidates, omitted = [], max(0, len(leads) - MAX_MAINTENANCE_LEADS)
+    for lead in leads[:MAX_MAINTENANCE_LEADS]:
+        if not isinstance(lead, dict) or not isinstance(lead.get("kind"), str):
+            omitted += 1
+            continue
+        locations = []
+        if isinstance(lead.get("locations"), list):
+            for location in lead["locations"]:
+                source = sources.get(location.get("path")) if isinstance(location, dict) else None
+                if (
+                    source is None
+                    or source.get("kind")
+                    not in {
+                        "python",
+                        "javascript",
+                        "source",
+                        "documentation",
+                        "configuration",
+                        "manifest",
+                    }
+                    or type(location.get("line")) is not int
+                    or location["line"] < 1
+                    or not isinstance(source.get("digest"), str)
+                    or type(location.get("end_line", location["line"])) is not int
+                    or location.get("end_line", location["line"]) < location["line"]
+                    or location.get("source_evidence_id", source["id"]) != source["id"]
+                    or location.get("source_digest", source.get("digest")) != source.get("digest")
+                ):
+                    break
+                locations.append(
+                    {
+                        **location,
+                        "source_evidence_id": source["id"],
+                        "source_digest": source.get("digest"),
+                    }
+                )
+        if not locations or len(locations) != len(lead.get("locations", [])):
+            omitted += 1
+            continue
+        candidates.append(
+            {
+                **lead,
+                "locations": locations,
+                "lens": "reuse" if lead.get("kind") == "repeated_guidance_passage" else "quality",
+                "confidence": "low",
+                "source_identity": "captured_snapshot",
+                "source_evidence_ids": sorted(
+                    {location["source_evidence_id"] for location in locations}
+                ),
+            }
+        )
+    return {
+        "status": "partial" if omitted else "complete",
+        "candidates": candidates,
+        "omitted": omitted,
+        "gaps": [
+            "Some documentation leads lack compatible captured locations or exceed the projection limit."
+        ]
+        if omitted
+        else [],
+    }
+
+
 def _reference_evidence(
     texts, manifest_paths, sources, scripts, *, byte_limit, inventory_paths=None
 ):

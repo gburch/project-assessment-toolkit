@@ -15,6 +15,7 @@ from pathlib import Path
 from .badges import MARK, badge_assets, badge_data
 from .collector import _open_directory
 from .confidence import confidence_assessment
+from .report_markdown import markdown_report
 from .rubric import DIMENSIONS
 
 _STATIC = Path(__file__).with_name("static")
@@ -145,18 +146,44 @@ def _timeline(report, rows):
     """Snapshots oldest first; the shown one is always last and unknown never becomes zero."""
     assessment = report["assessment"]
 
-    def entry(identity, created, revision, reviewed, scores):
+    def entry(identity, created, revision, reviewed, scores, metadata):
         revision = (
             revision
             if isinstance(revision, str) and re.fullmatch(r"[0-9a-fA-F]{7,64}", revision)
             else None
         )
+        transition = metadata.get("comparison") or {}
+        event = transition.get("event")
+        if event not in {
+            "initial",
+            "source_change",
+            "evidence_update",
+            "goal_baseline",
+            "not_comparable",
+        }:
+            event = "unknown"
         return {
             "assessment_id": identity,
             "date": created[:10] if isinstance(created, str) else None,
             "revision": revision[:7].lower() if revision else None,
             "reviewed": reviewed,
             "scores": scores,
+            **{
+                key: metadata.get(key)
+                for key in (
+                    "review_id",
+                    "rubric_version",
+                    "scope_digest",
+                    "manifest_digest",
+                    "goal_revision",
+                )
+            },
+            "complete": metadata.get("complete") is True,
+            "comparison": {
+                "comparable": transition.get("comparable") is True
+                and event in {"source_change", "evidence_update", "goal_baseline"},
+                "event": event,
+            },
         }
 
     earlier = [
@@ -172,16 +199,33 @@ def _timeline(report, rows):
                 ]
                 for dimension in DIMENSIONS
             },
+            item,
         )
         for item in report.get("timeline") or []
         if isinstance(item, dict) and item.get("assessment_id") != assessment["id"]
     ]
+    current_metadata = next(
+        (
+            item
+            for item in report.get("timeline") or []
+            if isinstance(item, dict) and item.get("assessment_id") == assessment["id"]
+        ),
+        {},
+    )
     current = entry(
         assessment["id"],
         assessment.get("created_at"),
         assessment.get("source", {}).get("revision"),
         report.get("review") is not None,
         {row["id"]: [row["capability"], row["burden"]] for row in rows},
+        {
+            **current_metadata,
+            "review_id": (report.get("review") or {}).get("id"),
+            "rubric_version": assessment.get("rubric_version"),
+            "scope_digest": assessment.get("scope_digest"),
+            "manifest_digest": assessment.get("source", {}).get("manifest_digest"),
+            "complete": assessment.get("complete") is True,
+        },
     )
     return [*earlier[-11:], current]
 
@@ -752,8 +796,6 @@ def _remove_at(parent, name):
 
 def export_report(report, state_dir, *, forbidden_roots=()):
     """Write a fresh private bundle under configured state, without target writes."""
-    from .service import markdown_report
-
     assessment = report["assessment"]
     assessment_id = assessment["id"]
     if not isinstance(assessment_id, str) or not re.fullmatch(r"a_[0-9a-f]{1,64}", assessment_id):

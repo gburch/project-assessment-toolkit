@@ -118,7 +118,7 @@ def _source_hashes(raw: Mapping[str, Any]) -> Mapping[str, Any]:
     return merged
 
 
-def _relative_source(path: Any, report_root: Any, root: Path) -> str | None:
+def _relative_source(path: Any, report_root: Any) -> str | None:
     if not isinstance(path, str) or not path:
         return None
     path = path.replace("\\", "/")
@@ -139,14 +139,14 @@ def _relative_source(path: Any, report_root: Any, root: Path) -> str | None:
     return path
 
 
-def _source_status(raw: Mapping[str, Any], root: Path, manifest: Mapping[str, str]) -> str:
+def _source_status(raw: Mapping[str, Any], manifest: Mapping[str, str]) -> str:
     hashes = _source_hashes(raw)
     if not hashes:
         return "unknown"
     report_root = raw.get("root") or _mapping(raw.get("project")).get("root")
     statuses = []
     for path, digest in list(hashes.items())[:MAX_ITEMS]:
-        relative = _relative_source(path, report_root, root)
+        relative = _relative_source(path, report_root)
         if relative is None or not isinstance(digest, str) or relative not in manifest:
             statuses.append("unknown")
         else:
@@ -306,7 +306,7 @@ def summarize(
         rows = _items(raw.get("tests"))
     features = _items(raw.get("coverageFeatures"))
     outcomes = _outcomes(rows)
-    source_status = _source_status(raw, root, captured)
+    source_status = _source_status(raw, captured)
     revision_status = _status(_revision(raw), revision)
     root_status = _root_status(raw, root)
     identity_status = (

@@ -48,6 +48,21 @@ def test_standard_deep_changes_evidence_scope_without_changing_source_or_goals(t
     assert len(service.history(first["project_id"])["goals"]) == 1
 
 
+def test_equivalent_deep_provider_selection_keeps_scope_but_preserves_provenance(tmp_path):
+    root, service = project(tmp_path)
+    automatic = service.scan(root, analysis_profile="deep")
+    explicit = service.scan(root, analysis_profile="deep", analyzers=["joern", "vulture"])
+    assert automatic["source"] == explicit["source"]
+    assert automatic["scope_digest"] == explicit["scope_digest"]
+    assert automatic["facts"]["collection"]["requested_analyzers"] == []
+    assert explicit["facts"]["collection"]["requested_analyzers"] == ["joern", "vulture"]
+    for name in ("joern", "vulture"):
+        assert (
+            automatic["facts"]["optional_analysis"][name]["analyzer"]["selection"] == "deep_profile"
+        )
+        assert explicit["facts"]["optional_analysis"][name]["analyzer"]["selection"] == "explicit"
+
+
 def test_java_swift_sarif_uses_shared_evidence_doctor_and_digest_context(tmp_path):
     root, service = project(tmp_path)
     supplied = tmp_path / "findings.sarif"
