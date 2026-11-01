@@ -70,6 +70,12 @@ claim, never independently verified measurement. Optional `examples` contain
 must belong to that declared scope. Do not invent a concrete change to illustrate
 a general testimony.
 
+Partial elapsed time can establish an already-incurred lower bound without
+establishing completed gate time or a person's blocked wait. The evidence
+inventory retains partial elapsed reports separately. Observation reports can
+name `wall_elapsed_lower_bound`, `blocked_wait_lower_bound` or
+`active_effort_lower_bound`; these do not satisfy completed-cost support.
+
 The importer rejects unknown fields, scores, raw logs, duplicate keys, malformed
 paths and unbounded text. It retains redacted attribution, claims, scope,
 limitations, source-match status and explicit gaps. Importing does not set scores,
@@ -83,3 +89,31 @@ anchors, retain unresolved ranges, and challenge contradictory evidence before
 claiming high confidence. Do not discount recurrent owner experience merely
 because independent measurements are unavailable, or present testimony as a
 verified run.
+
+## Build confidence from the available evidence
+
+Every rating exposes `burden.support.readiness` in `confidence_assessment`, even
+when confidence is low or medium or the score is unknown. It inventories cited
+source records, applicable attributed experience, matching change-cost reports,
+reports needing applicability review, related traces, recurrence and a bound
+dimension challenge. Its `next_steps` identify missing corroboration; these are
+inputs to judgment, not an automatically assigned confidence level.
+
+Use `change_traces.steps.activity` to distinguish `edit`, `verification`,
+`inspection` and `unknown`. A read/dependency checkpoint is not a required edit.
+Unlabeled steps remain unknown. These activities are authored declarations;
+verify the actual edit sites and their protected outcomes. A required verification
+wait can be costly even when no source edits are involved.
+
+A high-confidence project claim also needs evidence of recurrence: attributable
+dimension-specific experience on `some_changes`, `most_changes` or `all_changes`,
+or multiple distinct dated source-matched cost observations. One isolated timing
+supports its workflow claim, not recurring project burden. Several reports do not by themselves
+prove representative project frequency; reconcile their relevance and contrary
+paths in the support rationale and exact-draft challenge. A joint experience
+claim still cannot establish each dimension's individual frequency.
+
+Keep the declared scope visible. Satisfying workflow support prerequisites does
+not remove partial-collection or broader project-review limits. No inventory,
+matched identity, activity count or completed challenge proves the experience,
+the interpretation or a burden score.

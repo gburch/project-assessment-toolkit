@@ -85,7 +85,12 @@ def test_grounded_source_finding_does_not_upgrade_either_project_axis(captured):
     assert service.overview(snapshot["id"])["confidence_assessment"] == result
     assert service.evolve(snapshot["id"])["goal_alignment"]["confidence_assessment"] == result
     assert service.doctor(snapshot["id"])["goal_alignment"]["confidence_assessment"] == result
-    assert "excerpt" not in json.dumps(result) and "counterevidence" not in json.dumps(result)
+    encoded = json.dumps(result)
+    assert review["findings"][0]["support"]["counterevidence"] not in encoded
+    assert all(
+        citation["excerpt"] not in encoded
+        for citation in review["findings"][0]["support"]["citations"]
+    )
 
 
 def test_verified_receipt_survives_reopen_and_full_draft_digest(captured):

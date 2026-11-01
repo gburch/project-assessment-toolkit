@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections import Counter
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .rubric import DIMENSIONS
@@ -73,6 +75,185 @@ def _context_claims(entry, dimension):
     ]
 
 
+def _burden_recurrence(contexts, costs):
+    if any(
+        claim.get("frequency") in {"some_changes", "most_changes", "all_changes"}
+        for _, claim in contexts
+    ):
+        return "reported_recurring"
+    instants = set()
+    for entry in costs:
+        timestamp = entry.get("stats", {}).get("observed_at")
+        if not isinstance(timestamp, str):
+            continue
+        try:
+            instant = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            if instant.utcoffset() is not None:
+                instants.add(instant.astimezone(UTC))
+        except (TypeError, ValueError):
+            continue
+    return "multiple_dated_observations" if len(instants) > 1 else "not_established"
+
+
+def _burden_observation_paths(entry, claim=None):
+    stats = entry.get("stats", {})
+    if claim is None:
+        return set(stats.get("scenario", {}).get("scope", []))
+    return set(stats.get("scope", {}).get("paths", [])) | {
+        path for example in claim.get("examples", []) for path in example.get("paths", [])
+    }
+
+
+def _partial_elapsed(entry, dimension):
+    stats = entry.get("stats", {})
+    if entry.get("kind") == "burden-context":
+        return any(
+            set(claim.get("dimensions", [])) == {dimension}
+            and claim.get("completion") == "partial"
+            and claim.get("duration", {}).get("semantics")
+            in {"wall_elapsed", "blocked_wait", "active_effort"}
+            for claim in stats.get("claims", [])
+        )
+    return (
+        entry.get("kind") == "observation"
+        and stats.get("type") == "change_cost"
+        and any(
+            result.get("name")
+            in {"wall_elapsed_lower_bound", "blocked_wait_lower_bound", "active_effort_lower_bound"}
+            and result.get("status") == "observed"
+            and type(result.get("value")) in {int, float}
+            and math.isfinite(result["value"])
+            and result["value"] >= 0
+            and result.get("unit") in {"s", "sec", "seconds", "ms", "minutes", "min", "hours", "h"}
+            for result in stats.get("results", [])
+        )
+    )
+
+
+def _burden_challenge_matches(assessment, review, dimension):
+    challenge = review.get("challenge", {})
+    author = review.get("methodology", {}).get("reviewer_id", "")
+    challenger = challenge.get("reviewer_id", "")
+    if not (
+        challenge.get("status") == "completed"
+        and dimension in challenge.get("burden_dimensions", [])
+        and _nonblank(author)
+        and _nonblank(challenger)
+        and author.casefold() not in {"unassigned", challenger.casefold()}
+        and challenger.casefold() != "unassigned"
+    ):
+        return False
+    from .service import _draft_digest
+
+    try:
+        return challenge.get("draft_digest") == _draft_digest(assessment, review)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def burden_evidence_inventory(assessment, review, dimension):
+    """Expose available corroboration and next steps without assigning confidence."""
+    rating = review.get("ratings", {}).get(dimension, {})
+    support = rating.get("burden_support") or {}
+    entries = {entry["id"]: entry for entry in assessment.get("evidence", [])}
+    cited = [entries[eid] for eid in rating.get("evidence_ids", []) if eid in entries]
+    source_ids = {entry["id"] for entry in cited if entry.get("kind") in SOURCE_KINDS}
+    contexts = [(entry, claim) for entry in cited for claim in _context_claims(entry, dimension)]
+    costs = [entry for entry in cited if _observed_cost(entry)]
+    partial_elapsed_ids = {entry["id"] for entry in cited if _partial_elapsed(entry, dimension)}
+    experience_ids = {entry["id"] for entry, _ in contexts}
+    cost_ids = {entry["id"] for entry in costs}
+    explicit = bool(support.get("change_trace_ids"))
+    traces = [
+        trace
+        for trace in review.get("change_traces", [])
+        if trace.get("id") in support.get("change_trace_ids", [])
+        or not explicit
+        and any(source_ids.intersection(step.get("evidence_ids", [])) for step in trace["steps"])
+    ]
+    activities = Counter(dict.fromkeys(("edit", "verification", "inspection", "unknown"), 0))
+    trace_sources = set()
+    for trace in traces:
+        for step in trace["steps"]:
+            activity = step.get("activity", "unknown")
+            activities[activity if activity in activities else "unknown"] += 1
+            trace_sources.update(
+                eid
+                for eid in step.get("evidence_ids", [])
+                if entries.get(eid, {}).get("kind") in SOURCE_KINDS
+            )
+    trace_paths = {entries[eid].get("path") for eid in trace_sources}
+    relevant_contexts = [
+        (entry, claim)
+        for entry, claim in contexts
+        if not _burden_observation_paths(entry, claim)
+        or trace_paths.intersection(_burden_observation_paths(entry, claim))
+    ]
+    relevant_costs = [
+        entry for entry in costs if trace_paths.intersection(_burden_observation_paths(entry))
+    ]
+    applicable_ids = {entry["id"] for entry, _ in relevant_contexts} | {
+        entry["id"] for entry in relevant_costs
+    }
+    limited = {
+        entry["id"]
+        for entry in cited
+        if entry.get("kind") in REPORT_KINDS
+        and (
+            entry["id"] not in applicable_ids
+            or entry.get("stats", {}).get("sourceIdentity", {}).get("overall") != "matched"
+        )
+    }
+    recurrence = _burden_recurrence(relevant_contexts, relevant_costs)
+    challenged = _burden_challenge_matches(assessment, review, dimension)
+    next_steps = []
+    if not source_ids:
+        next_steps.append("Cite current captured source implementing the costly mechanism.")
+    if not trace_sources:
+        next_steps.append(
+            "Trace a representative change through its required completion path and current source."
+        )
+    if activities["unknown"]:
+        next_steps.append(
+            "Label edits, verification and inspection separately; checkpoints are not mandatory edits, and verification waits can be costly."
+        )
+    if not contexts and not costs:
+        next_steps.append(
+            "Corroborate scope with attributed dimension-specific experience or existing matched cost reports; keep source estimates labeled."
+        )
+    if limited:
+        next_steps.append(
+            "Reconcile report scope, dates, source identity and timing/completion semantics."
+        )
+    if partial_elapsed_ids:
+        next_steps.append(
+            "Retain partial elapsed as an already-incurred lower bound, not total gate time or a person's blocked wait."
+        )
+    if recurrence == "not_established":
+        next_steps.append(
+            "For project recurrence, use representative dated costs or explicit dimension-specific frequency; isolated costs stay workflow-scoped."
+        )
+    if not challenged:
+        next_steps.append(
+            "Have a distinct reviewer challenge this dimension's scope, cost and contrary evidence against the exact draft."
+        )
+    return {
+        "source_evidence_ids": sorted(source_ids),
+        "experience_evidence_ids": sorted(experience_ids),
+        "matched_cost_evidence_ids": sorted(cost_ids),
+        "partial_elapsed_evidence_ids": sorted(partial_elapsed_ids),
+        "limited_report_evidence_ids": sorted(limited),
+        "trace_ids": [trace["id"] for trace in traces],
+        "trace_selection": "explicit" if explicit else "shared_source_citations",
+        "trace_activities": dict(activities),
+        "source_trace_evidence_ids": sorted(trace_sources),
+        "recurrence": recurrence,
+        "challenge": "bound_dimension_review" if challenged else "not_established",
+        "next_steps": next_steps,
+        "caveat": "Evidence inventory, not a confidence rating or verified cost.",
+    }
+
+
 def burden_support_assessment(assessment, review, dimension):
     """Check explicit support prerequisites, not the truth of a burden judgment.
 
@@ -89,6 +270,7 @@ def burden_support_assessment(assessment, review, dimension):
         "claim": support.get("claim"),
         "gaps": [],
         "evidence_ids": list(support.get("observation_ids", [])),
+        "readiness": burden_evidence_inventory(assessment, review, dimension),
     }
     if rating.get("burden_confidence") != "high":
         return result
@@ -132,14 +314,6 @@ def burden_support_assessment(assessment, review, dimension):
             "source-matched explicit change-cost observation is cited; joint claims, JUnit "
             "sums and source identity alone do not establish the cost."
         )
-    if (
-        scope == "project"
-        and contexts
-        and not costs
-        and all(claim.get("frequency", "unknown") == "unknown" for _, claim in contexts)
-    ):
-        gaps.append("Project-scoped experienced burden needs an explicit change-frequency basis.")
-
     traces = {trace["id"]: trace for trace in review.get("change_traces", [])}
     trace_ids = support.get("change_trace_ids", [])
     selected = [traces[tid] for tid in trace_ids if tid in traces]
@@ -155,23 +329,26 @@ def burden_support_assessment(assessment, review, dimension):
     if not source_ids:
         gaps.append("Change traces must corroborate the hurdle with captured current source.")
     source_paths = {entries[eid].get("path") for eid in source_ids}
-    context_paths = {
-        path
+    relevant_contexts = [
+        (entry, claim)
         for entry, claim in contexts
-        for path in (
-            entry.get("stats", {}).get("scope", {}).get("paths", [])
-            + [path for example in claim.get("examples", []) for path in example.get("paths", [])]
-        )
-    }
-    cost_paths = {
-        path
-        for entry in costs
-        for path in entry.get("stats", {}).get("scenario", {}).get("scope", [])
-    }
-    if (context_paths or cost_paths) and not source_paths.intersection(context_paths | cost_paths):
+        if not _burden_observation_paths(entry, claim)
+        or source_paths.intersection(_burden_observation_paths(entry, claim))
+    ]
+    relevant_costs = [
+        entry for entry in costs if source_paths.intersection(_burden_observation_paths(entry))
+    ]
+    if len(relevant_contexts) != len(contexts) or len(relevant_costs) != len(costs):
         gaps.append(
-            "Observation scope is not corroborated by a current source change trace; "
+            "Each observation scope must be corroborated by a current source change trace; "
             "reconcile the scope before claiming high confidence."
+        )
+    if (
+        scope == "project"
+        and _burden_recurrence(relevant_contexts, relevant_costs) == "not_established"
+    ):
+        gaps.append(
+            "Project-scoped burden needs recurring dimension-specific experience or multiple distinct dated cost observations; one isolated workflow cost does not establish project recurrence."
         )
 
     method = review.get("methodology", {})
@@ -389,7 +566,14 @@ def confidence_assessment(assessment, review):
             )
         burden_support = burden_support_assessment(assessment, review, dimension)
         if burden_support["status"] == "structured_support_present_for_declared_scope":
-            burden = []
+            burden = (
+                list(common)
+                + [
+                    "Support covers the declared workflow only; it does not establish project-wide burden confidence."
+                ]
+                if burden_support.get("scope") == "workflow"
+                else []
+            )
         elif burden_support["status"] == "withheld":
             burden.extend(burden_support["gaps"])
         dimensions[dimension] = {
@@ -424,5 +608,5 @@ def confidence_assessment(assessment, review):
                 for row in findings
             ),
         },
-        "caveat": "Finding confidence and dimension confidence are authored judgments. Verified source spans establish matching captured bytes and quoted ranges, not semantic correctness, reachability, runtime effectiveness or project-wide confidence. Structured burden support records prerequisites for the declared scope, not authenticated experience, verified timing or a certified score. A completed challenge does not upgrade either axis.",
+        "caveat": "Finding confidence and dimension confidence are authored judgments. Verified source spans establish matching captured bytes and quoted ranges, not semantic correctness, reachability, runtime effectiveness or project-wide confidence. Structured burden support records prerequisites for the declared scope, not authenticated experience, verified timing or a certified score. A completed challenge does not upgrade either axis. Activities are declarations; shared source citations do not prove trace relevance. Distinct observation dates do not establish representative recurrence.",
     }

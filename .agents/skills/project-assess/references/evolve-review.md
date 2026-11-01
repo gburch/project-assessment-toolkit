@@ -25,7 +25,7 @@ Evolve preserves these fields under `goal_alignment` together with per-dimension
 
 Use `review-template ID --mode fresh|refresh` to opt into `methodology` version 1. Set `reviewer_id` to the actual author and mark every dimension `reassessed`, `carried_forward` or `unreviewed`. A fresh review cannot carry judgments forward. A refresh may carry unchanged scores, confidence and burden basis from `based_on_review_id` only when source revision, manifest, collection scope and rubric match; cite evidence in the current snapshot. Changed source needs reassessment. Unknown dimensions remain unknown. Omitting methodology preserves legacy compatibility and makes freshness unestablished.
 
-Add bounded `change_traces` with unique `id`, `title`, ordered `steps: [{owner, change, evidence_ids}]`, `cost`, `invariant`, `counterevidence` and `gaps`. Trace valuable changes through actual callers, state owners and failure boundaries. Explain necessary coordination as well as avoidable friction. One trace can suffice for a small utility; a large system needs representative coverage of its important risks. At least one cited trace is required for a completed fresh whole-project review, but the tool cannot establish representativeness mechanically.
+Add bounded `change_traces` with unique `id`, `title`, ordered `steps: [{owner, change, evidence_ids}]`, `cost`, `invariant`, `counterevidence` and `gaps`. Each step can include `activity: edit|verification|inspection|unknown`; omitted activity stays unknown. Separate actual required edit sites from read/dependency checkpoints. The activity is an authored declaration, not a verified edit count; a costly verification wait may require no edit. Trace valuable changes through actual callers, state owners and failure boundaries. Explain necessary coordination as well as avoidable friction. One trace can suffice for a small utility; a large system needs representative coverage of its important risks. At least one cited trace is required for a completed fresh whole-project review, but the tool cannot establish representativeness mechanically.
 
 For burden, follow a meaningful change through both focused iteration and its required completion path. Account for setup, queue/feedback waits, security rework, reruns and recovery, with frequency and scope. A documented fast path is counterevidence, not proof of achieved cost. Record attributed maintainer experience and reconcile it with tool/history evidence; do not relabel a report as an independently measured run or demand a stopwatch before recognizing experienced friction. Necessary protection still counts toward upkeep. Large historical modules are leads for tracing ownership and edit propagation, not reasons either to assign a high score automatically or to dismiss the concern. The challenge should test both overstatement and unjustified optimism.
 
@@ -46,6 +46,17 @@ An optional finding `support` contains `confidence: low|medium|high`, `scope: so
 PAT verifies full-file snapshot digests and exact redacted spans when preparing the challenge and submitting the review. Bounds are four spans per finding, 32 per review, 80 lines and 4,000 characters per span. Stale, foreign, clipped or altered source fails validation; locate the captured bytes or rescan instead of silently using newer source. Server-generated `support_verification` preserves checked identities and span hashes. Existing saved receipts remain historical evidence even when the working tree later changes. They verify source identity and quoted content, not the reasoning or independent agreement.
 
 Reports separate declared confidence from this grounding through `confidence_assessment`. Missing legacy support remains unestablished; raw ratings and history are retained. Broad score blockers include partial review scope, missing current effectiveness evidence and an observed-burden declaration supported only by source. Use actual change/operational observations when available; source estimates remain useful without pretending to measure effort. Imported report presence alone does not establish its source, execution or scope. Resolve these gaps with appropriate evidence, not repeated reviews until a higher label appears.
+
+For every burden rating, read `support.readiness` and its next useful evidence,
+including for low/medium confidence or an unknown score. The inventory separates
+cited mechanisms, applicable experience, matching cost observations, recurrence,
+declared trace activities and a bound dimension challenge. Shared source citations
+can identify related traces but do not establish their relevance. High project
+support needs recurring dimension-specific experience or multiple distinct dated
+matching cost observations; a single isolated timing supports workflow scope.
+Even supported workflow confidence retains project-breadth and collection limits.
+Inventory presence never assigns or promotes confidence. See [burden evidence](burden-evidence.md)
+for import semantics and applicability checks.
 
 ## Verification and implementation
 

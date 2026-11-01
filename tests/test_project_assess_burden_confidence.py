@@ -206,7 +206,10 @@ def test_partial_quantified_run_is_not_promoted_to_complete_gate_cost():
         completion="partial",
     )
     bind(assessment, review)
-    assert support(assessment, review)["status"] == "withheld"
+    result = support(assessment, review)
+    assert result["status"] == "withheld"
+    assert result["readiness"]["partial_elapsed_evidence_ids"] == ["experience"]
+    assert result["readiness"]["experience_evidence_ids"] == []
 
 
 @pytest.mark.parametrize("kind", ["junit", "observation", "burden-analysis"])
@@ -274,6 +277,147 @@ def test_legacy_high_remains_declared_but_is_not_supported_by_default():
     assert result["declared_confidence"] == "high"
     assert result["support"]["status"] == "withheld"
     assert result["support"]["gaps"]
+
+
+@pytest.mark.parametrize("confidence", ["low", "medium"])
+def test_every_confidence_exposes_evidence_and_actual_activity_categories(confidence):
+    assessment, review = supported()
+    rating = review["ratings"]["testing"]
+    rating.update(burden_confidence=confidence, burden_basis="source_estimate")
+    claim = assessment["evidence"][1]["stats"]["claims"][0]
+    claim["dimensions"] = ["testing", "security"]
+    trace = review["change_traces"][0]
+    trace["steps"] = [
+        {"activity": "inspection", "evidence_ids": ["source"]},
+        {"activity": "verification", "evidence_ids": ["source"]},
+        {"evidence_ids": ["source"]},
+    ]
+    bind(assessment, review)
+    before = deepcopy(review)
+    result = support(assessment, review)
+    inventory = result["readiness"]
+    assert result["status"] == "not_requested"
+    assert inventory["source_evidence_ids"] == ["source"]
+    assert inventory["experience_evidence_ids"] == []
+    assert inventory["limited_report_evidence_ids"] == ["experience"]
+    assert inventory["trace_activities"] == {
+        "edit": 0,
+        "verification": 1,
+        "inspection": 1,
+        "unknown": 1,
+    }
+    assert inventory["recurrence"] == "not_established"
+    assert inventory["challenge"] == "bound_dimension_review"
+    assert inventory["next_steps"]
+    assert review == before and rating["burden_confidence"] == confidence
+
+
+def cost_observation(
+    identity="experience", timestamp="2026-11-01T12:00:00Z", path="src/service.py"
+):
+    return {
+        "id": identity,
+        "kind": "observation",
+        "stats": {
+            "type": "change_cost",
+            "observed_at": timestamp,
+            "sourceIdentity": {"overall": "matched"},
+            "scenario": {"scope": [path]},
+            "results": [
+                {"name": "blocked_wait", "value": 300, "unit": "seconds", "status": "observed"}
+            ],
+        },
+    }
+
+
+def test_one_observed_workflow_is_not_recurring_project_burden():
+    assessment, review = supported()
+    assessment["evidence"][1] = cost_observation()
+    bind(assessment, review)
+    assert support(assessment, review)["status"] == "withheld"
+    assert support(assessment, review)["readiness"]["recurrence"] == "not_established"
+    review["ratings"]["testing"]["burden_support"]["scope"] = "workflow"
+    bind(assessment, review)
+    assert support(assessment, review)["status"] == "structured_support_present_for_declared_scope"
+
+
+def test_repeated_costs_require_distinct_instants_and_relevant_trace_scope():
+    assessment, review = supported()
+    assessment["evidence"][1] = cost_observation()
+    assessment["evidence"].append(cost_observation("second", "2026-11-01T13:00:00+01:00"))
+    rating = review["ratings"]["testing"]
+    rating["evidence_ids"].append("second")
+    rating["burden_support"]["observation_ids"].append("second")
+    bind(assessment, review)
+    assert support(assessment, review)["status"] == "withheld"
+    # A second timezone spelling of the same instant is not another observation.
+    assert support(assessment, review)["readiness"]["recurrence"] == "not_established"
+    assessment["evidence"][-1]["stats"]["observed_at"] = "2026-11-02T12:00:00Z"
+    assessment["evidence"][-1]["stats"]["scenario"]["scope"] = ["src/unrelated.py"]
+    assessment["evidence"].append(
+        {"id": "other-source", "kind": "python", "path": "src/unrelated.py"}
+    )
+    bind(assessment, review)
+    assert support(assessment, review)["status"] == "withheld"
+    assert support(assessment, review)["readiness"]["recurrence"] == "not_established"
+    assessment["evidence"][-2]["stats"]["scenario"]["scope"] = ["src/service.py"]
+    bind(assessment, review)
+    result = support(assessment, review)
+    assert result["status"] == "structured_support_present_for_declared_scope"
+    assert result["readiness"]["recurrence"] == "multiple_dated_observations"
+
+
+def test_isolated_experience_is_not_project_recurrence():
+    assessment, review = supported()
+    assessment["evidence"][1]["stats"]["claims"][0]["frequency"] = "isolated"
+    bind(assessment, review)
+    assert support(assessment, review)["status"] == "withheld"
+    review["ratings"]["testing"]["burden_support"]["scope"] = "workflow"
+    bind(assessment, review)
+    assert support(assessment, review)["status"] == "structured_support_present_for_declared_scope"
+
+
+def test_workflow_high_support_does_not_clear_project_breadth_blockers():
+    assessment, review = supported()
+    assessment["complete"] = False
+    review["coverage"]["scope"] = "focused"
+    review["coverage"]["dimension_reviews"]["testing"]["status"] = "partial"
+    review["ratings"]["testing"]["burden_support"]["scope"] = "workflow"
+    bind(assessment, review)
+    burden = confidence_assessment(assessment, review)["dimensions"]["testing"]["burden"]
+    assert burden["support"]["status"] == "structured_support_present_for_declared_scope"
+    assert any("breadth is partial" in blocker for blocker in burden["blockers"])
+    assert any("Collection is partial" in blocker for blocker in burden["blockers"])
+
+
+def test_activity_relabeling_invalidates_the_old_challenge():
+    assessment, review = supported()
+    assert support(assessment, review)["readiness"]["challenge"] == "bound_dimension_review"
+    review["change_traces"][0]["steps"][0]["activity"] = "inspection"
+    assert support(assessment, review)["readiness"]["challenge"] == "not_established"
+    assert support(assessment, review)["status"] == "withheld"
+
+
+def test_explicit_elapsed_lower_bound_is_retained_without_becoming_completed_cost():
+    assessment, review = supported()
+    assessment["evidence"][1] = cost_observation()
+    assessment["evidence"][1]["stats"]["results"][0]["name"] = "wall_elapsed_lower_bound"
+    review["ratings"]["testing"]["burden_support"]["scope"] = "workflow"
+    bind(assessment, review)
+    result = support(assessment, review)
+    assert result["status"] == "withheld"
+    assert result["readiness"]["partial_elapsed_evidence_ids"] == ["experience"]
+    assert result["readiness"]["matched_cost_evidence_ids"] == []
+
+
+def test_summed_partial_case_time_is_not_a_wall_time_lower_bound():
+    assessment, review = supported()
+    claim = assessment["evidence"][1]["stats"]["claims"][0]
+    claim.update(
+        completion="partial", duration={"seconds": 5000, "semantics": "summed_test_elapsed"}
+    )
+    bind(assessment, review)
+    assert support(assessment, review)["readiness"]["partial_elapsed_evidence_ids"] == []
 
 
 @pytest.fixture

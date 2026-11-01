@@ -399,6 +399,12 @@ async function checkFirstScanAndReview(browser, info) {
     Object.assign(result.ratings.testing, { capability, burden: 2, confidence: "medium", burden_basis: "source_estimate", burden_confidence: "low",
       rationale: "Synthetic browser review <img src=x onerror=window.reviewPwned=1>",
       evidence_ids: [snapshot.evidence.find((entry) => entry.kind === "python").id] });
+    const sourceId = result.ratings.testing.evidence_ids[0];
+    result.change_traces = [{ id: "feedback", title: "Synthetic feedback workflow", steps: [
+      { owner: "Reader", change: "Inspect the protected boundary", activity: "inspection", evidence_ids: [sourceId] },
+      { owner: "Verifier", change: "Check the required output", activity: "verification", evidence_ids: [sourceId] },
+      { owner: "Unclassified checkpoint", change: "Activity is not specified", evidence_ids: [sourceId] },
+    ], cost: "No observed time or edit count", invariant: "Preserve the supported output", counterevidence: "A checkpoint need not require a source edit", gaps: ["No current cost observation"] }];
     return result;
   };
   try {
@@ -489,6 +495,14 @@ async function checkFirstScanAndReview(browser, info) {
     assert.equal(await page.evaluate(() => window.reviewPwned), undefined);
     assert.equal(await page.locator("main img[src='x']").count(), 0);
     await expect(page.locator("#badges img")).toHaveCount(9);
+    const burdenEvidence = ratingCard(page, "Testing").locator(".burden-readiness");
+    await burdenEvidence.locator("..").locator(":scope > summary").click();
+    await expect(burdenEvidence).toBeVisible();
+    await expect(burdenEvidence).toContainText("edit 0 · verification 1 · inspection 1 · unknown 1");
+    await expect(burdenEvidence).toContainText("Applicable attributed experience: 0");
+    await expect(burdenEvidence).toContainText("Recurrence: Not established");
+    await expect(burdenEvidence).toContainText("Next useful evidence");
+    await expect(ratingCard(page, "Testing")).toContainText("declared low confidence");
     await page.screenshot({ path: path.join(output, "project-assess-first-review-mobile.png"), fullPage: true });
     await page.reload();
     await expect(ratingCard(page, "Testing")).toContainText("3 / 5");

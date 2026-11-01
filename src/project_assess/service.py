@@ -590,7 +590,15 @@ CHANGE_TRACE_SCHEMA = _object(
             "type": "array",
             "minItems": 1,
             "maxItems": 20,
-            "items": _object({"owner": TEXT, "change": TEXT, "evidence_ids": IDS}),
+            "items": _object(
+                {
+                    "owner": TEXT,
+                    "change": TEXT,
+                    "evidence_ids": IDS,
+                    "activity": {"enum": ["edit", "verification", "inspection", "unknown"]},
+                },
+                required=["owner", "change", "evidence_ids"],
+            ),
         },
         "cost": TEXT,
         "invariant": TEXT,
@@ -2662,6 +2670,38 @@ def _confidence_markdown(assessment, review):
                     + _markdown_text(support.get("scope") or "undeclared")
                 )
                 lines.extend("  - " + _markdown_text(gap) for gap in support.get("gaps", []))
+                readiness = support.get("readiness", {})
+                if readiness:
+                    lines.append(
+                        "  - Burden evidence: "
+                        + "; ".join(
+                            f"{label}: {len(readiness.get(key, []))}"
+                            for label, key in (
+                                ("source", "source_evidence_ids"),
+                                ("attributed experience", "experience_evidence_ids"),
+                                ("matched cost reports", "matched_cost_evidence_ids"),
+                                ("partial elapsed reports", "partial_elapsed_evidence_ids"),
+                                ("limited reports", "limited_report_evidence_ids"),
+                            )
+                        )
+                    )
+                    lines.append(
+                        "  - Declared trace activities: "
+                        + _markdown_text(
+                            "; ".join(
+                                f"{activity}: {count}"
+                                for activity, count in readiness["trace_activities"].items()
+                            )
+                        )
+                        + "; recurrence: "
+                        + _markdown_text(readiness["recurrence"])
+                        + "; challenge: "
+                        + _markdown_text(readiness["challenge"])
+                    )
+                    lines.extend(
+                        "  - Next evidence: " + _markdown_text(step)
+                        for step in readiness["next_steps"]
+                    )
     for row in confidence["findings"]:
         lines += [
             "",
@@ -2725,6 +2765,8 @@ def _planning_markdown(alignment):
                 + _markdown_text(step["owner"])
                 + ": "
                 + _markdown_text(step["change"])
+                + "; activity (declared): "
+                + _markdown_text(step.get("activity", "unknown"))
                 + "; evidence: "
                 + _markdown_text(", ".join(step["evidence_ids"]))
             )

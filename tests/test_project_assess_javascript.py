@@ -38,7 +38,7 @@ def test_actual_grammars_parse_four_source_forms_without_executing_them(
 
     assert record["available"] and record["parsed"] and record["status"] == "complete"
     assert record["role"] == "production"
-    assert record["analyzer"]["version"] == "3"
+    assert record["analyzer"]["version"] == "4"
     assert all(record["analyzer"]["packages"].values())
     assert record["module"]["function_count"] == 1
     assert record["functions"][0]["decisions"] == 1

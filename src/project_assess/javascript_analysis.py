@@ -20,7 +20,7 @@ from .js_controls import DIMENSIONS as CONTROL_DIMENSIONS
 from .js_controls import analyze_javascript_controls
 from .static_analysis import source_role
 
-VERSION = "3"
+VERSION = "4"
 SUPPORTED_TREE_SITTER = ">=0.25.2,<0.26"
 MAX_BYTES = 8 * 1024 * 1024
 MAX_NODES = 100_000
@@ -559,6 +559,8 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
                     "line": function["location"]["line"],
                     "end_line": function["location"]["end_line"],
                     "role": row["role"],
+                    "generated_hint": row.get("generated_hint", False),
+                    "vendor_hint": row.get("vendor_hint", False),
                     "decision_points": function["decisions"],
                     "control_nesting": function["nesting"],
                     "partial": function["partial"],
@@ -694,6 +696,8 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
                 "path": row["path"],
                 "role": row["role"],
                 "role_basis": row["role_basis"],
+                "generated_hint": row.get("generated_hint", False),
+                "vendor_hint": row.get("vendor_hint", False),
                 "status": row["status"],
                 **row["module"],
                 "max_decision_points": max(

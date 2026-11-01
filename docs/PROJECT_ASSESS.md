@@ -195,7 +195,26 @@ Optional `review_context` records `tool_code_digest` and `loaded_instructions: [
 
 High declared burden confidence requires a scored `observed` burden and explicit rating `burden_support`: `claim`, `scope` (`project` or `workflow`), `scope_description`, `observation_ids`, `change_trace_ids`, `representativeness`, `counterevidence`, `freshness` and `limitations`. Cite applicable dimension-specific attributed experience with a stated period, or source-matched `change_cost` observations with an observed numeric `wall_elapsed`, `blocked_wait`, `active_effort` or `change_elapsed` result in `s`, `sec`, `seconds`, `ms`, `minutes`, `min`, `hours` or `h`. Other report labels and testcase sums cannot satisfy this requirement. Explain current applicability, selected changes and contrary evidence; trace the hurdle to current captured source. Project scope also requires complete collection and a reviewed whole-project dimension; narrower evidence can support a declared workflow scope.
 
+Project-scoped high support also requires recurrence: applicable dimension-specific
+experience on `some_changes`, `most_changes` or `all_changes`, or multiple distinct
+dated matching cost observations. A single isolated timing can support its
+workflow claim, not recurring project burden. Several observations still need
+review for relevance and representativeness; their presence does not prove either.
+
+Every burden rating exposes `support.readiness` under `confidence_assessment`,
+including low/medium confidence and unknown scores. The live rating cards and
+reports inventory cited source, applicable experience, source-matched cost reports,
+recurrence, related trace activities and exact-draft challenge, with the next
+useful evidence. Optional `change_traces.steps.activity` distinguishes `edit`,
+`verification`, `inspection` and `unknown`; missing activity remains unknown.
+Read/dependency checkpoints are not required edits, while verification waits may
+still impose burden. Activity counts are authored declarations, not measured work.
+
 Have a distinct declared reviewer challenge that support against the exact draft and snapshot, recording the applicable names in `challenge.burden_dimensions`. Amendments require a new bound challenge. Final submission rejects unsupported high burden confidence; lower-confidence source estimates remain useful. Reports and each rating card show `confidence_assessment.dimensions[DIMENSION].burden.support` status, scope and gaps as **support prerequisites**, not verified confidence. Meeting structural prerequisites cannot authenticate testimony, prove representativeness or certify a score.
+
+Workflow support does not remove project-breadth or partial-collection blockers.
+Use the inventory to improve the evidence, not to automatically raise a confidence
+label or change a score.
 
 Challenge packets select a deterministic mix of trace citations, production areas and supporting evidence, with selection reasons and omissions. Whole-project capture and dynamic graph limits remain explicit.
 

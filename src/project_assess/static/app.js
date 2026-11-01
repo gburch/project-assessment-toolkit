@@ -172,6 +172,31 @@ function renderBurdenSupport(parent, support) {
   detail.append(node("summary", `Burden support prerequisites · ${labels[support?.status] || "Not recorded"}`));
   detail.append(node("p", `Declared scope: ${support?.scope || "Not recorded"}`));
   if (support?.claim) detail.append(node("p", support.claim));
+  const readiness = support?.readiness;
+  if (readiness) {
+    const inventory = node("div", undefined, "burden-readiness");
+    inventory.append(node("p", "Captured burden evidence"));
+    const counts = [
+      ["Cited source records", readiness.source_evidence_ids],
+      ["Applicable attributed experience", readiness.experience_evidence_ids],
+      ["Source-matched change-cost reports", readiness.matched_cost_evidence_ids],
+      ["Partial elapsed reports", readiness.partial_elapsed_evidence_ids],
+      ["Reports needing applicability review", readiness.limited_report_evidence_ids],
+      ["Related change traces", readiness.trace_ids],
+    ];
+    const list = node("ul");
+    list.append(...counts.map(([label, rows]) => node("li", `${label}: ${rows?.length || 0}`)));
+    inventory.append(list);
+    const activities = readiness.trace_activities || {};
+    inventory.append(node("p", `Declared trace activities · edit ${activities.edit || 0} · verification ${activities.verification || 0} · inspection ${activities.inspection || 0} · unknown ${activities.unknown || 0}`));
+    if (readiness.trace_selection === "shared_source_citations") inventory.append(node("p", "Traces share cited source; their relevance still needs review.", "secondary"));
+    const recurrence = { reported_recurring: "Recurring experience reported", multiple_dated_observations: "Multiple dated observations supplied", not_established: "Not established" };
+    inventory.append(node("p", `Recurrence: ${recurrence[readiness.recurrence] || "Not established"}`));
+    inventory.append(node("p", `Independent challenge: ${readiness.challenge === "bound_dimension_review" ? "Exact-draft dimension review recorded" : "Not established"}`));
+    textList(inventory, "Next useful evidence", readiness.next_steps || []);
+    if (readiness.caveat) inventory.append(node("p", readiness.caveat, "secondary"));
+    detail.append(inventory);
+  }
   textList(detail, "Support gaps", support?.gaps || []);
   detail.append(node("p", "These checks describe supporting evidence and review prerequisites. They do not verify confidence, reporter identity or the burden judgment. Source hurdles and reported change experience remain distinct.", "secondary"));
   parent.append(detail);

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .badges import badge_assets, badge_data
 from .collector import _open_directory
+from .confidence import confidence_assessment
 from .rubric import DIMENSIONS
 
 _STATIC = Path(__file__).with_name("static")
@@ -216,6 +217,7 @@ def report_html(report):
     context = project_context_assessment(
         report["assessment"], report.get("review"), report.get("goals")
     )
+    confidence = confidence_assessment(report["assessment"], report.get("review"))
     assessment, review = report["assessment"], report.get("review") or {}
     badges = badge_assets(report)
     bundle = _asset_text("dimension-map.generated.js")
@@ -334,6 +336,33 @@ def report_html(report):
             + _text(", ".join(row["evidence_ids"]) or "none recorded")
             + ".</p>"
         )
+        readiness = confidence["dimensions"][row["id"]]["burden"]["support"]["readiness"]
+        lines.append(
+            "<p>Burden evidence: "
+            + _text(
+                "; ".join(
+                    f"{label}: {len(readiness[key])}"
+                    for label, key in (
+                        ("source", "source_evidence_ids"),
+                        ("attributed experience", "experience_evidence_ids"),
+                        ("matched cost reports", "matched_cost_evidence_ids"),
+                        ("partial elapsed reports", "partial_elapsed_evidence_ids"),
+                    )
+                )
+            )
+            + ".</p><p>Declared trace activities: "
+            + _text(
+                "; ".join(f"{key}: {value}" for key, value in readiness["trace_activities"].items())
+            )
+            + "; recurrence: "
+            + _text(readiness["recurrence"])
+            + "; challenge: "
+            + _text(readiness["challenge"])
+            + ".</p>"
+        )
+        if readiness["next_steps"]:
+            lines.append("<p>Next evidence:</p>" + _list(readiness["next_steps"]))
+        lines.append('<p class="secondary">' + _text(readiness["caveat"]) + "</p>")
         lines.append(_list(row["recommendations"]) + "</details>")
     lines += [
         '</section><section aria-labelledby="findings-heading"><h2 id="findings-heading">Findings</h2>'
