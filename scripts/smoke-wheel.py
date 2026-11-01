@@ -19,6 +19,7 @@ import hashlib, importlib.metadata as metadata, importlib.util, json, re, sys
 from pathlib import Path
 import project_assess.cli as cli
 from project_assess.analyzer_registry import list_analyzers
+from project_assess.provenance import tool_info
 base = Path(cli.__file__).resolve().parent
 assert base.is_relative_to(Path(sys.prefix).resolve())
 assert not base.is_relative_to(Path(sys.argv[1]).resolve())
@@ -37,6 +38,7 @@ for name in ('project-assess', 'doc-value', 'test-value'):
             resource = (skill.parent / target.split('#')[0]).resolve()
             assert resource.is_relative_to(base) and resource.is_file()
 print(json.dumps({'version': metadata.version('pat-assess'), 'python': sys.version.split()[0],
+                  'code_digest': tool_info()['code_digest'],
                   'origin': str(base.relative_to(sys.prefix)), 'mcp_installed': False,
                   'analysis_installed': False, 'vulture_installed': False,
                   'joern_available': False,
@@ -158,6 +160,10 @@ def main():
             ]
         )
         receipt["installation"] = json.loads(run([python, "-I", "-c", PROBE, ROOT]))
+        check(
+            receipt["installation"]["code_digest"] == source["tool_provenance"]["code_digest"],
+            "canonical installed code and skill resource identity matches committed source",
+        )
         receipt["checks"].append(
             "isolated wheel origins, bundled query/resources and core without optional tools"
         )

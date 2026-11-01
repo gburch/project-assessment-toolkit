@@ -106,6 +106,7 @@ def test_capped_producer_kind_counts_remain_observed_counts():
     result = inventory.summarize()
     assert result["signal_counts"]["security.rule0"] == 100
     assert result["coverage"]["signals_observed"] == 100
+    assert result["status"] == "partial"
     assert result["coverage"]["dimensions"]["security"]["observed_signals_lower_bound"] == 100
 
 

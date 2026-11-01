@@ -195,7 +195,7 @@ class ControlInventory:
             for row in files
         )
         partial = any(row["status"] != "complete" for row in files)
-        partial |= len(signals) < self.signals_seen
+        partial |= len(signals) < observed
         return {
             "schema_version": 1,
             "version": VERSION,

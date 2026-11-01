@@ -52,18 +52,32 @@ def tool_info():
         skills = package.parents[1] / ".agents/skills"
     hashes = {}
     for path in sorted(package.rglob("*")):
-        if path.is_file() and path.suffix in {".py", ".js", ".html", ".css", ".sc"}:
+        if (
+            path.is_file()
+            and not path.is_relative_to(skills)
+            and path.suffix in {".py", ".js", ".html", ".css", ".sc"}
+        ):
             hashes[path.relative_to(package).as_posix()] = hashlib.sha256(
                 path.read_bytes()
             ).hexdigest()
     instructions = []
     if skills.is_dir():
-        for path in sorted(skills.rglob("*.md")):
+        for path in sorted(skills.rglob("*")):
+            if not path.is_file() or path.suffix not in {
+                ".md",
+                ".py",
+                ".js",
+                ".html",
+                ".css",
+                ".sc",
+            }:
+                continue
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             hashes["skills/" + path.relative_to(skills).as_posix()] = digest
-            instructions.append(
-                {"path": str(path), "sha256": digest, "status": "available_not_attested_read"}
-            )
+            if path.suffix == ".md":
+                instructions.append(
+                    {"path": str(path), "sha256": digest, "status": "available_not_attested_read"}
+                )
     versions = {}
     for name in (
         "pat-assess",
