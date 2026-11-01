@@ -64,6 +64,109 @@ def test_model_uses_all_dimensions_and_separate_goals_and_confidence(report):
     assert report == original
 
 
+def test_model_support_uses_saved_evidence_and_current_confidence_projection(report):
+    supplied = [
+        {
+            "id": "owner-context",
+            "kind": "burden-context",
+            "stats": {
+                "attribution": {"role": "maintainer", "label": "Fixture owner"},
+                "period": {"end": "2026-11-01"},
+                "claims": [
+                    {
+                        "dimensions": ["testing"],
+                        "statement": "Required feedback is slow.",
+                        "workflow_stage": "verification",
+                    }
+                ],
+            },
+        },
+        {
+            "id": "matched-cost",
+            "kind": "observation",
+            "stats": {
+                "type": "change_cost",
+                "sourceIdentity": {"overall": "matched"},
+                "results": [
+                    {"name": "wall_elapsed", "value": 180, "unit": "s", "status": "observed"}
+                ],
+            },
+        },
+        {
+            "id": "partial-cost",
+            "kind": "observation",
+            "stats": {
+                "type": "change_cost",
+                "sourceIdentity": {"overall": "mismatch"},
+                "results": [
+                    {
+                        "name": "wall_elapsed_lower_bound",
+                        "value": 100,
+                        "unit": "s",
+                        "status": "observed",
+                    }
+                ],
+            },
+        },
+    ]
+    report["assessment"]["evidence"].extend(supplied)
+    report["review"]["ratings"]["testing"]["evidence_ids"].extend(entry["id"] for entry in supplied)
+    report["confidence_assessment"] = {"dimensions": "Detached values must not be trusted"}
+    before = deepcopy(report)
+
+    model = report_export.dimension_map_data(report)
+    testing = next(row for row in model["dimensions"] if row["id"] == "testing")
+    actual = report_export.confidence_assessment(report["assessment"], report["review"])[
+        "dimensions"
+    ]["testing"]
+    assert testing["burden_evidence"] == {
+        "source": 1,
+        "experience": 1,
+        "matched_cost": 1,
+        "partial_elapsed": 1,
+    }
+    assert testing["confidence_notes"] == list(
+        dict.fromkeys(actual["capability"]["blockers"] + actual["burden"]["blockers"])
+    )
+    assert testing["burden_next_steps"] == actual["burden"]["support"]["readiness"]["next_steps"]
+    assert testing["capability"] == 3 and testing["burden"] == 2
+    assert testing["burden_confidence"] == "low"
+    assert all(
+        row["burden_evidence"]["matched_cost"] == 0
+        for row in model["dimensions"]
+        if row["id"] != "testing"
+    )
+    json.dumps(model, allow_nan=False)
+    assert report == before
+
+
+def test_model_source_references_are_cited_bounded_and_do_not_invent_locations(report):
+    sources = [
+        {"id": f"cited-{index}", "path": f"src/module-{index}.py", "kind": "python"}
+        for index in range(7)
+    ]
+    report["assessment"]["evidence"].extend(
+        [
+            *sources,
+            {"id": "uncited", "path": "src/other.py", "kind": "python"},
+            {"id": "analysis", "path": "<static-analysis>", "kind": "static-analysis"},
+            {"id": "missing-path", "kind": "python"},
+        ]
+    )
+    report["review"]["ratings"]["security"]["evidence_ids"] = [
+        *(source["id"] for source in sources),
+        sources[0]["id"],
+        "analysis",
+        "missing-path",
+        "unknown-id",
+    ]
+    before = deepcopy(report)
+    security = report_export.dimension_map_data(report)["dimensions"][0]
+    assert security["evidence_references"] == sources[:5]
+    assert security["evidence_reference_total"] == 7
+    assert report == before
+
+
 def contextual_report(report):
     context = project_context_template()
     source_id = next(e["id"] for e in report["assessment"]["evidence"] if e["kind"] == "python")

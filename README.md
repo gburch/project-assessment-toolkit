@@ -33,7 +33,7 @@ evidence and ranked improvement plan. **This preview uses synthetic data, not an
 assessment of a real project.** Click either screenshot to view it at full size.
 
 <p align="center">
-  <a href=".github/assets/report-overview.png"><img src=".github/assets/report-overview.png" width="1120" alt="PAT example report: nine badges, interactive 3D capability and burden map, all eight dimension scores, and testing detail showing capability 4/5 with burden 4/5 against a burden ceiling of 2/5."></a>
+  <a href=".github/assets/report-overview.png"><img src=".github/assets/report-overview.png" width="1120" alt="PAT synthetic example report: all eight named dimensions with separate capability and burden tracks, target markers, confidence and directional gaps; the selected testing detail preserves capability 4/5 while reducing burden 4/5 toward its ceiling of 2/5."></a>
 </p>
 
 The example is a **working personal application** whose owner wants dependable
@@ -98,10 +98,12 @@ The local app can scan a project, inspect evidence, load or import a cited JSON 
 Follow the [local workflow](docs/PROJECT_ASSESS.md#local-workflow) to fill a `review-template`, inspect `evidence` and `rubric`, and submit the review. The optional [assessment skill](.agents/skills/project-assess/SKILL.md) carries a request to "run PAT" through to a substantive inline scorecard, cited findings and improvement plan; scan counts and links alone are collection output. Choose goals explicitly; profiles are starting suggestions, not a prerequisite for the assessment.
 
 Use `pat --state-dir STATE export-report ASSESSMENT_ID` to return nine SVG badges
-and an offline interactive report. Explore all eight dimensions in 3D: capability
-is height, burden is depth, and each dimension has its own lane. Saved goal regions
-and required improvements remain distinct from the current scores. The HTML opens
-without a server or network; its scorecard remains readable without WebGL.
+and an offline interactive report. Compare all eight dimensions on aligned
+capability and burden tracks, with exact scores, target markers, gaps and separate
+confidence labels. Select a dimension for its recommendations and evidence, or
+explore named lanes in the optional 3D view. Saved goals and unsaved previews remain
+distinct from current scores. The HTML opens without a server or network; the
+comparison works without WebGL.
 
 Export saved assessments as badges for your own README. See the [badge guide](docs/PROJECT_ASSESS.md#github-badges) for SVG, JSON, regeneration and the metadata made public by an export.
 

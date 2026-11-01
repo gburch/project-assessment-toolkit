@@ -133,16 +133,23 @@ substantive assessment in the response, with the interactive HTML link alongside
 Keep assessed source outside the state directory too; state and its exports are
 reserved for PAT's own writes.
 
-The HTML report opens directly from disk without network access. Its Three.js
-view uses engineering dimension, capability height and burden depth as independent
-axes. Rotate/zoom, choose the capability or burden projection, or select a dimension
-through the keyboard-accessible controls to inspect its rationale, evidence and
-goals. Goal regions represent capability minimums and burden ceilings; guides show
-only actual deficits, never a need to reduce extra capability or raise low burden.
-Unknown axes stay unpositioned rather than becoming zero. The complete scorecard
-and report remain available when WebGL is unavailable.
+The HTML report opens directly from disk without network access. **Compare
+dimensions** shows all eight named dimensions with separate capability and burden
+tracks, exact scores, target markers, directional gaps and declared confidence.
+Known scores remain visible when the other axis is unknown. Select a row to inspect
+recommendations, rationale, burden evidence and what would strengthen confidence;
+on mobile its explanation appears directly below that row. Descriptive gap counts
+can overlap and do not form an overall grade or priority ranking.
 
-The local workspace also shows the badges and 3D view, with unsaved target previews
+**Explore in 3D** starts the optional Three.js view. Engineering dimension,
+capability height and burden depth are independent axes. Drag to rotate or use the
+capability and burden projections; named lanes and selection stay synchronized with
+the comparison. The selected goal region represents a capability minimum and burden
+ceiling. Guides show actual deficits, never a need to reduce extra capability or
+raise low burden. Unknown axes stay unpositioned rather than becoming zero. The
+comparison works without WebGL, and 3D does not start until requested.
+
+The local workspace also shows the badges and both views, with unsaved target previews
 clearly labeled; only **Save goals** changes the stored targets. **Download
 interactive report** returns the same offline HTML. Reports and JSON can contain
 private source evidence: exporting is not publication. Three.js is bundled locally

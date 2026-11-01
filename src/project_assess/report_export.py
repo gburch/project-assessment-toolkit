@@ -43,10 +43,20 @@ def dimension_map_data(report):
     assessment, review = report["assessment"], report.get("review") or {}
     ratings = review.get("ratings", {})
     targets = (report.get("goals") or {}).get("targets", {})
+    confidence = confidence_assessment(assessment, review)
+    entries = {entry["id"]: entry for entry in assessment.get("evidence", [])}
     rows = []
     for dimension in DIMENSIONS:
         rating, target = ratings.get(dimension, {}), targets.get(dimension, {})
         capability, burden = _score(rating.get("capability")), _score(rating.get("burden"))
+        support = confidence["dimensions"][dimension]
+        readiness = support["burden"]["support"]["readiness"]
+        source_ids = set(readiness["source_evidence_ids"])
+        references = [
+            {"id": identity, "path": entries[identity]["path"], "kind": entries[identity]["kind"]}
+            for identity in dict.fromkeys(rating.get("evidence_ids", []))
+            if identity in source_ids and isinstance(entries[identity].get("path"), str)
+        ]
         rows.append(
             {
                 "id": dimension,
@@ -67,6 +77,21 @@ def dimension_map_data(report):
                 "rationale": rating.get("rationale", "No reviewed judgment is saved."),
                 "recommendations": rating.get("recommendations", []),
                 "evidence_ids": rating.get("evidence_ids", []),
+                "confidence_notes": list(
+                    dict.fromkeys(support["capability"]["blockers"] + support["burden"]["blockers"])
+                ),
+                "burden_evidence": {
+                    label: len(readiness[key])
+                    for label, key in (
+                        ("source", "source_evidence_ids"),
+                        ("experience", "experience_evidence_ids"),
+                        ("matched_cost", "matched_cost_evidence_ids"),
+                        ("partial_elapsed", "partial_elapsed_evidence_ids"),
+                    )
+                },
+                "burden_next_steps": list(readiness["next_steps"]),
+                "evidence_references": references[:5],
+                "evidence_reference_total": len(references),
             }
         )
     return {
