@@ -15,6 +15,32 @@ minimum nor a maximum: do not add tests just to reach it or delete valuable test
 just to get below it. State the measured source/test scope and denominator; a
 small cohort is not repository-wide coverage.
 
+## Complete the audit with a report
+
+A request to run an audit or report is read-only unless test execution or cleanup
+is already authorized. Start with source inventory and available receipts; it
+does not by itself authorize `collect`, `test-value-js` execution or test edits.
+Preserve existing authorization for requested measurement or pruning campaigns.
+
+Present the substantive judgment in the response, with artifact links for detail:
+
+- Explain the suite's important protection, maintenance costs and principal risks
+  within the inspected source/test scope and revision.
+- Give concrete inspected examples with test/source citations, their practical
+  impact, and why retaining, consolidating or investigating them is justified.
+  Static similarity and unique coverage alone do not establish test value.
+- Separate measured runtime/setup/overlap from inferred cost. State the selection,
+  timing basis and comparable before/after results when available; static-only
+  evidence cannot establish execution savings or whole-suite effectiveness.
+- Recommend a proportionate improvement and first slice, naming retained failure
+  protection and acceptance evidence. Include incomplete runs, unreviewed areas
+  and unresolved attribution. Link supporting receipts without replacing the
+  findings and recommendation with counts or download links.
+
+If evidence supports no change, explain what was inspected and why the suite
+should remain as it is. Missing measurements warrant a scoped conclusion and
+specific evidence needed, rather than an invented deletion candidate.
+
 ## Protect what matters
 
 Identify critical behavior from its callers and effects: authorization, credentials,

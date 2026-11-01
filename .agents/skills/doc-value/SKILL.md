@@ -2,7 +2,7 @@
 name: doc-value
 description: Audit and prune stale or redundant documentation and artifacts, or challenge proposed documentation changes, using source and caller evidence. Optimize agent navigation and accuracy without adding documentation overhead.
 metadata:
-  version: "1.1.0"
+  version: "1.1.1"
 ---
 
 # Documentation value
@@ -12,6 +12,27 @@ authority, code and commands. Preserve unique operational knowledge that source
 cannot safely supply. An implementation detail does not need prose merely
 because it exists. There is no coverage percentage, deletion quota or required
 metadata.
+
+## Complete the audit with a report
+
+A request to run an audit or report authorizes read-only inspection, not cleanup.
+Carry out edits when the user's existing request authorizes them; otherwise
+present reviewable recommendations.
+
+Explain the result in the response rather than returning only inventory counts
+and receipt links:
+
+- State the overall judgment about guidance accuracy, navigation and upkeep for
+  the inspected scope and source revision.
+- Describe concrete inspected findings with document and source/caller citations,
+  the affected task, and the authority or unique knowledge that must survive.
+  Distinguish confirmed stale guidance from lexical duplication and other leads.
+- Recommend proportionate corrections, consolidation or investigation, identifying
+  the retained canonical entry point and the first useful change. A supported
+  keep-as-is conclusion is also a result.
+- Separate measured navigation and comparable before/after changes from estimated
+  tokens or inferred burden. State gaps and unreviewed areas, and link supporting
+  receipts without making the reader open them to understand the findings.
 
 The `pat-assess` distribution provides the generic, read-only helpers as the
 `doc-value` and `doc-value-nav` entry points. They require Python 3.11+ and use

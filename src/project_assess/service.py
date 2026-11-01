@@ -1048,7 +1048,22 @@ class AssessmentService:
                 }
                 for dimension, row in (review or {}).get("ratings", {}).items()
             },
-            "next_step": "Use query_evidence views for bounded index, candidates, snippets, graph, hotspots, coverage and provenance. Read collection gaps before judging scope.",
+            "next_step": (
+                "Captured facts have no authored review yet. For an assessment request, inspect "
+                "system_map, dimension_inputs, the rubric and representative source workflows; "
+                "author cited ratings, coverage and a proportionate plan using review_template. "
+                "For a whole-project review, complete the independent challenge or record its "
+                "unavailability, then submit_review and read the saved report. Give the user "
+                "the verdict, scores, important findings, improvement plan and limits inline, "
+                "with artifact links as supporting evidence. Explicit scan-only requests may "
+                "stop at capture scope and unscored facts."
+                if review is None
+                else "An authored review is saved. Read the full report for its diagnosis, "
+                "cited ratings, findings, coverage and plan; use evolve for goal alignment and "
+                "history/progress only where comparable. Present a substantive inline report "
+                "with evidence and limits, respecting the requested scope. Artifact links "
+                "support the report rather than replacing it."
+            ),
         }
 
     def query_evidence(

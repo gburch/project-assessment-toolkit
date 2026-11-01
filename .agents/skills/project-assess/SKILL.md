@@ -1,11 +1,17 @@
 ---
 name: project-assess
-description: Assess a software project's security, testing, documentation, maintainability, delivery, operability, extensibility and performance/scalability from local evidence; choose proportional goals, plan how to evolve toward them and compare saved assessments. Use for project scorecards and right-sizing engineering practices.
+description: Run PAT to produce an evidence-backed project assessment with capability and burden scores, findings and a proportionate improvement plan. Use for project reviews, Doctor/Evolve recommendations, goals and progress comparisons.
 ---
 
 # PAT
 
 Use PAT through the `pat` CLI to collect facts, add attributable judgment and explain progress toward the user's goals. Run commands from its standalone checkout with `uv run pat`; the Python API is `project_assess`. Keep capability independent of maintenance burden: more tests, documentation or controls do not automatically mean more capability or excessive burden.
+
+## Complete the requested assessment
+
+An ordinary request such as "run PAT against this repository" means a complete evidence-backed assessment and a substantive report in the response. Default to whole-project review unless the user requests a narrower scope. A successful scan, Deep run, Doctor output or exported unreviewed report completes evidence collection, not that assessment. Continue through representative source inspection, authored ratings, coverage and a proportionate plan, the applicable independent challenge, and review submission; then read back the saved report. The CLI does not invoke an AI reviewer or assign scores for you.
+
+Read [run completion and reporting](references/reporting.md) for the expected deliverable and final handoff. State the verdict, capability/burden scorecard, concrete findings and right-sized roadmap inline; artifact links support that explanation. Missing goals or runtime evidence do not by themselves block a useful provisional source-based assessment. Preserve unknowns, confidence limits and incomplete review status explicitly. Explicit scan-only or inventory requests may stop at facts; brief or JSON formatting alone does not change an assessment into collection-only work. Assessment authorizes judgment and reporting, not project repairs or execution.
 
 ## Establish review scope
 
