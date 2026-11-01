@@ -6,8 +6,9 @@ For an ordinary "run PAT" request, carry collection through to a reviewed assess
 The normal CLI path is `scan` → inspect captured evidence and rubric →
 `review-template --mode fresh` → author ratings, coverage, change traces and plan →
 the applicable `challenge-template` / independent review → `review --input FILE` →
-read back `report --format json` and `report --format markdown`. Use the shared MCP
-operations when connected instead. These are phases of the same assessment, not
+read back `report --format json` and `report --format markdown` →
+`export-report ASSESSMENT_ID`. Use the shared MCP operations, including
+`export_report`, when connected instead. These are phases of the same assessment, not
 separate tasks requiring another user prompt. Do not ask whether to interpret the
 scan when the user already requested an assessment.
 
@@ -66,11 +67,28 @@ Organize the response so the user can assess the judgment without opening files:
 - **Goals and progress:** compare equivalent saved scopes when possible. Separate
   engineering change from new evidence, changed judgment or changed targets. With
   no goals/history, state that without withholding the diagnosis or plan.
+- **Badges and interactive view:** display the exported summary badge and all
+  eight dimension badges using the asset paths returned by `export-report` /
+  `export_report`; link the returned interactive `report.html` for the 3D view.
+  Use the actual SVG assets from the same assessment/review as the scorecard,
+  preserving unknowns. Do not recreate badge scores, mix old snapshots, use a
+  remote badge service, or substitute generated artwork. If the response host
+  cannot render SVG or run an interactive view, provide the asset links and label
+  the HTML link as the place to open the graph; do not imply it ran inline.
 - **Saved result:** include the assessment/review identity and readable report
   links or receipts for drill-down. Links supplement the inline result. Verify
   that the exported report includes the submitted judgment, not the earlier
   unreviewed scan. If saving fails, preserve the authored report and state the
   failure; do not claim persistence.
+
+The export operation creates a fresh private bundle beneath the configured state
+directory. It returns `report.html`, `report.md`, `report.json` and the summary plus
+dimension badge SVGs. The Markdown report links its sibling HTML view and badge
+files; use the returned absolute paths when returning local assets in chat. Keep
+the substantive verdict, scores and recommendations in the response alongside
+those visuals. A badge records saved ratings, not certification or live status.
+Exporting a report does not publish it; review captured source, paths and other
+private evidence before any separately authorized sharing.
 
 Keep severity separate from confidence: a high-confidence observation of a
 necessary control is not automatically a high-severity defect. Do not report

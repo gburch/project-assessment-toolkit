@@ -837,8 +837,8 @@ class AssessmentService:
         path = Path(root).expanduser().resolve(strict=True)
         if not path.is_dir():
             raise ValueError("Project root must be a directory")
-        if self.state_dir.is_relative_to(path):
-            raise ValueError("State directory must be outside assessed projects")
+        if self.state_dir.is_relative_to(path) or path.is_relative_to(self.state_dir):
+            raise ValueError("Assessed projects and the state directory must be outside each other")
         if self.allowed_roots is not None and not any(
             path.is_relative_to(allowed) for allowed in self.allowed_roots
         ):
@@ -2459,7 +2459,7 @@ class AssessmentService:
         with self._db() as db:
             assessment = self._assessment(db, assessment_id)
             alignment = self._alignment(db, assessment)
-            return {
+            report = {
                 "assessment": assessment,
                 "review": self._review(db, assessment_id),
                 "goals": self._goals(db, assessment["project_id"]),
@@ -2470,6 +2470,21 @@ class AssessmentService:
                 "confidence_assessment": alignment["confidence_assessment"],
                 "system_map": alignment["system_map"],
             }
+        from .badges import badge_assets
+        from .report_export import dimension_map_data
+
+        report["badges"] = badge_assets(report)
+        report["dimension_map"] = dimension_map_data(report)
+        return report
+
+    def export_report(self, assessment_id):
+        """Create a private offline report and badge bundle under configured state."""
+        from .report_export import export_report
+
+        report = self.get_report(assessment_id)
+        with self._db() as db:
+            roots = [row[0] for row in db.execute("SELECT root FROM projects")]
+        return export_report(report, self.state_dir, forbidden_roots=roots)
 
     def get_badge(self, assessment_id, dimension="summary", *, format="svg"):
         """Export only public badge fields from the requested authorized snapshot and review."""
@@ -2820,7 +2835,7 @@ def _planning_markdown(alignment):
 def markdown_report(report):
     assessment = report["assessment"]
     lines = [
-        f"# Project assessment: {Path(assessment['source']['root']).name}",
+        "# Project assessment: " + _markdown_text(Path(assessment["source"]["root"]).name),
         "",
         f"Snapshot: `{assessment['id']}`; rubric: {assessment['rubric_version']}",
         "",
@@ -2925,10 +2940,12 @@ def markdown_report(report):
         ]
     lines += ["", *["- " + _markdown_text(gap) for gap in ecosystem.get("gaps", [])]]
     lines += ["", "## Evidence gaps", ""]
-    lines += ["- " + gap for gap in assessment["gaps"]] or ["- No collector gaps recorded."]
+    lines += ["- " + _markdown_text(gap) for gap in assessment["gaps"]] or [
+        "- No collector gaps recorded."
+    ]
     for dimension, rating in ratings.items():
-        lines += ["", f"## {dimension.capitalize()}", "", rating["rationale"]]
-        lines += ["- " + r for r in rating["recommendations"]]
+        lines += ["", f"## {dimension.capitalize()}", "", _markdown_text(rating["rationale"])]
+        lines += ["- " + _markdown_text(r) for r in rating["recommendations"]]
         lines += ["", "Evidence: " + ", ".join(rating["evidence_ids"])]
     lines += ["", "## Findings", ""]
     for finding in assessment["findings"] + (report["review"] or {}).get("findings", []):

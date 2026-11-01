@@ -139,6 +139,15 @@ def badge_data(report, dimension="summary"):
     }
 
 
+def badge_assets(report):
+    """Render the complete fixed-name badge set for one report snapshot.
+
+    Callers choose where to export these assets. The renderer performs no writes,
+    and asset names come only from the shared dimension list, never project text.
+    """
+    return {f"{dimension}.svg": badge(report, dimension) for dimension in ("summary", *DIMENSIONS)}
+
+
 def badge(report, dimension="summary"):
     """Render a deterministic standalone SVG without filesystem or network access."""
     data = badge_data(report, dimension)

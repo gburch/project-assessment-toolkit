@@ -9,6 +9,55 @@ const state = { token: null, rubric: null, projects: [], project: null, report: 
 let queryLoad = 0;
 let queryNext = null;
 let queryParams = null;
+let dimensionMap = null;
+
+function clearVisuals() {
+  dimensionMap?.dispose();
+  dimensionMap = null;
+  $("dimension-map").replaceChildren();
+  $("badges").replaceChildren();
+  $("download-report").removeAttribute("href");
+}
+
+function updateDimensionMap() {
+  if (!dimensionMap || !state.report) return;
+  const model = state.report.dimension_map;
+  dimensionMap.update({ ...model, preview_targets: state.dirty,
+    dimensions: model.dimensions.map((row) => {
+      const goal = state.dirty ? state.targets[row.id] : state.report.goals?.targets?.[row.id];
+      return { ...row, capability_min: goal?.capability_min ?? null, burden_max: goal?.burden_max ?? null };
+    }) });
+}
+
+function renderVisuals(report) {
+  clearVisuals();
+  const query = `assessment_id=${encodeURIComponent(report.assessment.id)}`;
+  $("download-report").href = `/api/report-download?${query}`;
+  for (const name of ["summary", ...dims]) {
+    const svg = report.badges?.[`${name}.svg`];
+    if (!svg) continue;
+    const link = node("a");
+    link.href = `/api/badge?${query}&dimension=${encodeURIComponent(name)}`;
+    link.download = `pat-${name}.svg`;
+    const image = node("img");
+    image.alt = name === "summary" ? "PAT assessment summary" : `PAT ${titles[name]}: capability ${report.review?.ratings?.[name]?.capability ?? "unknown"}, burden ${report.review?.ratings?.[name]?.burden ?? "unknown"}`;
+    image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    link.append(image);
+    $("badges").append(link);
+  }
+  if (globalThis.PATDimensionMap && report.dimension_map) {
+    dimensionMap = globalThis.PATDimensionMap.createDimensionMap($("dimension-map"), report.dimension_map, {
+      onSelect: (dimension) => {
+        const card = document.getElementById(`rating-${dimension}`);
+        card?.classList.add("map-selected");
+        for (const other of document.querySelectorAll(".rating.map-selected")) if (other !== card) other.classList.remove("map-selected");
+      },
+    });
+    updateDimensionMap();
+  } else {
+    $("dimension-map").append(node("p", "The 3D view is unavailable. The complete scorecard and evidence remain below."));
+  }
+}
 
 function scanOptions() {
   return { analysis_profile: $("analysis-profile").value, analyzers: Array.from($("optional-analyzers").querySelectorAll("input[data-analyzer]:checked"), (input) => input.dataset.analyzer) };
@@ -87,6 +136,7 @@ function renderRatings(report) {
   for (const dim of dims) {
     const rating = report.review?.ratings?.[dim];
     const box = node("article", undefined, "rating");
+    box.id = `rating-${dim}`;
     const header = node("header");
     header.append(node("h3", titles[dim]), node("span", rating ? `Capability · declared ${rating.confidence} confidence` : "Not reviewed", "confidence"));
     box.append(header);
@@ -208,6 +258,7 @@ function currentSnapshot(load, id) {
 function dirty() {
   state.dirty = true;
   updateControls();
+  updateDimensionMap();
   const missing = missingTargets();
   $("goal-state").textContent = missing.length ? `Saved goals need targets for ${missing.map((dim) => titles[dim]).join(", ")}` : "Unsaved targets";
 }
@@ -686,6 +737,7 @@ async function loadReport(id) {
   state.saving = false;
   state.dirty = false;
   state.report = null;
+  clearVisuals();
   resetReview();
   $("report").hidden = true;
   updateControls();
@@ -706,6 +758,7 @@ async function loadReport(id) {
     $("analysis-scope").textContent = `Analysis: ${collection.analysis_profile || "legacy"}${collection.supported_text_complete === undefined ? "" : ` · supported text ${collection.supported_text_complete ? "captured" : "partial"}`}${collection.deadline_exceeded ? " · analysis deadline reached" : ""}${collection.analyzers?.length ? ` · optional: ${collection.analyzers.join(", ")}` : ""}.`;
     renderRatings(result);
     renderControls(result.goals);
+    renderVisuals(result);
     renderProgress(result.progress);
     renderFindings(result);
     renderAlignment(result.goal_alignment);
@@ -762,6 +815,7 @@ $("project").addEventListener("change", async () => {
     ++state.load;
     state.project = null;
     state.report = null;
+    clearVisuals();
     state.loading = false;
     state.saving = false;
     state.dirty = false;
@@ -801,6 +855,7 @@ $("goal-form").addEventListener("submit", async (event) => {
     if (!current()) return;
     state.report.goals = goals;
     renderControls(goals);
+    updateDimensionMap();
     const [progress, history, evolve] = await Promise.all([
       api(`/api/progress?project_id=${encodeURIComponent(projectId)}`),
       api(`/api/history?project_id=${encodeURIComponent(projectId)}`),

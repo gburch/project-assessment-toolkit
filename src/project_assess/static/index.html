@@ -6,6 +6,8 @@
   <meta name="color-scheme" content="light dark">
   <title>PAT — Project Assessment Toolkit</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/dimension-map.css">
+  <script src="/dimension-map.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -18,6 +20,8 @@
     <section id="empty" hidden><h2>Start with evidence</h2><p>Use Scan a project above to capture your first snapshot. You can also scan with the CLI or MCP tool.</p><code>pat --state-dir /path/to/state scan /path/to/project</code></section>
     <div id="report" hidden>
       <section class="project-heading"><h2 id="project-name"></h2><p id="source" class="secondary"></p><p id="analysis-scope" class="secondary"></p><p>Capability describes what works. Burden describes the cost of keeping it working. Missing evidence stays unknown.</p></section>
+      <section aria-labelledby="badges-heading"><div class="report-actions"><h2 id="badges-heading">Assessment badges</h2><a id="download-report" class="report-download" download="pat-report.html">Download interactive report</a></div><p class="secondary">Badges describe this saved snapshot. Select a badge to download its SVG.</p><div id="badges" class="badge-strip"></div></section>
+      <section aria-labelledby="map-heading"><h2 id="map-heading">Capability and burden in 3D</h2><div id="dimension-map"></div></section>
       <section aria-labelledby="ratings-heading"><h2 id="ratings-heading">Current assessment</h2><div id="ratings" class="ratings"></div></section>
       <section aria-labelledby="goals-heading" class="goals-section"><div class="section-heading"><div><h2 id="goals-heading">Choose your targets</h2><p>Capability is a minimum. Burden is a ceiling. Extra useful capability is welcome.</p></div></div>
         <form id="goal-form"><label for="profile">Starting profile<select id="profile"><option value="">Custom targets</option></select></label><div id="goal-controls" class="goal-controls"></div><div class="save-row"><button type="submit" id="save" class="primary">Save goals</button><span id="goal-state" class="secondary">No goals saved</span></div></form>

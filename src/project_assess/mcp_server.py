@@ -23,7 +23,8 @@ def create_mcp(service):
             "query_evidence for bounded captured details. A normal request to run PAT means "
             "an evidence-backed assessment: continue through source review, cited ratings, "
             "coverage, a proportionate plan, the applicable independent challenge and "
-            "submit_review, then give the user a rich inline report. Scans capture facts; "
+            "submit_review and export_report, then return the badge images, interactive HTML "
+            "link and rich inline report. Scans capture facts; "
             "they do not supply judgments automatically. Explicit scan-only requests may stop "
             "at unscored collection results. Full legacy snapshot tools remain available."
         ),
@@ -145,6 +146,11 @@ def create_mcp(service):
         return service.source_context(
             assessment_id, evidence_id, line=line, end_line=end_line, max_chars=max_chars
         )
+
+    @server.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    def export_report(assessment_id: str) -> dict[str, Any]:
+        """Export a private offline interactive HTML report, readable Markdown/JSON and summary plus eight SVG badges beneath configured state. Return file paths for badge images and the 3D report; never publish or change the assessed project."""
+        return service.export_report(assessment_id)
 
     @server.tool(annotations={"readOnlyHint": True})
     def review_template(assessment_id: str, mode: str | None = None) -> dict[str, Any]:

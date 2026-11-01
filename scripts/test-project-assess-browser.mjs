@@ -487,7 +487,8 @@ async function checkFirstScanAndReview(browser, info) {
     await expect(page.locator("#testing-capability_min")).toHaveValue("2");
     assert.equal((await history(initial.project_id)).goals.length, 0);
     assert.equal(await page.evaluate(() => window.reviewPwned), undefined);
-    assert.equal(await page.locator("main img").count(), 0);
+    assert.equal(await page.locator("main img[src='x']").count(), 0);
+    await expect(page.locator("#badges img")).toHaveCount(9);
     await page.screenshot({ path: path.join(output, "project-assess-first-review-mobile.png"), fullPage: true });
     await page.reload();
     await expect(ratingCard(page, "Testing")).toContainText("3 / 5");
@@ -925,7 +926,8 @@ try {
   await page.unroute("**/api/report?assessment_id=*", hostileInventory);
 
   assert.equal(await page.evaluate(() => window.pwned), undefined);
-  assert.equal(await page.locator("main img").count(), 0, "hostile names must remain text");
+  assert.equal(await page.locator("main img[src='x']").count(), 0, "hostile names must remain text");
+  await expect(page.locator("#badges img")).toHaveCount(9);
 
   await fixtureCommand("review-complete");
   await page.reload();

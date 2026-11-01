@@ -51,6 +51,12 @@ The local app can scan a project, inspect evidence, load or import a cited JSON 
 
 Follow the [local workflow](docs/PROJECT_ASSESS.md#local-workflow) to fill a `review-template`, inspect `evidence` and `rubric`, and submit the review. The optional [assessment skill](.agents/skills/project-assess/SKILL.md) carries a request to "run PAT" through to a substantive inline scorecard, cited findings and improvement plan; scan counts and links alone are collection output. Choose goals explicitly; profiles are starting suggestions, not a prerequisite for the assessment.
 
+Use `pat --state-dir STATE export-report ASSESSMENT_ID` to return nine SVG badges
+and an offline interactive report. Explore all eight dimensions in 3D: capability
+is height, burden is depth, and each dimension has its own lane. Saved goal regions
+and required improvements remain distinct from the current scores. The HTML opens
+without a server or network; its scorecard remains readable without WebGL.
+
 Version **0.3.0** adds standard/deep collection budgets, broad complexity metrics separate from sampled pattern work, cached import resolution and optional Vulture analysis. Swift, Java and other source also receive text inventory and exact-reuse leads, with syntax support reported separately. Coverage, role labels and omissions remain visible; similarity or an absent reference never proves safe deletion. Collector 7 / Python analyzer 3 starts a new collection scope: old snapshots and goals remain saved, and newly visible evidence is not engineering progress. See [analysis profiles and limits](docs/PROJECT_ASSESS.md#doctor-and-evolve).
 
 Version **0.3.2** rejects unsupported or incomplete state before writing and initializes new state atomically. Static test evidence labels bare `assert` counts separately from recognized unittest-style calls; changed counting semantics start a new comparison scope. Vulture's redundant conditions remain distinct from unreachable statements.

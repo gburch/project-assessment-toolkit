@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +59,7 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 assert {
                     "scan_project",
                     "get_report",
+                    "export_report",
                     "get_badge",
                     "submit_review",
                     "set_targets",
@@ -133,6 +135,13 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                     and brief.structured_content["assessment_id"] == snapshot["id"]
                 )
                 assert "evidence" not in brief.structured_content
+                exported = await session.call_tool(
+                    "export_report", {"assessment_id": snapshot["id"]}
+                )
+                assert not exported.is_error
+                bundle = exported.structured_content
+                assert bundle["assessment_id"] == snapshot["id"] and len(bundle["badges"]) == 9
+                assert Path(bundle["html"]).is_file()
                 queried = await session.call_tool(
                     "query_evidence",
                     {"assessment_id": snapshot["id"], "path": "README.md", "limit": 1},

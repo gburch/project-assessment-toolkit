@@ -53,6 +53,7 @@ def parser():
     commands.add_parser("rubric")
     for name in (
         "report",
+        "export-report",
         "evidence",
         "review-template",
         "challenge-template",
@@ -229,6 +230,8 @@ def main(argv=None):
             if args.format == "markdown":
                 print(markdown_report(output))
                 return 0
+        elif args.command == "export-report":
+            output = service.export_report(args.assessment_id)
         elif args.command == "evidence":
             output = service.evidence(args.assessment_id, args.evidence_id)
         elif args.command == "evidence-query":

@@ -76,6 +76,30 @@ and an unreviewed export complete collection only. The
 guides the review and final report; explicit scan-only requests remain facts-only.
 No selected goals are required to finish a useful provisional assessment.
 
+After saving a review, run `pat --state-dir STATE export-report ASSESSMENT_ID`
+(MCP: `export_report`) to return an offline report bundle. Its manifest gives the
+HTML, Markdown, JSON and summary plus eight dimension SVG badge paths. Each export
+creates a new private directory beneath `STATE/exports`; it never overwrites a
+previous report or writes into an assessed project. Display the badges and the
+substantive assessment in the response, with the interactive HTML link alongside.
+Keep assessed source outside the state directory too; state and its exports are
+reserved for PAT's own writes.
+
+The HTML report opens directly from disk without network access. Its Three.js
+view uses engineering dimension, capability height and burden depth as independent
+axes. Rotate/zoom, choose the capability or burden projection, or select a dimension
+through the keyboard-accessible controls to inspect its rationale, evidence and
+goals. Goal regions represent capability minimums and burden ceilings; guides show
+only actual deficits, never a need to reduce extra capability or raise low burden.
+Unknown axes stay unpositioned rather than becoming zero. The complete scorecard
+and report remain available when WebGL is unavailable.
+
+The local workspace also shows the badges and 3D view, with unsaved target previews
+clearly labeled; only **Save goals** changes the stored targets. **Download
+interactive report** returns the same offline HTML. Reports and JSON can contain
+private source evidence: exporting is not publication. Three.js is bundled locally
+under its [MIT license](https://github.com/mrdoob/three.js/blob/r187/LICENSE); no CDN is used.
+
 Requires macOS or Linux, Python 3.11+ and uv. From the PAT checkout:
 
 ```bash

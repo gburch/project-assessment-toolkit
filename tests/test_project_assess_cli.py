@@ -84,6 +84,16 @@ def test_installed_cli_roundtrip_without_source_path_imports(tmp_path):
         assert directory["view"] == view and directory["source"] == snapshot["source"]
         assert directory["items"] == [] and directory["remaining"] == 0
     identity = json.loads(command("info"))
+    bundle = json.loads(command("export-report", snapshot["id"]))
+    assert bundle["assessment_id"] == snapshot["id"] and bundle["review_id"] is None
+    assert len(bundle["badges"]) == 9
+    assert Path(bundle["html"]).is_file() and Path(bundle["directory"]).is_relative_to(state)
+    exported = json.loads(Path(bundle["json"]).read_text())
+    assert all(
+        row["capability"] is None and row["burden"] is None
+        for row in exported["dimension_map"]["dimensions"]
+    )
+    assert "![" in Path(bundle["markdown"]).read_text()
     assert identity["distribution"] == "pat-assess" and identity["code_digest"].startswith(
         "sha256:"
     )

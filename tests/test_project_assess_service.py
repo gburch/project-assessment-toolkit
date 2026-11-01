@@ -416,6 +416,10 @@ def test_state_and_allowed_roots_are_enforced_before_access(assessed, tmp_path):
     with pytest.raises(ValueError, match="outside"):
         AssessmentService(root / "state", allowed_roots=[root])
     assert not (root / "state").exists()
+    nested = service.state_dir / "exports" / "source"
+    nested.mkdir(parents=True)
+    with pytest.raises(ValueError, match="outside"):
+        service.scan(nested)
     other = tmp_path / "other"
     other.mkdir()
     restricted = AssessmentService(service.state_dir, allowed_roots=[other])

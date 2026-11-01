@@ -26,7 +26,7 @@ assert not base.is_relative_to(Path(sys.argv[1]).resolve())
 assert importlib.util.find_spec('mcp') is None
 assert importlib.util.find_spec('tree_sitter') is None
 assert importlib.util.find_spec('vulture') is None
-for name in ('static/index.html', 'static/app.js', 'static/style.css', 'docs/PROJECT_ASSESS.md', 'resources/joern.sc'):
+for name in ('static/index.html', 'static/app.js', 'static/style.css', 'static/dimension-map.generated.js', 'static/dimension-map.css', 'static/THREE-LICENSE.txt', 'docs/PROJECT_ASSESS.md', 'resources/joern.sc'):
     assert (base / name).is_file() and (base / name).read_bytes()
 joern = next(row for row in list_analyzers() if row['name'] == 'joern')
 assert not joern['available']
@@ -270,6 +270,16 @@ def main():
         ]
         review_file.write_text(json.dumps(review))
         saved = cli("review", snapshot["id"], "--input", review_file)
+        exported = cli("export-report", snapshot["id"])
+        check(
+            exported["assessment_id"] == snapshot["id"]
+            and exported["review_id"] == saved["id"]
+            and len(exported["badges"]) == 9
+            and all(Path(path).is_file() for path in exported["badges"].values())
+            and "PATDimensionMap" in Path(exported["html"]).read_text()
+            and "Content-Security-Policy" in Path(exported["html"]).read_text(),
+            "installed offline interactive report and nine badge exports match the saved review",
+        )
         confidence = cli("report", snapshot["id"])["confidence_assessment"]
         check(
             saved["support_verification"]["source_digest"] == snapshot["source"]["manifest_digest"]

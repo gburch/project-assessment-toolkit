@@ -5,7 +5,7 @@ from copy import deepcopy
 
 import pytest
 
-from project_assess.badges import badge, badge_data
+from project_assess.badges import badge, badge_assets, badge_data
 from project_assess.rubric import DIMENSIONS
 
 SVG = "{http://www.w3.org/2000/svg}"
@@ -134,6 +134,27 @@ def test_badges_are_deterministic_shields_data_and_accessible_standalone_svg(rep
         else:
             assert "Capability" in visible and "Burden" in visible
             assert "3/5" in visible and "2/5" in visible
+
+
+def test_exported_badge_set_is_complete_and_bound_to_one_saved_report(report):
+    report["review"]["ratings"]["testing"]["burden"] = None
+    before = deepcopy(report)
+    assets = badge_assets(report)
+
+    assert list(assets) == [f"{dimension}.svg" for dimension in ("summary", *DIMENSIONS)]
+    assert assets == badge_assets(report) and report == before
+    for name, rendered in assets.items():
+        dimension = name.removesuffix(".svg")
+        assert rendered == badge(report, dimension)
+        description = ET.fromstring(rendered).findtext(SVG + "desc")
+        for identity in (
+            report["assessment"]["id"],
+            report["review"]["id"],
+            report["assessment"]["source"]["manifest_digest"],
+        ):
+            assert identity in description
+        assert "/private/project-source" not in rendered
+    assert "?/5" in visible_text(ET.fromstring(assets["testing.svg"]))
 
 
 def test_summary_counts_both_known_axes_without_averaging_or_treating_zero_as_unknown(report):

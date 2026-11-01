@@ -17,6 +17,9 @@ _ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/dimension-map.js": ("dimension-map.generated.js", "text/javascript; charset=utf-8"),
+    "/dimension-map.css": ("dimension-map.css", "text/css; charset=utf-8"),
+    "/THREE-LICENSE.txt": ("THREE-LICENSE.txt", "text/plain; charset=utf-8"),
 }
 
 
@@ -32,7 +35,9 @@ def create_server(service, port=0):
     class Handler(BaseHTTPRequestHandler):
         server_version = "PAT"
 
-        def _respond(self, status, data, content_type="application/json; charset=utf-8"):
+        def _respond(
+            self, status, data, content_type="application/json; charset=utf-8", *, download=None
+        ):
             payload = (
                 json.dumps(data, allow_nan=False).encode()
                 if content_type.startswith("application/json")
@@ -41,6 +46,8 @@ def create_server(service, port=0):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(payload)))
+            if download:
+                self.send_header("Content-Disposition", 'attachment; filename="' + download + '"')
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
@@ -48,7 +55,7 @@ def create_server(service, port=0):
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; script-src 'self'; style-src 'self'; "
-                "img-src 'self'; object-src 'none'; base-uri 'none'; "
+                "img-src 'self' data:; object-src 'none'; base-uri 'none'; "
                 "frame-ancestors 'none'; form-action 'self'",
             )
             self.end_headers()
@@ -114,6 +121,25 @@ def create_server(service, port=0):
                     result = list_analyzers()
                 elif parsed.path == "/api/report":
                     result = service.get_report(self._query(parsed.query, "assessment_id"))
+                elif parsed.path == "/api/report-download":
+                    from .report_export import report_html
+
+                    report = service.get_report(self._query(parsed.query, "assessment_id"))
+                    self._respond(
+                        200,
+                        report_html(report).encode(),
+                        "text/html; charset=utf-8",
+                        download="pat-report.html",
+                    )
+                    return
+                elif parsed.path == "/api/badge":
+                    parameters = self._parameters(parsed.query, {"assessment_id"}, {"dimension"})
+                    self._respond(
+                        200,
+                        service.get_badge(**parameters).encode(),
+                        "image/svg+xml; charset=utf-8",
+                    )
+                    return
                 elif parsed.path == "/api/review-template":
                     result = service.review_template(
                         **self._parameters(parsed.query, {"assessment_id"}, {"mode"})

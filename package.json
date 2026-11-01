@@ -6,13 +6,20 @@
   "type": "module",
   "scripts": {
     "test:browser": "node scripts/test-project-assess-browser.mjs",
-    "browser:install": "playwright install chromium"
+    "browser:install": "playwright install chromium",
+    "build:ui": "node scripts/build-ui.mjs",
+    "test:3d": "node scripts/test-project-assess-3d.mjs",
+    "check:ui": "node scripts/build-ui.mjs --check"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",
-    "@playwright/test": "1.57.0"
+    "@playwright/test": "1.57.0",
+    "esbuild": "0.28.2"
   },
   "engines": {
     "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "three": "0.187.0"
   }
 }

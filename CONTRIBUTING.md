@@ -23,11 +23,14 @@ For changes to the local report UI or browser behavior:
 
 ```bash
 npm ci
+npm run build:ui
+npm run check:ui
 npm run browser:install
 npm run test:browser
+npm run test:3d
 ```
 
-Dependency and browser installation can download packages. Browser checks use the repository's Playwright/axe dependencies and Chromium; run `browser:install` when it is missing. Screenshots go into ignored `.artifacts/`. Report assets are bundled directly; no frontend build or publication step is needed.
+Dependency and browser installation can download packages. Browser checks use the repository's Playwright/axe dependencies and Chromium; run `browser:install` when it is missing. Screenshots go into ignored `.artifacts/`. Edit the 3D component in `ui/dimension-map.js`, then rebuild and commit `src/project_assess/static/dimension-map.generated.js` with its license notice. The pinned Three.js engine is bundled for offline use; Python installations need no Node toolchain or asset build.
 
 For skill changes, run `uv run --locked pat skills`, check that the returned entry points and referenced resources exist, and try a realistic synthetic scenario through the documented commands. Use your agent's skill validator when available. Review the resulting advice as well as the JSON: plausible syntax is not evidence of a useful assessment.
 

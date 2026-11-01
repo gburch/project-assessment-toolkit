@@ -134,7 +134,13 @@ def test_report_bootstrap_assets_and_session(running_report):
     assert headers["X-Content-Type-Options"] == "nosniff"
     assert headers["Cache-Control"] == "no-store"
     assert "Access-Control-Allow-Origin" not in headers
-    for asset in ("/app.js", "/style.css"):
+    for asset in (
+        "/app.js",
+        "/style.css",
+        "/dimension-map.js",
+        "/dimension-map.css",
+        "/THREE-LICENSE.txt",
+    ):
         assert request(server, path=asset)[0] == 200
     session = json.loads(request(server, path="/api/session")[2])
     assert session["token"] == server.token
