@@ -3,6 +3,9 @@
 Keep changes concise and proportional to the demonstrated need. Prefer the shared
 assessment service to parallel implementations or speculative framework layers.
 
+Document current behavior and workflows. Keep release chronology and completed-work
+reports in Git history.
+
 Assessments inspect source and supplied evidence without executing the assessed
 project, loading its plugins, contacting its services, or changing its files.
 Keep source snapshots, judgments, and goals separate. Preserve evidence identity,

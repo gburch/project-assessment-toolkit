@@ -103,30 +103,6 @@ is height, burden is depth, and each dimension has its own lane. Saved goal regi
 and required improvements remain distinct from the current scores. The HTML opens
 without a server or network; its scorecard remains readable without WebGL.
 
-Version **0.3.0** adds standard/deep collection budgets, broad complexity metrics separate from sampled pattern work, cached import resolution and optional Vulture analysis. Swift, Java and other source also receive text inventory and exact-reuse leads, with syntax support reported separately. Coverage, role labels and omissions remain visible; similarity or an absent reference never proves safe deletion. Collector 7 / Python analyzer 3 starts a new collection scope: old snapshots and goals remain saved, and newly visible evidence is not engineering progress. See [analysis profiles and limits](docs/PROJECT_ASSESS.md#doctor-and-evolve).
-
-Version **0.3.2** rejects unsupported or incomplete state before writing and initializes new state atomically. Static test evidence labels bare `assert` counts separately from recognized unittest-style calls; changed counting semantics start a new comparison scope. Vulture's redundant conditions remain distinct from unreachable statements.
-
-Version **0.8.0** adds shared, source-located control inventories for security, delivery, operability, extensibility and performance, using the existing Python and JavaScript/TypeScript parses plus bounded CI/manifest data parsing. Query controls by dimension and import existing source-bound observations without running the assessed project. Signals and counts support review; they never assign scores. See [scanner coverage](docs/PROJECT_ASSESS.md#scanner-coverage) and [observation reports](.agents/skills/project-assess/references/observation-report.md).
-
-Version **0.6.0** labels review freshness, records cited change traces and binds an independent challenge to the exact draft. Legacy reviews remain readable; declared independence and structural validation do not certify judgment quality. See the [review workflow](.agents/skills/project-assess/references/evolve-review.md#freshness-change-traces-and-independent-challenge).
-
-Version **0.5.1** fixes Joern conversion of numeric TypeScript interface keys and allocates bounded method samples fairly across source files. Per-file sample coverage distinguishes omitted rows from absent methods. Captured code stays unchanged; source/AST provenance and unsupported cases remain explicit.
-
-Version **0.5.0** adds a tunable Performance & Scalability dimension and separates source-supported Joern calls from inferred targets. A bounded production-system map and per-dimension review coverage keep broad project judgments separate from focused Doctor findings. Existing goals require an explicit new target; earlier history remains unchanged. The opt-in Joern provider supplies bounded captured-source method/reference and call evidence across Python, JavaScript/TypeScript and Java. Swift remains explicitly unsupported in this adapter release. It uses trusted preinstalled tools, mandatory sandboxing and a fixed packaged query; deep mode has a separate larger process budget. Partial or unresolved evidence remains explicit, with no automatic scores or safe-deletion claims. See [Joern setup and limits](docs/PROJECT_ASSESS.md#optional-joern-analysis).
-
-## PAT's own assessment
-
-<p>
-  <a href="docs/badges/README.md"><img src="docs/badges/summary.svg?v=3" alt="PAT assessment snapshot"></a>
-  <a href="docs/badges/README.md"><img src="docs/badges/testing.svg?v=3" alt="PAT testing snapshot"></a>
-  <br>
-  <a href="docs/badges/README.md"><img src="docs/badges/maintainability.svg?v=3" alt="PAT maintainability snapshot"></a>
-  <a href="docs/badges/README.md"><img src="docs/badges/extensibility.svg?v=3" alt="PAT extensibility snapshot"></a>
-</p>
-
-These are saved snapshots, not live status or a security certification. [Read the self-assessment](docs/badges/README.md). Capability and upkeep burden stay separate; `?` means unknown.
-
 Export saved assessments as badges for your own README. See the [badge guide](docs/PROJECT_ASSESS.md#github-badges) for SVG, JSON, regeneration and the metadata made public by an export.
 
 ## Optional tools and agents
