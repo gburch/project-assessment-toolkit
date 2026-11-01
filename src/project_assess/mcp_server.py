@@ -120,7 +120,7 @@ def create_mcp(service):
         limit: int = 20,
         max_chars: int = 24000,
     ) -> dict[str, Any]:
-        """Page captured evidence, area directories, controls or burden hurdles. Controls and burden accept dimension filters; burden separates static leads from attributed change experience. Controls candidate_kind='file' selects coverage rows. Source is never reread; max_chars bounds serialized output."""
+        """Page captured evidence, controls, burden hurdles or review-plan tasks. Controls, burden and review-plan accept dimension filters; review-plan supplies source-bound inspection tasks and contrasting workflow questions. These are not completed reviews or confidence grades. Controls candidate_kind='file' selects coverage rows. Source is never reread; max_chars bounds serialized output."""
         return service.query_evidence(
             assessment_id,
             view=view,

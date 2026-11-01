@@ -16,6 +16,7 @@ class AnalysisBudget:
     import_targets: int
     generic_blocks: int
     metric_nodes_per_file: int
+    burden_leads: int = 80
 
     def as_dict(self):
         return asdict(self)
@@ -36,6 +37,7 @@ PROFILES = MappingProxyType(
             100_000,
             120_000,
             1_000_000,
+            200,
         ),
     }
 )

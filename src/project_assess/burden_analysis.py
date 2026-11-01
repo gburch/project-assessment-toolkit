@@ -14,7 +14,7 @@ from collections import Counter, defaultdict, deque
 
 from .rubric import DIMENSIONS
 
-VERSION = "1"
+VERSION = "2"
 MAX_LEADS = 200
 MAX_SELECTOR_CANDIDATES = 64
 MAX_EXPRESSION_NODES = 4000
@@ -606,13 +606,35 @@ def summarize_burden(assessment, *, limit=80):
                     entry["id"],
                 )
         elif kind == "documentation-analysis":
+            document_roles = {
+                row["path"]: row.get("roleHint") for row in stats.get("documents", [])
+            }
             for group in bounded(stats.get("exactDuplicates", [])):
+                authored = [
+                    path
+                    for path in group
+                    if document_roles.get(path) not in {"generated", "required_record"}
+                ]
+                if len(authored) < 2:
+                    continue
                 emit(
                     "duplicate_guidance",
                     ["documentation"],
-                    [{"path": path, "line": 1} for path in group],
-                    {"matching_documents": len(group)},
+                    [{"path": path, "line": 1} for path in authored],
+                    {
+                        "matching_documents": len(authored),
+                        "generated_or_required_records_omitted": len(group) - len(authored),
+                    },
                     analysis_id=entry["id"],
+                )
+            for lead in bounded(stats.get("maintenanceLeads", [])):
+                emit(
+                    lead["kind"],
+                    ["documentation", "maintainability"],
+                    lead.get("locations", []),
+                    lead.get("metrics", {}),
+                    "lexical_relationship_needs_review",
+                    entry["id"],
                 )
         elif kind == "junit":
             timings.append(

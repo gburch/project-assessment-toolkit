@@ -32,6 +32,7 @@ from .project_context import (
     validate_project_context,
 )
 from .review_context import build_challenge_evidence_index, get_system_map
+from .review_plan import build_review_plan
 from .rubric import DIMENSIONS, PROFILES, RUBRIC_VERSION, rubric
 
 
@@ -451,6 +452,26 @@ def _validate(value, schema):
         raise ValueError(f"Invalid {path}: does not satisfy the {errors[0].validator} constraint")
 
 
+def _confidence_summary(confidence):
+    """Keep confidence labels/readiness, with detailed omission context in review-plan."""
+    result = json.loads(canonical(confidence))
+    for row in result.get("dimensions", {}).values():
+        coverage = row.get("coverage", {})
+        row["coverage"] = {
+            "status": coverage.get("status"),
+            "omission_counts": coverage.get("omission_counts", {}),
+            "analysis_limit_count": len(coverage.get("analysis_limits", [])),
+            "syntax_gap_count": len(coverage.get("syntax_gaps", [])),
+            "details_view": "review-plan",
+        }
+        readiness = row.get("burden", {}).get("support", {}).get("readiness", {})
+        steps = readiness.get("next_steps", [])
+        readiness["next_steps"] = steps[:1]
+        readiness["omitted_next_steps"] = max(0, len(steps) - 1)
+        readiness.pop("caveat", None)
+    return result
+
+
 def _object(properties, required=None):
     return {
         "type": "object",
@@ -492,7 +513,20 @@ RATING_SCHEMA = _object(
                 "counterevidence": TEXT,
                 "freshness": TEXT,
                 "limitations": {"type": "array", "items": TEXT, "maxItems": 20},
-            }
+                "corroboration_ids": IDS,
+                "counterevidence_ids": IDS,
+            },
+            required=[
+                "claim",
+                "scope",
+                "scope_description",
+                "observation_ids",
+                "change_trace_ids",
+                "representativeness",
+                "counterevidence",
+                "freshness",
+                "limitations",
+            ],
         ),
     },
     required=["capability", "burden", "confidence", "rationale", "evidence_ids", "recommendations"],
@@ -580,7 +614,9 @@ METHODOLOGY_SCHEMA = _object(
         "dimensions": _object(
             {dim: {"enum": ["reassessed", "carried_forward", "unreviewed"]} for dim in DIMENSIONS}
         ),
-    }
+        "confidence_standard": {"const": "source-estimate-v1"},
+    },
+    required=["schema_version", "mode", "reviewer_id", "based_on_review_id", "dimensions"],
 )
 CHANGE_TRACE_SCHEMA = _object(
     {
@@ -1035,8 +1071,13 @@ class AssessmentService:
             "review_id": (review or {}).get("id"),
             "review_coverage": alignment["review_coverage"],
             "assessment_method": _assessment_method(review, compact=True),
-            "confidence_assessment": confidence_assessment(assessment, review),
+            "confidence_assessment": _confidence_summary(confidence_assessment(assessment, review)),
             "dimension_inputs": alignment["dimension_inputs"],
+            "review_plan": {
+                "version": "1",
+                "view": "review-plan",
+                "next_step": "Inspect the per-dimension source tasks and counterevidence questions; revisit low-confidence dimensions before final review.",
+            },
             "system_map": alignment["system_map"],
             "urgent_findings": [
                 {key: row.get(key) for key in ("severity", "title", "evidence_ids")}
@@ -1120,14 +1161,17 @@ class AssessmentService:
             "area-dependencies",
             "controls",
             "burden",
+            "review-plan",
         }
         if view not in views:
             raise ValueError("Unknown evidence query view")
         allowed_dimensions = CONTROL_DIMENSIONS if view == "controls" else DIMENSIONS
         if dimension is not None and (
-            view not in {"controls", "burden"} or dimension not in allowed_dimensions
+            view not in {"controls", "burden", "review-plan"} or dimension not in allowed_dimensions
         ):
-            raise ValueError("Dimension filters require a supported controls or burden dimension")
+            raise ValueError(
+                "Dimension filters require a supported controls, burden or review-plan dimension"
+            )
         if any(
             value is not None and (not isinstance(value, str) or len(value) > 256)
             for value in (kind, path, role, candidate_kind)
@@ -1140,12 +1184,17 @@ class AssessmentService:
         if line is not None and (type(line) is not int or line < 1):
             raise ValueError("line must be a positive integer")
         navigation_view = view in {"areas", "area-dependencies"}
+        if view == "review-plan" and any(
+            value is not None for value in (kind, candidate_kind, line)
+        ):
+            raise ValueError("Review plans support dimension, path and role filters")
         if navigation_view and any(value is not None for value in (kind, candidate_kind, line)):
             raise ValueError(
                 "Area directory views support path and role filters, not kind, candidate_kind or line"
             )
         with self._db() as db:
             assessment = self._assessment(db, assessment_id)
+            review = self._review(db, assessment_id) if view == "review-plan" else None
         entries = assessment["evidence"]
         source = {entry["path"]: entry for entry in entries}
         captured_roles = {
@@ -1234,7 +1283,7 @@ class AssessmentService:
             for location in row.get("locations", []):
                 candidate_ranges.setdefault(location["path"], []).append(location)
         rows = []
-        for entry in entries if not navigation_view else []:
+        for entry in entries if not navigation_view and view != "review-plan" else []:
             if kind is not None and entry["kind"] != kind:
                 continue
             stats = entry.get("stats", {})
@@ -1340,6 +1389,34 @@ class AssessmentService:
                     }
                 )
         navigation = None
+        review_plan = None
+        if view == "review-plan":
+            review_plan = build_review_plan(assessment, review, dimension=dimension)
+            for dim, packet in review_plan["dimensions"].items():
+                rows.append(
+                    {
+                        "record_type": "dimension_review_scope",
+                        "dimension": dim,
+                        **{
+                            key: value
+                            for key, value in packet.items()
+                            if key not in {"source_tasks", "connections"}
+                        },
+                    }
+                )
+                rows.extend(
+                    {"record_type": "source_task", "dimension": dim, **task}
+                    for task in packet["source_tasks"]
+                )
+                rows.extend(
+                    {
+                        "record_type": "captured_connection",
+                        "dimension": dim,
+                        **edge,
+                        "locations": [{"path": edge["source"]}, {"path": edge["target"]}],
+                    }
+                    for edge in packet["connections"]
+                )
         if navigation_view:
             navigation = get_system_map(assessment, compact=False)
             if view == "areas":
@@ -1481,6 +1558,10 @@ class AssessmentService:
                 if any(entry["kind"] == "control-analysis" for entry in entries)
                 else "Control inventory was not collected in this snapshot."
             )
+        if review_plan is not None:
+            result["review_plan_scope"] = {
+                key: review_plan[key] for key in ("version", "limits", "caveat")
+            }
         if view == "burden":
             result["burden_scope"] = [
                 {
@@ -2037,6 +2118,7 @@ class AssessmentService:
                 "reviewer_id": "unassigned",
                 "based_on_review_id": None,
                 "dimensions": {dimension: "unreviewed" for dimension in DIMENSIONS},
+                "confidence_standard": "source-estimate-v1",
             }
             result["change_traces"] = []
         return result
@@ -2125,7 +2207,11 @@ class AssessmentService:
         for rating in review["ratings"].values():
             burden_support = rating.get("burden_support")
             if burden_support:
-                cites(burden_support["observation_ids"])
+                if burden_support["observation_ids"]:
+                    cites(burden_support["observation_ids"])
+                for field in ("corroboration_ids", "counterevidence_ids"):
+                    if burden_support.get(field):
+                        cites(burden_support[field])
                 if not set(burden_support["change_trace_ids"]) <= {t["id"] for t in traces}:
                     raise ValueError("Burden support cites unknown change traces")
         challenge = review.get("challenge")
@@ -2177,11 +2263,23 @@ class AssessmentService:
                 )
         if final:
             for dimension, rating in review["ratings"].items():
-                if rating.get("burden_confidence") == "high":
+                medium_estimate = (
+                    rating.get("burden_basis") == "source_estimate"
+                    and rating.get("burden_confidence") == "medium"
+                    and (
+                        (method or {}).get("confidence_standard") == "source-estimate-v1"
+                        or any(
+                            key in (rating.get("burden_support") or {})
+                            for key in ("corroboration_ids", "counterevidence_ids")
+                        )
+                    )
+                )
+                if rating.get("burden_confidence") == "high" or medium_estimate:
                     support = burden_support_assessment(assessment, review, dimension)
                     if support["status"] != "structured_support_present_for_declared_scope":
                         raise ValueError(
-                            "High burden confidence lacks support for "
+                            ("Medium source-estimate" if medium_estimate else "High burden")
+                            + " confidence lacks support for "
                             + dimension
                             + ": "
                             + "; ".join(support["gaps"])
@@ -2231,6 +2329,8 @@ class AssessmentService:
                         "counterevidence",
                         "freshness",
                         "limitations",
+                        "corroboration_ids",
+                        "counterevidence_ids",
                     )
                     if key in support
                 }

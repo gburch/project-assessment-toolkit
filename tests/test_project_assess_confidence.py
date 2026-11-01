@@ -82,7 +82,24 @@ def test_grounded_source_finding_does_not_upgrade_either_project_axis(captured):
         "estimated from source" in text
         for text in result["dimensions"]["maintainability"]["burden"]["blockers"]
     )
-    assert service.overview(snapshot["id"])["confidence_assessment"] == result
+    brief = service.overview(snapshot["id"])["confidence_assessment"]
+    assert brief["findings"] == result["findings"] and brief["summary"] == result["summary"]
+    for dimension, full in result["dimensions"].items():
+        compact = brief["dimensions"][dimension]
+        assert compact["capability"] == full["capability"]
+        assert compact["burden"]["declared_confidence"] == full["burden"]["declared_confidence"]
+        assert compact["burden"]["blockers"] == full["burden"]["blockers"]
+        assert compact["coverage"]["analysis_limit_count"] == len(
+            full["coverage"]["analysis_limits"]
+        )
+        assert compact["coverage"]["details_view"] == "review-plan"
+        actual = compact["burden"]["support"]["readiness"]
+        original = full["burden"]["support"]["readiness"]
+        assert actual["source_evidence_ids"] == original["source_evidence_ids"]
+        assert actual["matched_cost_evidence_ids"] == original["matched_cost_evidence_ids"]
+        assert len(actual["next_steps"]) + actual["omitted_next_steps"] == len(
+            original["next_steps"]
+        )
     assert service.evolve(snapshot["id"])["goal_alignment"]["confidence_assessment"] == result
     assert service.doctor(snapshot["id"])["goal_alignment"]["confidence_assessment"] == result
     encoded = json.dumps(result)

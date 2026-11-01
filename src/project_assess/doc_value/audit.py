@@ -12,7 +12,6 @@ import fnmatch
 import hashlib
 import json
 import os
-import re
 import subprocess
 from collections import Counter, defaultdict
 from collections.abc import Iterable
@@ -22,14 +21,18 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from .markdown import AUTOLINK_RE as AUTOLINK_RE
-from .markdown import INLINE_LINK_RE as INLINE_LINK_RE
-from .markdown import REFERENCE_LINK_RE as REFERENCE_LINK_RE
 from .markdown import (
+    DOC_DIR_NAMES,
     UNSUPPORTED_LINK_RE,
     headings,
     local_links,
     without_fences,
     words,
+)
+from .markdown import INLINE_LINK_RE as INLINE_LINK_RE
+from .markdown import REFERENCE_LINK_RE as REFERENCE_LINK_RE
+from .markdown import (
+    documentation_role as role,
 )
 from .sections import analyze_sections
 
@@ -56,34 +59,6 @@ MAX_DELTA_PATHS = 4_000
 MAX_GIT_OUTPUT_BYTES = 4_000_000
 MAX_CALLER_FILES = 500
 MAX_CALLER_BYTES = 1_000_000
-DOC_DIR_NAMES = {
-    "doc",
-    "docs",
-    "documentation",
-    "guide",
-    "guides",
-    "handbook",
-    "runbook",
-    "runbooks",
-    "spec",
-    "specs",
-    "proposal",
-    "proposals",
-    "handoff",
-    "handoffs",
-    "evidence",
-    "artifact",
-    "artifacts",
-    "record",
-    "records",
-    "report",
-    "reports",
-    "design",
-    "designs",
-    ".agents",
-    ".codex",
-    ".github",
-}
 ARTIFACT_DIR_NAMES = (DOC_DIR_NAMES - {".agents", ".codex", ".github"}) | {
     "asset",
     "assets",
@@ -497,39 +472,6 @@ def caller_references(
         if exact or basename:
             refs[target] = {"exactPath": exact, "basenameLead": basename}
     return refs, gaps
-
-
-def role(path: Path, text: str, root: Path) -> tuple[str, list[str]]:
-    rel = path.relative_to(root).as_posix().lower()
-    name = path.name.lower()
-    hints: list[str] = []
-    if path.suffix in {".json", ".yaml", ".yml"} and not doc_bearing_directory(path, root):
-        # This branch is only reached for explicitly selected config files;
-        # they remain visible in the receipt without inflating doc counts.
-        return "config", ["structured file outside a documentation-bearing directory"]
-    if any(x in rel for x in ("evidence", "receipt", "artifact", "snapshot", "proof")):
-        hints.append("path-or-format resembles evidence/artifact")
-        return "raw_evidence", hints
-    if any(x in rel for x in ("generated", "build/", "dist/", "coverage", "cache/")):
-        hints.append("path resembles generated output")
-        return "generated", hints
-    if any(
-        x in rel for x in ("handoff", "archive", "history", "changelog", "report", "audit", "plan")
-    ):
-        hints.append("path resembles historical or review record")
-        return "history", hints
-    if any(x in name for x in ("license", "security", "privacy", "contract", "policy")):
-        hints.append("name resembles required policy/record")
-        return "required_record", hints
-    if name in {"agents.md", "readme.md", "skill.md"} or any(
-        x in rel for x in ("guide", "runbook", "architecture", "development", ".agents/skills/")
-    ):
-        hints.append("name/path resembles navigational guidance")
-        return "guidance", hints
-    if re.search(r"(?im)^#{1,3}\s+(?:how|usage|run|install|development|commands?)\b", text):
-        hints.append("headings resemble operational guidance")
-        return "guidance", hints
-    return "unknown", hints
 
 
 def resolve_link(source: Path, target: str, root: Path) -> tuple[Path | None, str | None]:

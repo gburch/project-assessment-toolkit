@@ -583,6 +583,98 @@ async function checkBadgeText(browser, badges) {
   }
 }
 
+async function checkDimensionReviewPlans(browser, info) {
+  const context = await browser.newContext({ viewport: { width: 390, height: 900 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const origin = info.origin;
+  try {
+    const projects = await (await page.request.get(`${origin}/api/projects`)).json();
+    const project = projects.find((entry) => entry.root === info.root);
+    const report = await (await page.request.get(`${origin}/api/report?assessment_id=${project.latest_assessment_id}`)).json();
+    const history = await (await page.request.get(`${origin}/api/history?project_id=${project.id}`)).json();
+    await page.goto(origin);
+    await page.selectOption("#project", project.id);
+    await expect(page.locator("#status")).toContainText(project.latest_assessment_id);
+    await page.locator("#evidence-browser > summary").click();
+    await page.selectOption("#query-view", "index");
+    await page.selectOption("#query-kind", "python");
+    // Simulate a retained prior-view selection even for a sparse project with
+    // no static candidate kinds; disabled filters must never reach the API.
+    await page.locator("#query-candidate").evaluate((select) => {
+      const option = new Option("Prior review lead", "unreachable_statement");
+      select.append(option);
+      select.value = option.value;
+    });
+    await page.selectOption("#query-view", "review-plan");
+    await expect(page.locator("#query-dimension")).toBeEnabled();
+    await expect(page.locator("#query-kind")).toBeDisabled();
+    await expect(page.locator("#query-candidate")).toBeDisabled();
+
+    async function query() {
+      const pending = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/evidence-query" && new URL(response.url()).searchParams.get("view") === "review-plan");
+      await page.getByRole("button", { name: "Query evidence", exact: true }).click();
+      const response = await pending;
+      assert.equal(response.status(), 200);
+      const parameters = new URL(response.url()).searchParams;
+      assert.equal(parameters.get("assessment_id"), project.latest_assessment_id);
+      assert.equal(parameters.has("kind"), false, "disabled kind must not leak into review-plan requests");
+      assert.equal(parameters.has("candidate_kind"), false, "disabled lead kind must not leak into review-plan requests");
+      const result = await response.json();
+      assert.equal(result.assessment_id, report.assessment.id);
+      assert.equal(result.source.manifest_digest, report.assessment.source.manifest_digest);
+      assert.equal(result.scope_digest, report.assessment.scope_digest);
+      await expect(page.locator("#query-state")).not.toContainText("Querying");
+      return result;
+    }
+
+    const first = await query();
+    assert(first.next_offset !== null, "all-dimension inspection rows must exercise real pagination");
+    const firstCount = await page.locator("#query-results > details").count();
+    const nextResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/evidence-query" && new URL(response.url()).searchParams.get("offset") === String(first.next_offset));
+    await page.getByRole("button", { name: "Load more evidence", exact: true }).click();
+    const next = await (await nextResponse).json();
+    assert.equal(next.assessment_id, report.assessment.id);
+    assert.equal(next.source.manifest_digest, report.assessment.source.manifest_digest);
+    assert.equal(next.offset, first.next_offset);
+    await expect.poll(() => page.locator("#query-results > details").count()).toBeGreaterThan(firstCount);
+
+    await page.selectOption("#query-dimension", "documentation");
+    await page.fill("#query-path", "README.md");
+    const docs = await query();
+    assert(docs.items.some((row) => row.record_type === "source_task" && row.dimension === "documentation"));
+    const task = page.locator("#query-results > details").first();
+    await task.locator("summary").click();
+    const pendingContext = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/source-context");
+    await task.getByRole("button", { name: "Read matching source context", exact: true }).click();
+    const sourceContext = await pendingContext;
+    assert.equal(sourceContext.status(), 200);
+    const readme = report.assessment.evidence.find((entry) => entry.path === "README.md");
+    assert.equal(new URL(sourceContext.url()).searchParams.get("evidence_id"), readme.id);
+    assert.equal(new URL(sourceContext.url()).searchParams.get("assessment_id"), report.assessment.id);
+    await expect(task.locator(".context-result")).toContainText("snapshot_matched_live_bytes");
+    await expect(task.locator(".context-result")).toContainText("<img src=x onerror=window.pwned=1>");
+    assert.equal(await task.locator("img").count(), 0);
+    assert.equal(await page.evaluate(() => window.pwned), undefined);
+
+    await page.selectOption("#query-dimension", "operability");
+    await page.fill("#query-path", "");
+    const operations = await query();
+    assert(operations.items.some((row) => row.dimension === "operability"));
+    assert(operations.items.every((row) => row.dimension === "operability" || row.omitted));
+    await page.selectOption("#query-view", "index");
+    await expect(page.locator("#query-kind")).toBeEnabled();
+    await expect(page.locator("#query-candidate")).toBeEnabled();
+    await expect(page.locator("#query-dimension")).toBeDisabled();
+    for (const id of ["query-kind", "query-candidate", "query-role"]) await page.selectOption(`#${id}`, "");
+    await page.fill("#query-path", "");
+    assert.deepEqual(await (await page.request.get(`${origin}/api/history?project_id=${project.id}`)).json(), history, "review-plan and source-context browsing must not mutate history");
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+}
+
 async function checkPlanningEvidence(browser, info) {
   const origin = info.first_origin;
   const context = await browser.newContext({ viewport: { width: 320, height: 900 } });
@@ -884,6 +976,7 @@ try {
   browser = await chromium.launch({ headless: true });
   await checkBadgeText(browser, info.badges);
   await checkFirstScanAndReview(browser, info);
+  await checkDimensionReviewPlans(browser, info);
   await checkPlanningEvidence(browser, info);
   await checkAnalysisOptions(browser, info);
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });

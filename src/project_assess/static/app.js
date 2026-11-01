@@ -609,7 +609,8 @@ function resetEvidenceBrowser(assessment) {
 function updateEvidenceDimensionFilter() {
   const view = $("query-view").value;
   const filter = $("query-dimension");
-  filter.disabled = !["controls", "burden"].includes(view);
+  filter.disabled = !["controls", "burden", "review-plan"].includes(view);
+  for (const id of ["query-kind", "query-candidate"]) $(id).disabled = view === "review-plan";
   for (const option of filter.options) option.disabled = view === "controls" && !!option.value && !CONTROL_DIMENSIONS.has(option.value);
   if (filter.selectedOptions[0]?.disabled) filter.value = "";
 }
@@ -685,11 +686,11 @@ async function queryEvidence(append = false) {
   const ticket = ++queryLoad;
   const parameters = append ? new URLSearchParams(queryParams) : new URLSearchParams({ assessment_id: assessmentId, limit: "20", max_chars: "16000" });
   if (!append) for (const [key, id] of [["view", "query-view"], ["kind", "query-kind"], ["role", "query-role"], ["candidate_kind", "query-candidate"], ["path", "query-path"]]) {
-    if ($(id).value) parameters.set(key, $(id).value);
+    if (!$(id).disabled && $(id).value) parameters.set(key, $(id).value);
   }
   const view = $("query-view").value;
   const dimension = $("query-dimension").value;
-  if (!append && dimension && (view === "burden" || view === "controls" && CONTROL_DIMENSIONS.has(dimension))) parameters.set("dimension", dimension);
+  if (!append && dimension && (["burden", "review-plan"].includes(view) || view === "controls" && CONTROL_DIMENSIONS.has(dimension))) parameters.set("dimension", dimension);
   parameters.set("offset", String(append ? queryNext : 0));
   queryParams = parameters.toString();
   $("query-submit").disabled = $("query-more").disabled = true;

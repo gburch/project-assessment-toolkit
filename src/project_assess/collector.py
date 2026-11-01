@@ -1717,7 +1717,15 @@ def collect(
         from .documentation import captured_documentation
 
         analysis = captured_documentation(
-            documentation_texts, {entry["path"] for entry in manifest}
+            documentation_texts,
+            {entry["path"] for entry in manifest},
+            captured_sources=captured_sources,
+            manifest_scripts={
+                entry["path"]: entry.get("stats", {}).get("scripts", [])
+                for entry in evidence
+                if entry.get("kind") == "manifest"
+            },
+            deep=budget.name == "deep",
         )
 
         analysis = _redact_data(analysis)
@@ -2004,7 +2012,29 @@ def collect(
         context_bytes_used += result["source_context"]["retained_bytes"]
         optional_analyses[name] = result
         add_optional_evidence(name, result)
-    burden = _redact_data(summarize_burden({"evidence": evidence, "facts": facts}))
+    if budget.name == "deep":
+        from .change_history import collect_change_history
+
+        prefix, environment = _git_configuration(root)
+        history = _redact_data(
+            collect_change_history(
+                prefix, environment, {entry["path"] for entry in manifest}, revision
+            )
+        )
+        history_id = add_evidence(
+            "<change-history>",
+            json.dumps(history, sort_keys=True).encode(),
+            "change-history",
+            "",
+            history,
+        )
+        facts["change_history"] = {
+            key: history[key] for key in ("version", "status", "coverage", "gaps", "caveat")
+        }
+        facts["change_history"]["evidence_id"] = history_id
+    burden = _redact_data(
+        summarize_burden({"evidence": evidence, "facts": facts}, limit=budget.burden_leads)
+    )
     burden_id = add_evidence(
         "<burden-analysis>",
         json.dumps(burden, sort_keys=True).encode(),
@@ -2017,7 +2047,7 @@ def collect(
     }
     facts["burden_analysis"]["evidence_id"] = burden_id
     scope = {
-        "collector_version": 11,
+        "collector_version": 12,
         "burden_analysis_version": burden["version"],
         "control_inventory_version": controls["version"],
         "control_signal_limit": controls["limits"]["signals"],
@@ -2068,7 +2098,15 @@ def collect(
             name: {key: result[key] for key in ("analyzer", "configuration", "limits")}
             for name, result in optional_analyses.items()
         },
-        "documentation": "doc-value.captured.v1",
+        "documentation": "doc-value.captured.v2",
+        "change_history": {
+            "version": "1",
+            "max_commits": 30,
+            "first_parent": True,
+            "max_bytes": 524288,
+        }
+        if budget.name == "deep"
+        else None,
         "ecosystem_fit": {"version": ECOSYSTEM_VERSION, "limits": ecosystem["limits"]},
     }
     return {

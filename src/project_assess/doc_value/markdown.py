@@ -5,6 +5,62 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+DOC_DIR_NAMES = {
+    "doc",
+    "docs",
+    "documentation",
+    "guide",
+    "guides",
+    "handbook",
+    "runbook",
+    "runbooks",
+    "spec",
+    "specs",
+    "proposal",
+    "proposals",
+    "handoff",
+    "handoffs",
+    "evidence",
+    "artifact",
+    "artifacts",
+    "record",
+    "records",
+    "report",
+    "reports",
+    "design",
+    "designs",
+    ".agents",
+    ".codex",
+    ".github",
+}
+
+
+def documentation_role(path, text, root):
+    """Pure path/text role hints shared by captured and standalone documentation analysis."""
+    rel = path.relative_to(root).as_posix().lower()
+    name = path.name.lower()
+    hints = []
+    doc_bearing = any(part.lower() in DOC_DIR_NAMES for part in path.relative_to(root).parts[:-1])
+    if path.suffix in {".json", ".yaml", ".yml"} and not doc_bearing:
+        return "config", ["structured file outside a documentation-bearing directory"]
+    if any(x in rel for x in ("evidence", "receipt", "artifact", "snapshot", "proof")):
+        return "raw_evidence", ["path-or-format resembles evidence/artifact"]
+    if any(x in rel for x in ("generated", "build/", "dist/", "coverage", "cache/")):
+        return "generated", ["path resembles generated output"]
+    if any(
+        x in rel for x in ("handoff", "archive", "history", "changelog", "report", "audit", "plan")
+    ):
+        return "history", ["path resembles historical or review record"]
+    if any(x in name for x in ("license", "security", "privacy", "contract", "policy")):
+        return "required_record", ["name resembles required policy/record"]
+    if name in {"agents.md", "readme.md", "skill.md"} or any(
+        x in rel for x in ("guide", "runbook", "architecture", "development", ".agents/skills/")
+    ):
+        return "guidance", ["name/path resembles navigational guidance"]
+    if re.search(r"(?im)^#{1,3}\s+(?:how|usage|run|install|development|commands?)\b", text):
+        return "guidance", ["headings resemble operational guidance"]
+    return "unknown", hints
+
 
 def words(text: str) -> list[str]:
     return re.findall(r"[A-Za-z0-9][A-Za-z0-9_/-]*", text.lower())

@@ -4,17 +4,245 @@ from __future__ import annotations
 
 import hashlib
 import posixpath
-from collections import defaultdict
+import re
+from collections import Counter, defaultdict, deque
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urlsplit
 
-from .doc_value.markdown import UNSUPPORTED_LINK_RE, headings, local_links, without_fences, words
+from .doc_value.markdown import (
+    UNSUPPORTED_LINK_RE,
+    documentation_role,
+    headings,
+    local_links,
+    without_fences,
+    words,
+)
+from .doc_value.sections import analyze_sections
+from .static_analysis import source_role
 
+SCHEMA = "doc-value.captured.v2"
 MAX_DOCUMENTS = 2000
 MAX_LINKS = 2000
+MAX_REFERENCES = 1000
+_PATH_REFERENCE = re.compile(
+    r"(?<![\w/.-])(?:[\w.-]+/)*[\w.-]+\.(?:md|mdx|rst|adoc|py|js|jsx|ts|tsx|java|swift|go|rs|sh|json|toml|ya?ml|ini|cfg)(?![\w/.-])",
+    re.I,
+)
+_SCRIPT_COMMAND = re.compile(
+    r"^(?:\$\s*)?(?:npm|pnpm)(?:\s+--prefix\s+(?P<prefix>[\w./-]+))?\s+run\s+(?P<script>[\w:-]+)(?:\s|$)"
+)
 
 
-def captured_documentation(texts: dict[str, str], manifest_paths: set[str]) -> dict:
+def _role(path, text):
+    """Use the standalone audit's pure lexical role hints, never its file walker."""
+    hint, reasons = documentation_role(PurePosixPath(path), text, PurePosixPath("."))
+    generated = re.search(
+        r"(?im)^.{0,12}(?:automatically generated|generated file|this file is generated)\b",
+        text[:2000],
+    )
+    if generated:
+        return "generated", [*reasons, "opening text resembles generated output"]
+    return hint, reasons
+
+
+def _rich_inputs(texts, *, byte_limit):
+    roles = {path: _role(path, text) for path, text in texts.items()}
+    order = {
+        "guidance": 0,
+        "unknown": 1,
+        "required_record": 2,
+        "history": 3,
+        "raw_evidence": 4,
+        "generated": 5,
+    }
+    selected, omitted, used = {}, [], 0
+    for path in sorted(texts, key=lambda p: (order.get(roles[p][0], 1), p)):
+        size = len(texts[path].encode("utf-8"))
+        if used + size > byte_limit:
+            omitted.append(path)
+        else:
+            selected[path] = texts[path]
+            used += size
+    return selected, roles, omitted
+
+
+def _reference_evidence(texts, manifest_paths, sources, scripts, *, byte_limit):
+    """Literal relationships only; never infer command execution or required edits."""
+    references, commands, authority, gaps = [], [], [], []
+    reference_groups = defaultdict(deque)
+    reference_observed = Counter()
+    seen_references = set()
+    reference_dropped = False
+    captured = set(manifest_paths)
+    packages = {
+        path: set(names)
+        for path, names in scripts.items()
+        if PurePosixPath(path).name == "package.json" and path in captured
+    }
+    by_target = defaultdict(list)
+    examined_bytes = examined_files = 0
+    omitted_callers = []
+
+    def add(row):
+        nonlocal reference_dropped
+        reference_observed[row["kind"]] += 1
+        signature = (row["kind"], row["path"], row["line"], row["target"])
+        if signature in seen_references:
+            return
+        bucket = reference_groups[row["kind"]]
+        if len(bucket) < MAX_REFERENCES:
+            seen_references.add(signature)
+            bucket.append(row)
+        else:
+            reference_dropped = True
+
+    for path, text in sorted(texts.items()):
+        for line, content in enumerate(text.splitlines(), 1):
+            if len(authority) < 100 and re.search(
+                r"\b(?:canonical|source of truth|authoritative|generated from)\b", content, re.I
+            ):
+                authority.append(
+                    {
+                        "path": path,
+                        "line": line,
+                        "text": content.strip()[:240],
+                        "basis": "declared authority hint, not verified authority",
+                    }
+                )
+            for match in _PATH_REFERENCE.finditer(content):
+                raw = match.group()
+                targets = {raw, posixpath.normpath(posixpath.join(posixpath.dirname(path), raw))}
+                for target in sorted(targets.intersection(captured)):
+                    if target == path:
+                        continue
+                    row = {
+                        "kind": "documented_path_reference",
+                        "path": path,
+                        "line": line,
+                        "target": target,
+                        "basis": "literal captured path mention; relationship needs review",
+                    }
+                    add(row)
+                    if PurePosixPath(target).suffix.lower() not in {".md", ".mdx", ".rst", ".adoc"}:
+                        by_target[target].append(row)
+            candidate = content.strip().strip("`")
+            command = _SCRIPT_COMMAND.match(candidate)
+            if not command or len(commands) >= 200:
+                continue
+            prefix = command.group("prefix")
+            target = (
+                posixpath.normpath(posixpath.join(prefix, "package.json"))
+                if prefix
+                else next(iter(packages), None)
+                if len(packages) == 1
+                else None
+            )
+            # A shell's working directory is not established by a document path.
+            if not prefix and re.search(r"(?m)^\s*(?:\$\s*)?cd\s+", text):
+                target = None
+            declared = packages.get(target)
+            commands.append(
+                {
+                    "path": path,
+                    "line": line,
+                    "script": command.group("script"),
+                    "manifest": target if declared is not None else None,
+                    "status": "declared"
+                    if declared is not None and command.group("script") in declared
+                    else "not_declared_in_captured_manifest"
+                    if declared is not None
+                    else "scope_unresolved",
+                    "basis": "literal documented command compared with captured manifest script names; working directory, intent and execution remain unverified",
+                }
+            )
+    doc_paths = set(texts)
+    groups = defaultdict(lambda: defaultdict(deque))
+    for path in sorted(sources):
+        role = source_role(path)["role"]
+        area = "/".join(PurePosixPath(path).parent.parts[:3]) or "."
+        groups[role][area].append(path)
+    areas = {role: deque(sorted(values)) for role, values in groups.items()}
+    caller_order = []
+    while any(areas.values()):
+        for role in sorted(areas):
+            if not areas[role]:
+                continue
+            area = areas[role].popleft()
+            caller_order.append(groups[role][area].popleft())
+            if groups[role][area]:
+                areas[role].append(area)
+    for path in caller_order:
+        text = sources[path]
+        size = len(text.encode("utf-8"))
+        if examined_bytes + size > byte_limit:
+            omitted_callers.append(path)
+            continue
+        examined_bytes += size
+        examined_files += 1
+        for line, content in enumerate(text.splitlines(), 1):
+            for match in _PATH_REFERENCE.finditer(content):
+                target = match.group()
+                if target in doc_paths:
+                    add(
+                        {
+                            "kind": "literal_document_caller",
+                            "path": path,
+                            "line": line,
+                            "target": target,
+                            "basis": "exact documentation path in captured source; not an executed caller or mandatory edit",
+                        }
+                    )
+    if omitted_callers:
+        gaps.append("Documentation caller byte limit reached; omitted callers remain unknown")
+    while len(references) < MAX_REFERENCES and any(reference_groups.values()):
+        for kind in sorted(reference_groups):
+            if reference_groups[kind] and len(references) < MAX_REFERENCES:
+                references.append(reference_groups[kind].popleft())
+    retained = Counter(row["kind"] for row in references)
+    counts = {
+        kind: {
+            "observed_matches": count,
+            "retained_locations": retained[kind],
+            "omitted_matches": count - retained[kind],
+        }
+        for kind, count in sorted(reference_observed.items())
+    }
+    if reference_dropped or any(reference_groups.values()):
+        gaps.append("Documentation literal-reference limit reached")
+    return {
+        "references": references,
+        "commands": commands,
+        "authorityHints": authority,
+        "sharedSourceReferences": [
+            {"target": target, "references": rows[:8], "documents": len({r["path"] for r in rows})}
+            for target, rows in sorted(by_target.items())
+            if len({r["path"] for r in rows}) > 1
+        ][:100],
+        "scope": {
+            "referenceSelection": "relationship_kind_round_robin",
+            "referenceCounts": counts,
+            "referenceCountBasis": "Observed literal matches; retained locations are unique by kind, path, line and target. Omitted matches include repeated same-line locations.",
+            "callerBytesExamined": examined_bytes,
+            "callerFilesExamined": examined_files,
+            "callerFilesCaptured": len(sources),
+            "callerSelection": "role_area_round_robin",
+            "callerByteLimit": byte_limit,
+            "omittedCallerPaths": omitted_callers[:100],
+            "omittedCallers": len(omitted_callers),
+            "referenceLimit": MAX_REFERENCES,
+        },
+        "gaps": sorted(set(gaps)),
+    }
+
+
+def captured_documentation(
+    texts: dict[str, str],
+    manifest_paths: set[str],
+    *,
+    captured_sources: dict[str, str] | None = None,
+    manifest_scripts: dict[str, list[str]] | None = None,
+    deep: bool = False,
+) -> dict:
     selected = dict(sorted(texts.items())[:MAX_DOCUMENTS])
     documents, links, gaps = [], [], []
     by_hash = defaultdict(list)
@@ -78,8 +306,73 @@ def captured_documentation(texts: dict[str, str], manifest_paths: set[str]) -> d
         gaps.append("Documentation input limit reached; remaining documents were not analyzed")
     if links_truncated:
         gaps.append("Documentation link limit reached; remaining links were not analyzed")
+    rich_texts, roles, rich_omitted = _rich_inputs(
+        selected, byte_limit=4_000_000 if deep else 1_000_000
+    )
+    sections = analyze_sections(
+        rich_texts,
+        max_pairs=500 if deep else 100,
+        max_sections=2000 if deep else 500,
+        max_windows=8000 if deep else 2000,
+    )
+    references = _reference_evidence(
+        rich_texts,
+        manifest_paths,
+        captured_sources or {},
+        manifest_scripts or {},
+        byte_limit=32_000_000 if deep else 8_000_000,
+    )
+    for row in documents:
+        row["roleHint"], row["roleReasons"] = roles[row["path"]]
+    if rich_omitted:
+        gaps.append(
+            "Rich documentation byte limit reached; remaining documents have only basic inventory/link evidence"
+        )
+    gaps.extend(sections["gaps"])
+    gaps.extend(references["gaps"])
+    maintenance = []
+    for lead in sections["passageLeads"]:
+        left, right = lead["left"], lead["right"]
+        if left["path"] == right["path"] or any(
+            roles[p][0] in {"generated", "required_record"} for p in (left["path"], right["path"])
+        ):
+            continue
+        maintenance.append(
+            {
+                "kind": "repeated_guidance_passage",
+                "locations": [
+                    {"path": item["path"], "line": item["lineStart"], "end_line": item["lineEnd"]}
+                    for item in (left, right)
+                ],
+                "metrics": {"similarity": lead["similarity"], "basis": lead["basis"]},
+            }
+        )
+    for command in references["commands"]:
+        if command["status"] == "not_declared_in_captured_manifest":
+            maintenance.append(
+                {
+                    "kind": "documented_script_mismatch_hint",
+                    "locations": [
+                        {"path": command["path"], "line": command["line"]},
+                        {"path": command["manifest"], "line": 1},
+                    ],
+                    "metrics": {"script": command["script"], "basis": command["basis"]},
+                }
+            )
+    for caller in references["references"]:
+        if caller["kind"] == "literal_document_caller":
+            maintenance.append(
+                {
+                    "kind": "documentation_caller_coupling_hint",
+                    "locations": [
+                        {"path": caller["path"], "line": caller["line"]},
+                        {"path": caller["target"], "line": 1},
+                    ],
+                    "metrics": {"basis": caller["basis"]},
+                }
+            )
     return {
-        "schema": "doc-value.captured.v1",
+        "schema": SCHEMA,
         "method": "Captured source bytes only; lexical leads, not ratings or deletion decisions",
         "documents": documents,
         "words": sum(row["words"] for row in documents),
@@ -87,12 +380,21 @@ def captured_documentation(texts: dict[str, str], manifest_paths: set[str]) -> d
         "tokensApprox": sum(row["tokensApprox"] for row in documents),
         "exactDuplicates": [names for names in by_hash.values() if len(names) > 1],
         "links": links,
+        "sections": sections,
+        "referenceEvidence": references,
+        "maintenanceLeads": maintenance[:200],
         "scope": {
             "capturedDocuments": len(texts),
             "analyzedDocuments": len(selected),
             "maxDocuments": MAX_DOCUMENTS,
             "maxLinks": MAX_LINKS,
             "linksTruncated": links_truncated,
+            "richDocuments": len(rich_texts),
+            "richOmittedPaths": rich_omitted[:100],
+            "richOmittedDocuments": len(rich_omitted),
+            "maintenanceLeadsObserved": len(maintenance),
+            "maintenanceLeadsOmitted": max(0, len(maintenance) - 200),
+            "analysisProfile": "deep" if deep else "standard",
         },
         "gaps": gaps
         + [

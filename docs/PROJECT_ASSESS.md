@@ -17,7 +17,7 @@ Each dimension has two independent integer ratings from 0 to 5:
 
 Burden ranges from negligible overhead (0) to practices dominating available engineering effort (5), including justified safeguards. High capability is not penalized. Missing evidence is **unknown**, not zero; a dimension can have known capability and unknown burden. Capability levels 4–5 require validation beyond the presence of configuration files. “Fort Knox ambition” is a rubric label, not a security certification.
 
-The rubric accepts **source estimates** of burden: inspected repeated edit sites, duplicated guidance, coupled fixtures, release gates and runbook steps can establish likely upkeep without time logs. A traced direct implementation with light upkeep can merit burden 1 with low confidence. Set `burden_basis` to `source_estimate`, `observed` or `unknown`, with independent `burden_confidence`; the existing `confidence` applies to capability. The rationale explains the inferred or observed cost and its limits. Counts alone cannot establish burden, and a reviewer should retain unknown when the source or workflow cannot support an estimate. Numeric burden without explicit basis or confidence metadata is treated as a low-confidence source estimate.
+The rubric accepts **source estimates** of burden: inspected repeated edit sites, duplicated guidance, coupled fixtures, release gates and runbook steps can establish likely upkeep without time logs. Limited hints merit low confidence; representative, corroborated and independently challenged change/upkeep traces can support medium confidence in a structural estimate. Set `burden_basis` to `source_estimate`, `observed` or `unknown`, with independent `burden_confidence`; the existing `confidence` applies to capability. The rationale explains the inferred or observed cost and its limits. Counts alone cannot establish burden, and a reviewer should retain unknown when the source or workflow cannot support an estimate. Numeric burden without explicit basis or confidence metadata retains its legacy low-confidence source-estimate interpretation.
 
 Maintainability review challenges whether the architecture fits demonstrated requirements, including complexity accumulated through AI-assisted changes. Static hints identify candidates for inspection, such as trivial delegation layers or speculative plugin/configuration scaffolding; they never assign burden automatically. A useful finding cites a concrete example, its actual need and estimated or observed cost, the simplest viable alternative preserving required contracts, and a bounded next step. Injection, security and isolation boundaries can justify additional structure. Apply the same proportionality judgment to tests, documentation, controls and delivery processes; higher investment is not a universal goal.
 
@@ -61,6 +61,39 @@ Use `evidence-query ID --view controls --dimension security` (or delivery/operab
 Existing workload/recovery/delivery/change-cost/security/extension observations can be imported as [versioned JSON reports](../.agents/skills/project-assess/references/observation-report.md). Matching declared revision/file hashes establishes only that scope's source identity. Origin, execution, timestamp, scenario relevance and effectiveness remain supplied claims; importing evidence changes no score or goal.
 
 Use `evidence-query ID --view burden --dimension testing` (any of the eight dimensions) to inspect shared burden hurdles, coverage and imported context. The app's **Burden hurdles** view exposes the same evidence. Source patterns identify possible costly mechanisms; attributed experience describes reported change cost. Neither assigns a score. Follow pagination and inspect omissions before claiming broad coverage.
+
+Use `evidence-query ID --view review-plan --dimension operability` for source-bound
+inspection tasks, captured import relationships, relevant local history and
+contrasting change/upkeep questions. The local app's **Dimension review plan** and
+the shared MCP query expose the same paged view. Deep selects more role/area
+context and retains up to 200 burden leads rather than standard's 80. It also
+reuses captured documentation sections, passage overlap, source references and
+literal manifest-script comparisons. These are inspection leads, not authored
+change traces, required edit sites or automatic confidence ratings.
+
+Deep reads at most 30 local first-parent commits through a bounded metadata-only
+Git operation. It retains commit IDs/dates and currently captured paths, excluding
+authors, messages and patches. Co-change is not effort, a required coordinated edit
+or representative frequency. Shallow boundaries and uncaptured/removed paths stay
+explicit. Assessment never executes target code, test suites, plugins or services
+to fill missing evidence.
+
+Fresh review templates use `methodology.confidence_standard: source-estimate-v1`.
+For medium source-estimate burden, the existing `burden_support` records explicit
+scope/representativeness, current labeled `change_trace_ids`, corroborating and
+contrary source through `corroboration_ids` and `counterevidence_ids`, anchor
+rationale and limitations. Its `observation_ids` may be empty. Final submission
+checks these declarations and a distinct exact-draft dimension challenge. Timing,
+recurrence and runtime effectiveness remain separate claims. Legacy reviews are
+preserved. See the [first-run workflow](../.agents/skills/project-assess/references/first-run-confidence.md).
+
+`confidence_assessment.dimensions[D].coverage` separates relevant collection
+omissions from binary assets and analysis-specific limits. Dependency lockfile
+omissions still limit dependency/reproducibility claims; an oversized image does
+not automatically imply missing application source. Deep reviewers follow the
+targeted tasks until each applicable judgment has adequate evidence or its exact
+material blocker is explicit. Supported fields and a completed challenge do not
+certify the semantic judgment or guarantee medium confidence for unavailable code.
 
 Import attributable maintainer or contributor experience with `scan ROOT --report FILE` using [`pat.burden-context.v1`](../.agents/skills/project-assess/references/burden-evidence.md). Keep reports outside assessed repositories. Record attribution, report time, experience period, scope, frequency, workflow stage, timing semantics and limitations without inventing measurements. Unknown source identity or dates remain explicit gaps. A joint “tests OR security on most changes” claim does not establish individual frequency for both; summed testcase time is not wall time or blocked waiting. A matching revision does not authenticate the reporter or establish current applicability.
 

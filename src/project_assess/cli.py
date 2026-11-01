@@ -98,6 +98,7 @@ def parser():
             "area-dependencies",
             "controls",
             "burden",
+            "review-plan",
         ),
         default="index",
     )

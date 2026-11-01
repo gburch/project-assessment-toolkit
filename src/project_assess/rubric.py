@@ -43,12 +43,16 @@ _BURDEN_GUIDANCE = {
     },
     "confidence": (
         "Rate burden confidence independently of capability confidence. Use low confidence for "
-        "limited source inference, and increase it when inspected workflows, history or direct "
-        "observations corroborate the cost. Missing measurements lower confidence, not burden; "
+        "limited source inference. Medium source-estimate confidence requires representative "
+        "current change/upkeep traces, corroborating source, inspected contrary paths, explicit "
+        "scope and an independently challenged anchor rationale. Actual duration, frequency and "
+        "runtime effectiveness remain unobserved without applicable evidence. Missing measurements "
+        "do not automatically force a well-supported structural estimate to low confidence; "
         "a manageable rating needs affirmative support, not merely an intended fast path. "
         "Levels 4–5 need evidence of dominating burden, which may include attributed maintainer "
         "experience; do not invent precise effort shares."
     ),
+    "source_estimate_standard": "source-estimate-v1",
     "calibration": (
         "Distinguish documented intended workflows, attributed maintainer experience and "
         "independently verified measurements. Reconcile contrary experience before retaining "

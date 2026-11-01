@@ -97,6 +97,12 @@ The local app can scan a project, inspect evidence, load or import a cited JSON 
 
 Follow the [local workflow](docs/PROJECT_ASSESS.md#local-workflow) to fill a `review-template`, inspect `evidence` and `rubric`, and submit the review. The optional [assessment skill](.agents/skills/project-assess/SKILL.md) carries a request to "run PAT" through to a substantive inline scorecard, cited findings and improvement plan; scan counts and links alone are collection output. Choose goals explicitly; profiles are starting suggestions, not a prerequisite for the assessment.
 
+Deep reviews include dimension-specific inspection plans, richer documentation
+evidence and bounded local change history. Representative, corroborated and
+independently challenged workflows can support medium-confidence structural
+burden estimates without timing logs. Missing runtime proof stays explicit;
+collection and completed fields never assign confidence automatically.
+
 Use `pat --state-dir STATE export-report ASSESSMENT_ID` to return nine SVG badges
 and an offline interactive report. Compare all eight dimensions on aligned
 capability and burden tracks, with exact scores, target markers, gaps and separate

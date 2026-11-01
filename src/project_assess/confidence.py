@@ -272,6 +272,15 @@ def burden_support_assessment(assessment, review, dimension):
         "evidence_ids": list(support.get("observation_ids", [])),
         "readiness": burden_evidence_inventory(assessment, review, dimension),
     }
+    if (
+        rating.get("burden_confidence") == "medium"
+        and rating.get("burden_basis") == "source_estimate"
+        and (
+            review.get("methodology", {}).get("confidence_standard") == "source-estimate-v1"
+            or any(key in support for key in ("corroboration_ids", "counterevidence_ids"))
+        )
+    ):
+        return _source_estimate_support(assessment, review, dimension, result)
     if rating.get("burden_confidence") != "high":
         return result
     result["status"] = "withheld"
@@ -373,6 +382,74 @@ def burden_support_assessment(assessment, review, dimension):
             gaps.append("The burden challenge is not bound to this current draft and snapshot.")
     if not gaps:
         result["status"] = "structured_support_present_for_declared_scope"
+    return result
+
+
+def _source_estimate_support(assessment, review, dimension, result):
+    """Check declared structural support; never turn estimates into observed cost."""
+    from .review_plan import dimension_coverage
+
+    result.update(status="withheld", standard="source-estimate-v1")
+    gaps = result["gaps"]
+    rating = review["ratings"][dimension]
+    support = rating.get("burden_support") or {}
+    if rating.get("burden") is None:
+        gaps.append("Medium source confidence requires a scored structural estimate.")
+    for key in ("claim", "scope_description", "representativeness", "counterevidence", "freshness"):
+        if not _nonblank(support.get(key)):
+            gaps.append(f"Source-estimate support must explicitly record {key}.")
+    coverage = review.get("coverage", {})
+    dimension_review = coverage.get("dimension_reviews", {}).get(dimension, {})
+    scope = support.get("scope")
+    if scope == "project":
+        if coverage.get("scope") != "whole_project" or dimension_review.get("status") != "reviewed":
+            gaps.append("Project estimates require representative reviewed dimension coverage.")
+        gaps.extend(dimension_coverage(assessment, dimension)["collection_blockers"])
+    elif scope == "workflow":
+        if dimension_review.get("status") not in {"reviewed", "partial"}:
+            gaps.append("Workflow estimates require an explicitly reviewed source scope.")
+    else:
+        gaps.append("Source-estimate support must declare project or workflow scope.")
+    entries = {entry["id"]: entry for entry in assessment.get("evidence", [])}
+    cited = set(rating.get("evidence_ids", []))
+    examined = set(dimension_review.get("evidence_ids", []))
+    for field in ("corroboration_ids", "counterevidence_ids"):
+        ids = support.get(field, [])
+        if not ids or any(
+            eid not in cited
+            or eid not in examined
+            or entries.get(eid, {}).get("kind") not in SOURCE_KINDS
+            for eid in ids
+        ):
+            gaps.append(f"{field} must cite current source inspected for this dimension.")
+    traces = {trace["id"]: trace for trace in review.get("change_traces", [])}
+    ids = support.get("change_trace_ids", [])
+    selected = [traces[identity] for identity in ids if identity in traces]
+    if not ids or len(selected) != len(ids):
+        gaps.append("Source estimates require a referenced representative change or upkeep trace.")
+    for trace in selected:
+        if not _nonblank(trace.get("cost")) or not _nonblank(trace.get("counterevidence")):
+            gaps.append("Each estimate trace must explain upkeep and a contrary or simpler path.")
+        if any(step.get("activity", "unknown") == "unknown" for step in trace.get("steps", [])):
+            gaps.append("Estimate traces must distinguish edits, verification and inspection.")
+        if not any(
+            eid in cited and eid in examined and entries.get(eid, {}).get("kind") in SOURCE_KINDS
+            for step in trace.get("steps", [])
+            for eid in step.get("evidence_ids", [])
+        ):
+            gaps.append("Each estimate trace must intersect inspected current dimension source.")
+        trace_ids = {eid for step in trace.get("steps", []) for eid in step.get("evidence_ids", [])}
+        if not trace_ids.intersection(support.get("corroboration_ids", [])):
+            gaps.append(
+                "Each estimate trace must include source corroborating this dimension's upkeep mechanism."
+            )
+    if not _burden_challenge_matches(assessment, review, dimension):
+        gaps.append("A distinct reviewer must challenge the estimate against this exact draft.")
+    if not gaps:
+        result["status"] = "structured_support_present_for_declared_scope"
+    result["caveat"] = (
+        "Structural estimate support, not measured duration, recurrence, runtime effectiveness or automatically earned confidence. Corroboration and contrary-source relevance remain review judgments."
+    )
     return result
 
 
@@ -513,10 +590,10 @@ def confidence_assessment(assessment, review):
                 + (status or "unestablished")
                 + "; inspect representative workflows and record remaining scope."
             )
-        if not assessment.get("complete", False):
-            common.append(
-                "Collection is partial; establish whether its omissions affect this dimension."
-            )
+        from .review_plan import dimension_coverage
+
+        collection_scope = dimension_coverage(assessment, dimension)
+        common.extend(collection_scope["collection_blockers"])
         capability = list(common)
         score = rating.get("capability")
         if score is None:
@@ -574,6 +651,10 @@ def confidence_assessment(assessment, review):
                 if burden_support.get("scope") == "workflow"
                 else []
             )
+            if burden_support.get("standard") == "source-estimate-v1":
+                burden.append(
+                    "The supported structural estimate does not establish measured time, frequency or runtime effectiveness."
+                )
         elif burden_support["status"] == "withheld":
             burden.extend(burden_support["gaps"])
         dimensions[dimension] = {
@@ -591,6 +672,7 @@ def confidence_assessment(assessment, review):
             },
             "cited_report_count": len(reports),
             "source_matched_report_count": len(bound_reports),
+            "coverage": collection_scope,
         }
     return {
         "schema_version": 1,
