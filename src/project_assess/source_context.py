@@ -15,14 +15,8 @@ from .collector import (
 )
 
 
-def read_context(root, entry, line=1, end_line=None, max_chars=8000):
-    """Read captured source only; reject stale bytes and all symlink traversal."""
-    if type(line) is not int or line < 1:
-        raise ValueError("line must be a positive integer")
-    if end_line is not None and (type(end_line) is not int or end_line < line):
-        raise ValueError("end_line must be at or after line")
-    if type(max_chars) is not int or not 256 <= max_chars <= 16000:
-        raise ValueError("max_chars must be between 256 and 16000")
+def _matched_lines(root, entry):
+    """Return redacted lines only after checking the complete captured file."""
     path = PurePosixPath(entry["path"])
     if entry["kind"] not in {
         "python",
@@ -59,7 +53,24 @@ def read_context(root, entry, line=1, end_line=None, max_chars=8000):
         raise ValueError("Source bytes changed since capture; rescan to inspect the new source")
     # Preserve multiline credential state even when its opening marker lies
     # above the requested range.
-    lines = _redact(payload.decode("utf-8")).splitlines()
+    return tuple(_redact(payload.decode("utf-8")).splitlines())
+
+
+def read_context(root, entry, line=1, end_line=None, max_chars=8000, *, _line_cache=None):
+    """Read captured source only; optional cache belongs to one validation call."""
+    if type(line) is not int or line < 1:
+        raise ValueError("line must be a positive integer")
+    if end_line is not None and (type(end_line) is not int or end_line < line):
+        raise ValueError("end_line must be at or after line")
+    if type(max_chars) is not int or not 256 <= max_chars <= 16000:
+        raise ValueError("max_chars must be between 256 and 16000")
+    key = (str(root), entry["id"], entry["digest"], entry["path"], entry["kind"])
+    if _line_cache is None:
+        lines = _matched_lines(root, entry)
+    else:
+        if key not in _line_cache:
+            _line_cache[key] = _matched_lines(root, entry)
+        lines = _line_cache[key]
     if line > len(lines):
         raise ValueError("Requested line is outside captured source")
     requested_end = end_line if end_line is not None else line + 39

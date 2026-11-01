@@ -238,8 +238,39 @@ def main():
                 rationale="Synthetic delivery fixture judgment.",
                 evidence_ids=[snapshot["evidence"][0]["id"]],
             )
+        source_entry = next(row for row in snapshot["evidence"] if row["path"] == "app.py")
+        context = cli(
+            "source-context", snapshot["id"], source_entry["id"], "--line", "1", "--end-line", "2"
+        )
+        review["findings"] = [
+            {
+                "severity": "low",
+                "title": "Fixture source contains a return expression",
+                "evidence_ids": [source_entry["id"]],
+                "support": {
+                    "confidence": "high",
+                    "scope": "source",
+                    "rationale": "The captured function body contains return a + b.",
+                    "counterevidence": "A finite syntax observation is not runtime assurance.",
+                    "limitations": ["This is a synthetic delivery fixture."],
+                    "citations": [
+                        {
+                            key: context[key]
+                            for key in ("evidence_id", "line", "end_line", "excerpt")
+                        }
+                    ],
+                },
+            }
+        ]
         review_file.write_text(json.dumps(review))
         saved = cli("review", snapshot["id"], "--input", review_file)
+        confidence = cli("report", snapshot["id"])["confidence_assessment"]
+        check(
+            saved["support_verification"]["source_digest"] == snapshot["source"]["manifest_digest"]
+            and confidence["summary"]["verified_source_findings"] == 1
+            and confidence["summary"]["declared_high_source_findings"] == 1,
+            "installed CLI verifies source spans without promoting whole-project confidence",
+        )
         goals = cli(
             "targets",
             snapshot["project_id"],

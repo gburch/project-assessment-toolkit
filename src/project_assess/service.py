@@ -16,7 +16,8 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 from .collector import collect
-from .review_context import get_system_map
+from .confidence import MAX_FINDING_EXCERPT, confidence_assessment, validate_finding_support
+from .review_context import build_challenge_evidence_index, get_system_map
 from .rubric import DIMENSIONS, PROFILES, RUBRIC_VERSION, rubric
 
 
@@ -201,7 +202,15 @@ def _draft_digest(assessment, review):
     draft = {
         key: value
         for key, value in review.items()
-        if key not in {"challenge", "id", "created_at", "provenance", "schema_version"}
+        if key
+        not in {
+            "challenge",
+            "id",
+            "created_at",
+            "provenance",
+            "schema_version",
+            "support_verification",
+        }
     }
     draft["ratings"] = _normalized_ratings(draft["ratings"])
     bound = {
@@ -407,6 +416,7 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
         "coverage": (review or {}).get("coverage"),
         "review_coverage": _review_coverage(review),
         "assessment_method": _assessment_method(review),
+        "confidence_assessment": confidence_assessment(assessment, review),
         "system_map": get_system_map(assessment),
         "plan": plan,
         "planning_status": planning_status,
@@ -583,6 +593,28 @@ CHALLENGE_SCHEMA = _object(
     },
     required=["schema_version", "status", "summary", "gaps"],
 )
+FINDING_SUPPORT_SCHEMA = _object(
+    {
+        "confidence": {"enum": ["low", "medium", "high"]},
+        "scope": {"enum": ["source", "inference"]},
+        "rationale": TEXT,
+        "citations": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "items": _object(
+                {
+                    "evidence_id": {"type": "string", "maxLength": 200},
+                    "line": {"type": "integer", "minimum": 1},
+                    "end_line": {"type": "integer", "minimum": 1},
+                    "excerpt": {"type": "string", "minLength": 1, "maxLength": MAX_FINDING_EXCERPT},
+                }
+            ),
+        },
+        "counterevidence": TEXT,
+        "limitations": {"type": "array", "items": TEXT, "maxItems": 20},
+    }
+)
 REVIEW_SCHEMA = _object(
     {
         "assessment_id": {"type": "string", "maxLength": 100},
@@ -597,7 +629,9 @@ REVIEW_SCHEMA = _object(
                     "severity": {"enum": ["critical", "high", "medium", "low"]},
                     "title": TEXT,
                     "evidence_ids": IDS,
-                }
+                    "support": FINDING_SUPPORT_SCHEMA,
+                },
+                required=["severity", "title", "evidence_ids"],
             ),
         },
         "coverage": COVERAGE_SCHEMA,
@@ -939,6 +973,7 @@ class AssessmentService:
             "review_id": (review or {}).get("id"),
             "review_coverage": alignment["review_coverage"],
             "assessment_method": _assessment_method(review, compact=True),
+            "confidence_assessment": confidence_assessment(assessment, review),
             "system_map": alignment["system_map"],
             "urgent_findings": [
                 {key: row.get(key) for key in ("severity", "title", "evidence_ids")}
@@ -1799,6 +1834,7 @@ class AssessmentService:
                 cites(rating["evidence_ids"])
         for finding in review["findings"]:
             cites(finding["evidence_ids"])
+        support_verification = validate_finding_support(assessment, review)
         _validate_planning(review, evidence_ids)
         method = review.get("methodology")
         if method:
@@ -1905,6 +1941,7 @@ class AssessmentService:
                 raise ValueError(
                     "Fresh whole-project scores require a change trace and challenge or explicit unavailability"
                 )
+        return support_verification
 
     def challenge_template(self, assessment_id, review):
         """Prepare a bounded, score-free handoff; the caller runs a separate reviewer."""
@@ -1914,7 +1951,9 @@ class AssessmentService:
                 raise ConflictError("Assessment is stale; challenge the latest snapshot")
             self._validate_review_document(db, assessment, review, final=False)
             goals = self._goals(db, assessment["project_id"])
-        evidence = assessment["evidence"]
+        selected_evidence = build_challenge_evidence_index(
+            assessment, review.get("change_traces", [])
+        )
         return {
             "schema_version": 1,
             "assessment_id": assessment_id,
@@ -1928,10 +1967,9 @@ class AssessmentService:
                 "omitted_collection_gaps": max(0, len(assessment["gaps"]) - 50),
                 "inventory": assessment["facts"].get("inventory", {}),
                 "system_map": get_system_map(assessment),
-                "evidence_index": [
-                    {key: item[key] for key in ("id", "kind", "path")} for item in evidence[:80]
-                ],
-                "omitted_evidence": max(0, len(evidence) - 80),
+                "evidence_index": selected_evidence["items"],
+                "evidence_selection": selected_evidence["selection"],
+                "omitted_evidence": selected_evidence["selection"]["omitted"],
             },
             "change_traces": review.get("change_traces", []),
             "rubric": rubric(),
@@ -1982,7 +2020,7 @@ class AssessmentService:
                 return replay
             if self._latest(db, assessment["project_id"])["id"] != assessment_id:
                 raise ConflictError("Assessment is stale; review the latest snapshot")
-            self._validate_review_document(db, assessment, review)
+            support_verification = self._validate_review_document(db, assessment, review)
             result = {
                 **review,
                 "schema_version": 1,
@@ -1991,6 +2029,8 @@ class AssessmentService:
                 "provenance": "agent_judgment",
             }
             result["ratings"] = _normalized_ratings(review["ratings"])
+            if support_verification["findings"]:
+                result["support_verification"] = support_verification
             db.execute(
                 "INSERT INTO reviews(id,assessment_id,data) VALUES (?,?,?)",
                 (result["id"], assessment_id, canonical(result)),
@@ -2185,6 +2225,7 @@ class AssessmentService:
                 "goal_alignment": alignment,
                 "review_coverage": alignment["review_coverage"],
                 "assessment_method": alignment["assessment_method"],
+                "confidence_assessment": alignment["confidence_assessment"],
                 "system_map": alignment["system_map"],
             }
 
@@ -2244,6 +2285,58 @@ def _markdown_text(value):
     for character in ("\\", "`", "*", "_", "[", "]", "|"):
         text = text.replace(character, "\\" + character)
     return text
+
+
+def _confidence_markdown(assessment, review):
+    confidence = confidence_assessment(assessment, review)
+    lines = ["", "## Confidence and evidence support", "", _markdown_text(confidence["caveat"])]
+    for dimension, axes in confidence["dimensions"].items():
+        lines += ["", "### " + _markdown_text(dimension), ""]
+        for axis in ("capability", "burden"):
+            value = axes[axis]
+            lines.append(
+                "- "
+                + axis
+                + " confidence (declared): "
+                + _markdown_text(value.get("declared_confidence") or "unestablished")
+            )
+            lines.extend("  - " + _markdown_text(blocker) for blocker in value["blockers"])
+    for row in confidence["findings"]:
+        lines += [
+            "",
+            "### Finding: " + _markdown_text(row["title"]),
+            "",
+            "Declared confidence: "
+            + _markdown_text(row["declared_confidence"] or "unestablished")
+            + "; scope: "
+            + _markdown_text(row["scope"])
+            + "; source grounding: "
+            + _markdown_text(row["grounding"])
+            + ".",
+        ]
+        support = (review or {}).get("findings", [])[row["index"]].get("support")
+        if support is None:
+            continue
+        lines += [
+            "",
+            _markdown_text(support["rationale"]),
+            "Counterevidence: " + _markdown_text(support["counterevidence"]),
+        ]
+        for citation in support["citations"]:
+            lines += [
+                "",
+                "Evidence: "
+                + _markdown_text(citation["evidence_id"])
+                + "; lines "
+                + str(citation["line"])
+                + "–"
+                + str(citation["end_line"])
+                + ".",
+                "",
+                *["> " + _markdown_text(line) for line in citation["excerpt"].splitlines()],
+            ]
+        lines.extend("- Limitation: " + _markdown_text(item) for item in support["limitations"])
+    return lines
 
 
 def _planning_markdown(alignment):
@@ -2474,6 +2567,7 @@ def markdown_report(report):
         lines.append(
             f"| {dimension} | {rating.get('capability') if rating.get('capability') is not None else 'unknown'} | {burden_text} | {rating.get('confidence', 'unknown')} |"
         )
+    lines += _confidence_markdown(assessment, report["review"])
     facts = assessment["facts"]
     inventory = facts.get("inventory", {})
     lines += [
@@ -2562,7 +2656,10 @@ def markdown_report(report):
     lines += ["", "## Findings", ""]
     for finding in assessment["findings"] + (report["review"] or {}).get("findings", []):
         lines.append(
-            f"- {finding.get('severity', 'unknown')}: {finding.get('title', finding.get('message', 'Finding'))}"
+            "- "
+            + _markdown_text(finding.get("severity", "unknown"))
+            + ": "
+            + _markdown_text(finding.get("title", finding.get("message", "Finding")))
         )
     lines += _planning_markdown(
         {

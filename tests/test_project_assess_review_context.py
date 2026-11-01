@@ -2,8 +2,15 @@
 
 from copy import deepcopy
 
+import pytest
+
 from project_assess.collector import collect
-from project_assess.review_context import MAX_AREAS, MAX_CITATIONS, get_system_map
+from project_assess.review_context import (
+    MAX_AREAS,
+    MAX_CITATIONS,
+    build_challenge_evidence_index,
+    get_system_map,
+)
 
 
 def source(path, identity, role="production", lines=10, **stats):
@@ -162,3 +169,70 @@ def test_real_capture_provides_cited_module_counts_without_executing_source(tmp_
     assert area["files"] == area["modules"] == area["functions"] == 1
     captured_ids = {entry["id"] for entry in snapshot["evidence"]}
     assert set(area["evidence_ids"]) <= captured_ids
+
+
+def test_challenge_navigation_preserves_trace_and_area_breadth_under_tooling_noise():
+    entries = [
+        {"id": f"e-noise-{i}", "kind": "documentation", "path": f".agents/noise/{i:03}.md"}
+        for i in range(200)
+    ]
+    entries += [
+        {**source(f"src/product/area{i:02}/small.py", f"e-area-{i}"), "kind": "python"}
+        for i in range(12)
+    ]
+    entries += [
+        {**source("src/product/area00/large.py", "e-large", lines=2000), "kind": "python"},
+        {**source("tests/test_integration.py", "e-test", role="test"), "kind": "python"},
+        {"id": "e-manifest", "kind": "manifest", "path": "pyproject.toml"},
+        {"id": "e-doc", "kind": "documentation", "path": "docs/architecture.md"},
+        analysis(
+            "static-analysis",
+            "e-analysis",
+            [
+                {
+                    "path": "src/product/area00/large.py",
+                    "function_count": 40,
+                    "pattern_functions": 0,
+                    "overview_partial": True,
+                }
+            ],
+        ),
+    ]
+    entries[-1]["path"] = "<static-analysis>"
+    snapshot = {"evidence": entries}
+    traces = [{"id": "valuable-change", "steps": [{"evidence_ids": ["e-test", "e-area-11"]}]}]
+    before = deepcopy(snapshot)
+    result = build_challenge_evidence_index(snapshot, traces, limit=20)
+    reverse = build_challenge_evidence_index(
+        {"evidence": list(reversed(entries))}, traces, limit=20
+    )
+    assert result == reverse and snapshot == before
+    by_id = {row["id"]: row for row in result["items"]}
+    assert {"e-test", "e-area-11", "e-large", "e-manifest", "e-doc"} <= by_id.keys()
+    assert "production_area_owner" in by_id["e-large"]["selection_reasons"]
+    assert "change_trace" in by_id["e-test"]["selection_reasons"]
+    selection = result["selection"]
+    assert selection["selected"] == 20 and selection["omitted"] == len(entries) - 20
+    assert selection["production_areas"] == selection["represented_production_areas"] == 12
+    assert selection["omitted_production_areas"] == 0
+    assert not any("stats" in row or "excerpt" in row for row in result["items"])
+
+
+def test_challenge_navigation_reports_omitted_areas_and_trace_records_without_grade_inference():
+    entries = [
+        {**source(f"src/pkg/area{i:02}/app.py", f"e-{i}"), "kind": "python"} for i in range(100)
+    ]
+    traces = [{"steps": [{"evidence_ids": [row["id"] for row in entries]}]}]
+    result = build_challenge_evidence_index({"evidence": entries}, traces, limit=10)
+    selection = result["selection"]
+    assert len(result["items"]) == 10
+    assert selection["omitted_trace_evidence"] == 90
+    assert selection["omitted_production_areas"] == 90
+    assert all("selection_reasons" in row for row in result["items"])
+    assert not ({"confidence", "capability", "burden", "priority"} & selection.keys())
+
+
+@pytest.mark.parametrize("limit", [0, 81, True, "20"])
+def test_challenge_navigation_rejects_unbounded_or_invalid_limits(limit):
+    with pytest.raises(ValueError, match="between 1 and 80"):
+        build_challenge_evidence_index({}, [], limit=limit)

@@ -99,7 +99,7 @@ _SECRET_LINE = re.compile(
 _TOKEN = re.compile(
     r"(?:AKIA|ASIA)[A-Z0-9]{16}|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{12,}"
     r"|xox[baprs]-[A-Za-z0-9-]{10,}|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
-    r"|sk[-_][A-Za-z0-9_-]{16,}|(?i:bearer)\s+[A-Za-z0-9._~+/-]{8,}"
+    r"|(?<![A-Za-z0-9])sk[-_][A-Za-z0-9_-]{16,}|(?i:bearer)\s+[A-Za-z0-9._~+/-]{8,}"
     r"|[A-Za-z][A-Za-z0-9+.-]*://[^\s/@]+:[^\s/@]+@"
 )
 
@@ -801,6 +801,7 @@ def collect(
     gaps, excluded, unsupported = [], Counter(), Counter()
     inputs, skipped, unsearched_directories = [], [], []
     complete, supported_text_complete, assets_complete = True, True, True
+    python_source_stable = True
     deadline_hit, visited, total, asset_total = False, 0, 0, 0
     revision, dirty = _git(root)
     selected, selection_mode, selection_gap, selection_failed = _git_inventory(root)
@@ -953,6 +954,7 @@ def collect(
             complete, \
             supported_text_complete, \
             assets_complete, \
+            python_source_stable, \
             total, \
             asset_total, \
             static_symbols, \
@@ -991,6 +993,8 @@ def collect(
                     assets_complete = False
                 else:
                     supported_text_complete = False
+                if kind == "python":
+                    python_source_stable = False
             watched.append((str(path), fingerprint))
             if kind is None:
                 asset_total += len(payload)
@@ -1240,7 +1244,8 @@ def collect(
             except (OSError, ValueError):
                 gaps.append("Source changed during collection")
                 complete = supported_text_complete = assets_complete = False
-                break
+                if stat.S_ISDIR(expected[2]) or _kind(Path(path)) == "python":
+                    python_source_stable = False
     finally:
         os.close(descriptor)
     analysis_omissions = []
@@ -1322,12 +1327,20 @@ def collect(
         except (KeyError, TypeError, ValueError, SyntaxError, RecursionError):
             gaps.append("Static analysis could not be completed safely")
             complete = False
+    # An omitted asset or dependency lockfile does not omit Python modules.
+    # Discovery and changed directories remain conservative because they can
+    # hide additional Python inputs; syntax/read failures also stay partial.
+    python_source_complete = (
+        discovery_complete
+        and python_source_stable
+        and not any(row["kind"] == "python" for row in skipped)
+    )
     analysis = summarize_static(
         python_analysis,
         facts["python"]["files"],
         facts["javascript"]["files"],
         import_target_limit=budget.import_targets,
-        source_complete=supported_text_complete,
+        source_complete=python_source_complete,
     )
     js_analysis = summarize_javascript(javascript_analysis, facts["javascript"]["files"])
     generic_analysis = _redact_data(
@@ -1603,6 +1616,7 @@ def collect(
         "analysis_profile": budget.name,
         "limits": configured_limits,
         "supported_text_complete": supported_text_complete,
+        "python_source_complete": python_source_complete,
         "unsupported_assets_complete": assets_complete,
         "deadline_exceeded": expired(),
         "deadline_kind": "cooperative; checks between bounded operations, not a process kill deadline",
@@ -1672,7 +1686,7 @@ def collect(
         optional_analyses[name] = result
         add_optional_evidence(name, result)
     scope = {
-        "collector_version": 7,
+        "collector_version": 8,
         "rubric_version": RUBRIC_VERSION,
         "max_files": MAX_FILES,
         "max_file_bytes": MAX_FILE_BYTES,

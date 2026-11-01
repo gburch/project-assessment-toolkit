@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "3"
+VERSION = "4"
 QUERY_VERSION = "3"
 JOERN_VERSION = "4.0.669"
 QUERY_PATH = Path(__file__).parent / "resources" / "joern.sc"
@@ -755,6 +755,8 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
         methods.append(
             {
                 "path": path,
+                "source_evidence_id": sources[path]["evidence_id"],
+                "digest": sources[path]["digest"],
                 "line": line,
                 "name": text(row.get("name", "")),
                 "full_name": text(row.get("full_name", "")),
@@ -778,10 +780,14 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
         calls.append(
             {
                 "path": path,
+                "source_evidence_id": sources[path]["evidence_id"],
+                "digest": sources[path]["digest"],
                 "line": line,
                 "caller_name": text(row.get("caller_name", "")),
                 "caller_full_name": text(row.get("caller_full_name", "")),
                 "target_path": target,
+                "target_source_evidence_id": sources[target]["evidence_id"] if target else None,
+                "target_digest": sources[target]["digest"] if target else None,
                 "target_name": text(row.get("target_name", "")),
                 "target_full_name": text(row.get("target_full_name", "")),
                 "resolution": "internal"
@@ -1061,6 +1067,7 @@ def analyze_joern(
             row["path"],
         )
     )
+    source_by_path = {source["path"]: source for source in selected}
     identity = joern_info()
     result = {
         "schema_version": 1,
@@ -1448,6 +1455,8 @@ def analyze_joern(
             result["modules"] = [
                 {
                     "path": source["path"],
+                    "source_evidence_id": source["evidence_id"],
+                    "digest": source["digest"],
                     "role": source["role"],
                     "language": source["language"],
                     "staged": source["path"] in staged,
@@ -1496,6 +1505,10 @@ def analyze_joern(
             {
                 "source": source,
                 "target": target,
+                "source_evidence_id": source_by_path[source]["evidence_id"],
+                "source_digest": source_by_path[source]["digest"],
+                "target_source_evidence_id": source_by_path[target]["evidence_id"],
+                "target_digest": source_by_path[target]["digest"],
                 "kind": "source_supported_method_call",
                 "count": count,
             }
@@ -1505,6 +1518,10 @@ def analyze_joern(
             {
                 "source": source,
                 "target": target,
+                "source_evidence_id": source_by_path[source]["evidence_id"],
+                "source_digest": source_by_path[source]["digest"],
+                "target_source_evidence_id": source_by_path[target]["evidence_id"],
+                "target_digest": source_by_path[target]["digest"],
                 "kind": "producer_inferred_method_call",
                 "count": count,
                 "confidence": "low",

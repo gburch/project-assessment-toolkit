@@ -1,6 +1,6 @@
 """A bounded path-based orientation map, not semantic domains or a risk ranking."""
 
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from pathlib import PurePosixPath
 
 from .generic_analysis import source_language
@@ -11,7 +11,8 @@ MAX_DEPENDENCIES = 20
 MAX_CITATIONS = 5
 
 
-def _area(path):
+def source_area(path):
+    """Use one stable path heuristic for review navigation and bounded sampling."""
     directories = PurePosixPath(path).parts[:-1]
     start = next((i + 1 for i, part in enumerate(directories) if part in {"src", "lib"}), 0)
     return "/".join(directories[: start + min(2, len(directories) - start)]) or "(root)"
@@ -19,6 +20,174 @@ def _area(path):
 
 def _number(value):
     return value if type(value) is int and value >= 0 else None
+
+
+def build_challenge_evidence_index(assessment, change_traces, limit=80):
+    """Select captured navigation across traces, production areas and support.
+
+    Selection is a bounded inspection aid, not evidence that the reviewer read
+    these records or that their size/shape establishes a score.
+    """
+    if type(limit) is not int or not 1 <= limit <= 80:
+        raise ValueError("Challenge evidence limit must be between 1 and 80")
+    evidence = sorted(assessment.get("evidence", []), key=lambda e: (e.get("path", ""), e["id"]))
+    by_id = {e["id"]: e for e in evidence}
+    modules = {}
+    for entry in evidence:
+        if entry.get("kind") in {"static-analysis", "javascript-analysis"}:
+            for row in entry.get("stats", {}).get("modules", []):
+                modules[row["path"]] = row
+    production, support = defaultdict(list), defaultdict(list)
+    roles = {}
+
+    def cost(entry):
+        row = modules.get(entry["path"], {})
+        functions, patterns = (
+            _number(row.get("function_count")),
+            _number(row.get("pattern_functions")),
+        )
+        partial = bool(
+            row.get("overview_partial")
+            or row.get("partial_functions")
+            or row.get("status") in {"partial", "unavailable", "unsupported"}
+        )
+        partial |= functions is not None and patterns is not None and patterns < functions
+        return (
+            -partial,
+            -(functions or 0),
+            -(_number(entry.get("lines")) or 0),
+            entry["path"],
+            entry["id"],
+        )
+
+    for entry in evidence:
+        path, stats = entry.get("path", ""), entry.get("stats", {})
+        role = stats.get("role") or source_role(path)["role"]
+        roles[entry["id"]] = role
+        if (
+            source_language(path)
+            and role == "production"
+            and not any(stats.get(key) for key in ("generated_hint", "vendor_hint"))
+        ):
+            production[source_area(path)].append(entry)
+        else:
+            category = (
+                "test"
+                if role == "test"
+                else "documentation"
+                if entry.get("kind") == "documentation"
+                else "configuration"
+                if entry.get("kind") in {"manifest", "configuration", "ci"}
+                else "analysis"
+                if entry.get("kind", "").endswith("-analysis")
+                else "other"
+            )
+            support[category].append(entry)
+    for entries in production.values():
+        entries.sort(key=cost)
+    for entries in support.values():
+        entries.sort(
+            key=lambda e: (
+                roles[e["id"]] == "tooling",
+                PurePosixPath(e.get("path", "")).name.lower()
+                not in {
+                    "readme.md",
+                    "pyproject.toml",
+                    "package.json",
+                    "architecture.md",
+                    "operations.md",
+                    "setup.md",
+                },
+                e.get("path", ""),
+                e["id"],
+            )
+        )
+    cited = list(
+        dict.fromkeys(
+            identity
+            for trace in change_traces
+            for step in trace.get("steps", [])
+            for identity in step.get("evidence_ids", [])
+            if identity in by_id
+        )
+    )
+    picked = {}
+
+    def select(entry, reason):
+        identity = entry["id"]
+        if identity not in picked and len(picked) < limit:
+            picked[identity] = {
+                key: entry[key] for key in ("id", "kind", "path", "digest", "lines") if key in entry
+            }
+            picked[identity]["selection_reasons"] = []
+        if identity in picked and reason not in picked[identity]["selection_reasons"]:
+            picked[identity]["selection_reasons"].append(reason)
+
+    for identity in cited[: max(1, limit // 3)]:
+        select(by_id[identity], "change_trace")
+    support_slots = min(12, limit // 4)
+    # One costly/partial owner per area precedes additional owners from any
+    # single subtree. Areas absent from the bounded system map still compete.
+    areas = sorted(production, key=lambda area: (cost(production[area][0]), area))
+    for area in areas:
+        if len(picked) >= limit - support_slots:
+            break
+        select(production[area][0], "production_area_owner")
+    categories = [
+        key
+        for key in ("configuration", "documentation", "test", "analysis", "other")
+        if support[key]
+    ]
+    positions = Counter()
+    remaining = support_slots
+    while remaining and len(picked) < limit:
+        advanced = False
+        for category in categories:
+            while (
+                positions[category] < len(support[category])
+                and support[category][positions[category]]["id"] in picked
+            ):
+                positions[category] += 1
+            if positions[category] < len(support[category]):
+                select(support[category][positions[category]], "support_" + category)
+                positions[category] += 1
+                remaining -= 1
+                advanced = True
+                if not remaining or len(picked) >= limit:
+                    break
+        if not advanced:
+            break
+    for identity in cited:
+        select(by_id[identity], "change_trace")
+    queues = {area: deque(production[area]) for area in areas}
+    while queues and len(picked) < limit:
+        for area in list(queues):
+            entry = queues[area].popleft()
+            if entry["id"] not in picked:
+                select(entry, "additional_production_owner")
+            if not queues[area]:
+                del queues[area]
+    for entry in evidence:
+        if entry["id"] not in picked:
+            select(entry, "captured_context")
+    production_ids = {entry["id"] for entries in production.values() for entry in entries}
+    represented = {source_area(e["path"]) for e in picked.values() if e["id"] in production_ids}
+    return {
+        "items": list(picked.values()),
+        "selection": {
+            "method": "trace_then_production_area_breadth_then_support",
+            "limit": limit,
+            "selected": len(picked),
+            "omitted": max(0, len(evidence) - len(picked)),
+            "trace_cited": len(cited),
+            "trace_selected": len(set(cited) & picked.keys()),
+            "omitted_trace_evidence": len(set(cited) - picked.keys()),
+            "production_areas": len(production),
+            "represented_production_areas": len(set(production) & represented),
+            "omitted_production_areas": len(set(production) - represented),
+            "caveat": "Selection covers captured records only and does not certify review breadth, semantic ownership, severity or confidence; use evidence queries for omitted records.",
+        },
+    }
 
 
 def get_system_map(assessment):
@@ -48,7 +217,7 @@ def get_system_map(assessment):
         if role != "production":
             excluded[role] += 1
             continue
-        area = _area(path)
+        area = source_area(path)
         production[path] = area
         group = areas.setdefault(
             area,

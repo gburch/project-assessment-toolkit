@@ -77,7 +77,7 @@ function renderRatings(report) {
     const rating = report.review?.ratings?.[dim];
     const box = node("article", undefined, "rating");
     const header = node("header");
-    header.append(node("h3", titles[dim]), node("span", rating ? `Capability · ${rating.confidence} confidence` : "Not reviewed", "confidence"));
+    header.append(node("h3", titles[dim]), node("span", rating ? `Capability · declared ${rating.confidence} confidence` : "Not reviewed", "confidence"));
     box.append(header);
     box.append(node("p", freshnessLabel(report.assessment_method, dim), "evidence-meta"));
     for (const axis of ["capability", "burden"]) {
@@ -95,9 +95,16 @@ function renderRatings(report) {
       }
       if (axis === "burden" && Number.isInteger(value)) {
         const basis = rating.burden_basis === "observed" ? "Observed" : "Estimated from source";
-        box.append(node("p", `${basis} · ${rating.burden_confidence || "low"} confidence`, "secondary"));
+        box.append(node("p", `${basis} · declared ${rating.burden_confidence || "low"} confidence`, "secondary"));
       }
       box.append(node("p", rubDescription(dim, axis, value), "secondary"));
+      const support = (report.confidence_assessment || report.goal_alignment?.confidence_assessment)?.dimensions?.[dim]?.[axis];
+      if (support?.blockers?.length) {
+        const detail = node("details");
+        detail.append(node("summary", `${axis === "capability" ? "Capability" : "Burden"} confidence limits`));
+        textList(detail, "Evidence still needed", support.blockers);
+        box.append(detail);
+      }
     }
     const architecture = report.assessment.facts?.maintainability;
     if (dim === "maintainability" && architecture) {
@@ -272,12 +279,26 @@ function renderProgress(progress) {
   if (Number.isInteger(engineering)) $("progress-summary").append(` Engineering progress: ${engineering > 0 ? "+" : ""}${engineering} rubric steps.`);
 }
 function renderFindings(report) {
-  const findings = [...(report.assessment.findings || []), ...(report.review?.findings || [])];
+  const collected = report.assessment.findings || [];
+  const findings = [...collected, ...(report.review?.findings || [])];
+  const confidence = report.confidence_assessment || report.goal_alignment?.confidence_assessment;
   $("findings").replaceChildren();
-  for (const finding of findings) {
+  for (const [index, finding] of findings.entries()) {
     const item = node("div", undefined, "finding");
     item.append(node("span", `${finding.severity || "Observation"}: `, "severity"), node("span", finding.title || finding.message || "Evidence observation"));
     if (finding.evidence_ids?.length) item.append(node("p", `Evidence: ${finding.evidence_ids.join(", ")}`, "evidence-meta"));
+    if (finding.support) {
+      const support = finding.support;
+      const grounding = confidence?.findings?.find((row) => row.index === index - collected.length);
+      const detail = node("details");
+      detail.append(node("summary", `${support.scope} finding · declared ${support.confidence} confidence · ${grounding?.grounding === "verified_source_spans" ? "source spans verified" : "source support unestablished"}`));
+      detail.append(node("p", support.rationale), node("p", `Counterevidence: ${support.counterevidence}`));
+      for (const citation of support.citations || []) {
+        detail.append(node("p", `${citation.evidence_id}:${citation.line}–${citation.end_line}`, "evidence-meta"), node("pre", citation.excerpt));
+      }
+      textList(detail, "Remaining uncertainty", support.limitations || []);
+      item.append(detail);
+    }
     $("findings").append(item);
   }
   const recommendations = dims.flatMap((d) => (report.review?.ratings?.[d]?.recommendations || []).map((text) => `${titles[d]}: ${text}`));
@@ -329,6 +350,23 @@ function renderAssessmentMethod(parent, method) {
   if (method.gaps?.length) textList(parent, "Assessment method gaps", method.gaps);
   if (method.caveat) parent.append(node("p", method.caveat, "secondary"));
 }
+function renderConfidence(parent, confidence) {
+  if (!confidence) return;
+  const verified = (confidence.findings || []).filter((row) => row.grounding === "verified_source_spans");
+  const high = verified.filter((row) => row.declared_confidence === "high" && row.scope === "source");
+  const detail = node("details");
+  detail.id = "confidence-evidence";
+  detail.append(node("summary", "Confidence and supporting evidence"));
+  detail.append(node("p", `${verified.length} finding(s) have verified source spans; ${high.length} declare high confidence in a source claim. Project score confidence remains separate.`));
+  if (confidence.caveat) detail.append(node("p", confidence.caveat, "secondary"));
+  for (const [dim, axes] of Object.entries(confidence.dimensions || {})) {
+    for (const axis of ["capability", "burden"]) {
+      const support = axes[axis];
+      if (support?.blockers?.length) textList(detail, `${titles[dim] || dim} · ${axis}`, support.blockers);
+    }
+  }
+  parent.append(detail);
+}
 function renderAlignment(alignment) {
   const states = {
     no_review: "No saved review. Diagnosis, coverage and an improvement plan remain unknown.",
@@ -346,6 +384,7 @@ function renderAlignment(alignment) {
   const coverage = $("review-coverage");
   coverage.replaceChildren();
   renderAssessmentMethod(coverage, alignment?.assessment_method);
+  renderConfidence(coverage, alignment?.confidence_assessment);
   const breadth = alignment?.review_coverage;
   const breadthLabels = { broad: "Broad review recorded", partial: "Partial project review", focused: "Focused review", unestablished: "Review breadth not established", unreviewed: "Project not reviewed" };
   coverage.append(node("p", breadthLabels[breadth?.status] || "Review breadth not established"));
@@ -426,8 +465,11 @@ function evidenceResult(row, load, assessmentId) {
   const item = node("details", undefined, "evidence-result");
   const location = row.locations?.[0] || (row.path ? row : null);
   item.append(node("summary", `${row.kind || row.name || row.record_type || row.evidence_kind || "Evidence"}${location ? ` · ${location.path}${location.line ? `:${location.line}` : ""}` : ""}`), node("pre", jsonText(row)));
-  // Join by captured path; analysis evidence IDs cannot authorize arbitrary file reads.
-  const source = location && state.report.assessment.evidence.find((entry) => entry.path === location.path && ["python", "javascript", "source", "documentation", "manifest", "configuration"].includes(entry.kind));
+  // Prefer source identity; display labels may be redacted or ambiguous.
+  const sourceId = row.source_evidence_id || location?.source_evidence_id;
+  const source = (sourceId || location) && state.report.assessment.evidence.find((entry) =>
+    (sourceId ? entry.id === sourceId : entry.path === location.path) &&
+    ["python", "javascript", "source", "documentation", "manifest", "configuration"].includes(entry.kind));
   if (source) {
     const button = node("button", "Read matching source context");
     button.type = "button";
@@ -886,6 +928,10 @@ $("review-form").addEventListener("submit", async (event) => {
     if (!currentSnapshot(load, id)) return;
     state.report.review = saved;
     state.report.assessment_method = null;
+    state.report.confidence_assessment = null;
+    if (state.report.goal_alignment) state.report.goal_alignment.confidence_assessment = null;
+    const confidencePanel = $("confidence-evidence");
+    if (confidencePanel) confidencePanel.replaceChildren(node("summary", "Confidence and supporting evidence"), node("p", "Updated confidence evidence is loading. Reload the report if refreshing fails."));
     state.reviewDirty = false;
     $("review-state").textContent = `Saved review ${saved.id}`;
     renderRatings(state.report);
@@ -901,7 +947,9 @@ $("review-form").addEventListener("submit", async (event) => {
     renderHistory(history);
     state.report.goal_alignment = evolve.goal_alignment;
     state.report.assessment_method = evolve.goal_alignment.assessment_method;
+    state.report.confidence_assessment = evolve.goal_alignment.confidence_assessment;
     renderRatings(state.report);
+    renderFindings(state.report);
     renderAlignment(evolve.goal_alignment);
     message("Review saved. Collected facts and project files are unchanged.");
   } catch (error) {

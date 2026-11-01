@@ -1,5 +1,6 @@
 """The optional producer sees captured data, never project configuration or code."""
 
+import ast
 import hashlib
 import importlib
 import json
@@ -237,6 +238,56 @@ def test_file_input_and_cooperative_deadline_bounds_are_explicit(installed, monk
     )
     tiny = registry.run_analyzer("vulture", records)
     assert tiny["coverage"]["omissions"] == {"input_byte_limit": 2}
+
+
+def test_node_budget_visits_production_areas_before_repeating_a_subtree(installed, monkeypatch):
+    text = "def candidate():\n    return 1\n"
+    nodes = len(list(ast.walk(ast.parse(text))))
+    records = [
+        source(f"src/product/{area}/{number:02}.py", text, f"e-{area}-{number}")
+        for area, count in (("alpha", 5), ("beta", 2), ("gamma", 2))
+        for number in range(count)
+    ]
+    records += [source("tests/test_early.py", text, "e-test")]
+    monkeypatch.setitem(
+        analysis._PROFILES, "standard", {**analysis._PROFILES["standard"], "nodes": nodes * 3}
+    )
+    monkeypatch.setattr(analysis, "_clock", lambda: 10)
+    first = registry.run_analyzer("vulture", records)
+    second = registry.run_analyzer("vulture", list(reversed(records)))
+
+    assert first == second
+    assert [row["path"] for row in first["modules"]] == [
+        f"src/product/{area}/00.py" for area in ("alpha", "beta", "gamma")
+    ]
+    assert first["analyzer"]["adapter_version"] == "3"
+    assert first["configuration"]["source_order"] == "role_priority_then_area_round_robin"
+    coverage = first["coverage"]
+    assert coverage["nodes_analyzed"] == nodes * 3
+    assert coverage["analyzed_files"] == 3 and coverage["omitted_files"] == 7
+    areas = {(row["role"], row["path"]): row for row in coverage["areas"]}
+    alpha = areas[("production", "src/product/alpha")]
+    assert (alpha["eligible_files"], alpha["analyzed_files"], alpha["omitted_files"]) == (5, 1, 4)
+    assert alpha["omissions"] == {"ast_node_limit": 4}
+    assert areas[("test", "tests")]["analyzed_files"] == 0
+    assert "no absence-of-use" in " ".join(first["gaps"])
+
+
+def test_area_coverage_is_bounded_and_unavailable_analysis_never_implies_examined(monkeypatch):
+    monkeypatch.setattr(analysis, "version", lambda _: "not-installed")
+    records = [
+        source(f"src/pkg/area{number:03}/app.py", "value = 1\n", f"e-{number}")
+        for number in range(analysis.MAX_COVERAGE_AREAS + 2)
+    ]
+    result = registry.run_analyzer("vulture", records)
+    coverage = result["coverage"]
+    assert result["status"] == "unavailable"
+    assert coverage["area_count"] == analysis.MAX_COVERAGE_AREAS + 2
+    assert len(coverage["areas"]) == analysis.MAX_COVERAGE_AREAS
+    assert coverage["omitted_areas"] == 2
+    assert all(
+        row["analyzed_files"] == 0 and row["omitted_files"] == 1 for row in coverage["areas"]
+    )
 
 
 def test_output_budget_keeps_compact_index_and_producer_count_separate(installed, monkeypatch):

@@ -9,17 +9,20 @@ import json
 import math
 import re
 import time
-from collections import Counter
+from collections import Counter, defaultdict, deque
 from importlib.metadata import PackageNotFoundError, version
 from itertools import islice
 from pathlib import PurePosixPath
 
+from .review_context import source_area
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "2"
+VERSION = "3"
 MAX_CANDIDATES = 100
 MAX_INDEX = 20_000
 MAX_INPUT_RECORDS = 20_000
+MAX_COVERAGE_AREAS = 100
+_ROLE_ORDER = {"production": 0, "unknown": 1, "test": 2, "tooling": 3}
 _PROFILES = {
     "standard": {
         "files": 1000,
@@ -51,6 +54,20 @@ _WHITELIST_GAP = (
     "Source noqa comments are honored by the producer, not verified by PAT."
 )
 _clock = time.monotonic
+
+
+def _area_ordered_sources(sources):
+    """Visit each area once per round within the existing role priority."""
+    roles = defaultdict(lambda: defaultdict(deque))
+    for source in sorted(sources, key=lambda row: row["path"]):
+        roles[source["role"]][source_area(source["path"])].append(source)
+    for role in sorted(roles, key=lambda value: (_ROLE_ORDER.get(value, 4), value)):
+        areas = roles[role]
+        while areas:
+            for area in sorted(areas):
+                yield areas[area].popleft()
+                if not areas[area]:
+                    del areas[area]
 
 
 def vulture_info():
@@ -158,13 +175,32 @@ def analyze_vulture(
             if source.get("role") in {"production", "test", "tooling", "generated", "unknown"}:
                 row["role"] = source["role"]
             selected.append(row)
-    # Preserve declared source/test roles while prioritizing product review work.
-    selected.sort(
-        key=lambda row: (
-            {"production": 0, "unknown": 1, "test": 2, "tooling": 3}.get(row["role"], 4),
-            row["path"],
+    # A large early alphabetical subtree cannot consume every role's first
+    # samples. This changes selection order, not work limits or absence proof.
+    selected = list(_area_ordered_sources(selected))
+    areas = {}
+    for source in selected:
+        key = (source["role"], source_area(source["path"]))
+        group = areas.setdefault(
+            key,
+            {
+                "role": key[0],
+                "path": key[1],
+                "eligible_files": 0,
+                "analyzed_files": 0,
+                "omitted_files": 0,
+                "nodes_analyzed": 0,
+                "omissions": {},
+            },
         )
-    )
+        group["eligible_files"] += 1
+        group["omitted_files"] += 1
+
+    def omit(source, reason):
+        omission_counts[reason] += 1
+        group = areas[(source["role"], source_area(source["path"]))]
+        group["omissions"][reason] = group["omissions"].get(reason, 0) + 1
+
     limits = {
         **_PROFILES[analysis_profile],
         "candidates": MAX_CANDIDATES,
@@ -192,6 +228,7 @@ def analyze_vulture(
             "whitelist_files_loaded": False,
             "bundled_whitelists_loaded": False,
             "source_noqa": "producer_honored",
+            "source_order": "role_priority_then_area_round_robin",
         },
         "provenance": {
             "snapshot": _snapshot(snapshot),
@@ -206,6 +243,10 @@ def analyze_vulture(
             "omitted_files": len(selected),
             "input_bytes": 0,
             "nodes_analyzed": 0,
+            "area_count": len(areas),
+            "areas": list(areas.values())[:MAX_COVERAGE_AREAS],
+            "omitted_areas": max(0, len(areas) - MAX_COVERAGE_AREAS),
+            "area_caveat": "Path areas and roles are heuristics; examined files do not establish complete symbol uses or runtime coverage.",
         },
         "summary": {"candidate_count": 0, "producer_findings": None},
         "modules": modules,
@@ -260,7 +301,7 @@ def analyze_vulture(
         elif len(text) > limits["bytes_per_file"]:
             reason = "file_byte_limit"
         if reason:
-            omission_counts[reason] += 1
+            omit(source, reason)
             partial = True
             continue
         raw = text.encode("utf-8", errors="replace")
@@ -268,29 +309,29 @@ def analyze_vulture(
             len(raw) > limits["bytes_per_file"]
             or result["coverage"]["input_bytes"] + len(raw) > limits["bytes"]
         ):
-            omission_counts["input_byte_limit"] += 1
+            omit(source, "input_byte_limit")
             partial = True
             continue
         if "sha256:" + hashlib.sha256(raw).hexdigest() != source["digest"]:
-            omission_counts["source_digest_mismatch"] += 1
+            omit(source, "source_digest_mismatch")
             partial = True
             continue
         try:
             tree = ast.parse(text, filename=path, type_comments=True)
             nodes = list(islice(ast.walk(tree), limits["nodes_per_file"] + 1))
         except (SyntaxError, ValueError, RecursionError):
-            omission_counts["parse_error"] += 1
+            omit(source, "parse_error")
             partial = True
             continue
         if (
             len(nodes) > limits["nodes_per_file"]
             or result["coverage"]["nodes_analyzed"] + len(nodes) > limits["nodes"]
         ):
-            omission_counts["ast_node_limit"] += 1
+            omit(source, "ast_node_limit")
             partial = True
             continue
         if _clock() >= stop:
-            omission_counts["cooperative_deadline"] += 1
+            omit(source, "cooperative_deadline")
             partial = True
             continue
         # Synthetic absolute labels prevent filename heuristics from resolving
@@ -302,7 +343,7 @@ def analyze_vulture(
             if engine.input_error:
                 raise ValueError("Producer rejected captured input")
         except (SyntaxError, ValueError, RecursionError, AttributeError):
-            omission_counts["producer_error"] += 1
+            omit(source, "producer_error")
             partial = True
             continue
         scanned[virtual] = source
@@ -311,6 +352,10 @@ def analyze_vulture(
         }
         result["coverage"]["input_bytes"] += len(raw)
         result["coverage"]["nodes_analyzed"] += len(nodes)
+        group = areas[(source["role"], source_area(path))]
+        group["analyzed_files"] += 1
+        group["omitted_files"] -= 1
+        group["nodes_analyzed"] += len(nodes)
         modules.append(
             {
                 "path": path,
@@ -423,6 +468,9 @@ def analyze_vulture(
         gaps.add(
             "Some captured Python source or producer output was omitted; no absence-of-use conclusion covers omitted code"
         )
+    if len(areas) > MAX_COVERAGE_AREAS:
+        gaps.add("Vulture per-area coverage rows are bounded; omitted areas remain explicit")
+        partial = True
     retained, indexed = (
         _retained_candidates(candidates, MAX_CANDIDATES),
         _retained_candidates(candidates, MAX_INDEX),

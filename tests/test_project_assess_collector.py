@@ -898,6 +898,73 @@ def test_supported_text_has_its_own_budget_and_precedes_asset_hashing(tmp_path, 
     assert static["topology"]["complete"]
 
 
+def test_omitted_lockfile_and_asset_do_not_omit_python_modules(tmp_path, monkeypatch):
+    write(tmp_path, "src/orphan.py", "def run():\n    return 1\n")
+    write(tmp_path, "package-lock.json", "x" * 100)
+    write(tmp_path, "overview.png", "x" * 100)
+    monkeypatch.setattr(collector, "MAX_FILE_BYTES", 64)
+    result = collector.collect(tmp_path)
+    scope = result["facts"]["collection"]
+    assert not result["complete"]
+    assert not scope["supported_text_complete"] and not scope["unsupported_assets_complete"]
+    assert scope["python_source_complete"]
+    assert scope["skipped_by_reason"] == {"file-byte-limit": 2}
+    static = next(row["stats"] for row in result["evidence"] if row["kind"] == "static-analysis")
+    assert static["topology"]["source_complete"] and static["topology"]["complete"]
+    assert any(row["kind"] == "unreferenced_module" for row in static["candidate_index"])
+
+
+def test_omitted_python_still_withholds_absence_claims(tmp_path, monkeypatch):
+    write(tmp_path, "src/orphan.py", "def run():\n    return 1\n")
+    write(tmp_path, "src/omitted.py", "# large source\n" * 20)
+    monkeypatch.setattr(collector, "MAX_SOURCE_FILE_BYTES", 64)
+    result = collector.collect(tmp_path)
+    assert not result["facts"]["collection"]["python_source_complete"]
+    static = next(row["stats"] for row in result["evidence"] if row["kind"] == "static-analysis")
+    assert not static["topology"]["source_complete"] and not static["topology"]["complete"]
+    assert not any(row["kind"] == "unreferenced_module" for row in static["candidate_index"])
+
+
+def test_complete_python_capture_does_not_resolve_dynamic_imports(tmp_path):
+    write(tmp_path, "src/orphan.py", "def run():\n    return 1\n")
+    write(tmp_path, "src/main.py", "import importlib\nmodule = importlib.import_module(name)\n")
+    result = collector.collect(tmp_path)
+    assert result["facts"]["collection"]["python_source_complete"]
+    static = next(row["stats"] for row in result["evidence"] if row["kind"] == "static-analysis")
+    assert static["topology"]["source_complete"] and not static["topology"]["complete"]
+    assert not any(row["kind"] == "unreferenced_module" for row in static["candidate_index"])
+
+
+def test_python_stability_is_checked_after_an_earlier_nonpython_change(tmp_path, monkeypatch):
+    write(tmp_path, "package.json", '{"name":"fixture"}\n')
+    write(tmp_path, "src/orphan.py", "def run():\n    return 1\n")
+    allocate = collector.pattern_allocations
+
+    def change_after_capture(*args):
+        allocation = allocate(*args)
+        write(tmp_path, "package.json", '{"name":"changed-fixture"}\n')
+        write(tmp_path, "src/orphan.py", "def run():\n    return 123\n")
+        return allocation
+
+    monkeypatch.setattr(collector, "pattern_allocations", change_after_capture)
+    result = collector.collect(tmp_path)
+    assert not result["complete"]
+    assert not result["facts"]["collection"]["python_source_complete"]
+    static = next(row["stats"] for row in result["evidence"] if row["kind"] == "static-analysis")
+    assert not static["topology"]["source_complete"]
+
+
+def test_token_redaction_preserves_task_path_identity():
+    paths = [
+        "src/demo/task_source_preparation_policy.py",
+        "src/demo/task_workspace_recovery_policy.py",
+    ]
+    assert [collector._redact(path) for path in paths] == paths
+    token = "sk_" + "A" * 24
+    for prefix in ("", " ", "/", "example_"):
+        assert token not in collector._redact(prefix + token)
+
+
 def test_pattern_refill_reuses_unused_slots_without_losing_cheap_metrics(tmp_path, monkeypatch):
     for number in range(12):
         write(tmp_path, f"src/empty_{number}.py", "value = 1\n")
@@ -943,6 +1010,7 @@ def test_cooperative_deadline_reports_unsearched_and_uncaptured_surfaces(tmp_pat
     assert collection["deadline_exceeded"] and not result["complete"]
     assert not collection["supported_text_complete"]
     assert not collection["discovery_complete"]
+    assert not collection["python_source_complete"]
     assert collection["unsearched_directories"] == [{"path": ".", "reason": "deadline"}]
     assert collection["captured_files"] == 0
     assert not any(row["kind"] == "python" for row in result["evidence"])
@@ -1008,6 +1076,7 @@ def test_deadline_after_first_read_lists_remaining_discovered_sources(tmp_path, 
     collection = result["facts"]["collection"]
     assert collection["discovery_complete"] and collection["deadline_exceeded"]
     assert not collection["supported_text_complete"]
+    assert not collection["python_source_complete"]
     assert collection["skipped_inputs"] == [
         {
             "path": "src/b.py",
@@ -1027,6 +1096,7 @@ def test_malformed_python_remains_evidence_backed_for_optional_analysis(tmp_path
     write(tmp_path, "src/broken.py", "def broken(:\napi_key = 'private-test-value'\n")
     result = collector.collect(tmp_path, analyzers=["vulture"])
     assert not result["complete"] and not result["facts"]["collection"]["supported_text_complete"]
+    assert not result["facts"]["collection"]["python_source_complete"]
     entry = next(row for row in result["evidence"] if row["path"] == "src/broken.py")
     assert entry["kind"] == "python" and entry["stats"]["syntax_analysis"] == "not_completed"
     assert entry["digest"].startswith("sha256:")

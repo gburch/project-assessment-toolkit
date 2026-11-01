@@ -182,6 +182,7 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("metadata launched Java"))
     info = analysis.joern_info()
     assert info["available"] and info["version"] == "4.0.669"
+    assert info["adapter_version"] == "4"
     assert info["query_version"] == "3" and info["dataflow"] == "not_run"
     assert qualified["root"] not in json.dumps(info)
     deep = analysis.joern_limits("deep")
@@ -359,6 +360,10 @@ def test_model_proof_and_inferred_edges_are_not_promoted_to_cleanup_or_primary_t
         {
             "source": "src/app.py",
             "target": "src/app.py",
+            "source_evidence_id": source()["evidence_id"],
+            "source_digest": source()["digest"],
+            "target_source_evidence_id": source()["evidence_id"],
+            "target_digest": source()["digest"],
             "kind": "source_supported_method_call",
             "count": 7,
         }
@@ -373,6 +378,11 @@ def test_model_proof_and_inferred_edges_are_not_promoted_to_cleanup_or_primary_t
         next(row for row in calls if row["dependency_status"] == "producer_inferred")["resolution"]
         != "internal"
     )
+    for row in calls:
+        assert (
+            row["source_evidence_id"] == row["target_source_evidence_id"] == source()["evidence_id"]
+        )
+        assert row["digest"] == row["target_digest"] == source()["digest"]
     section = result["coverage"]["batches"][0]["model_sections"]["unread_bindings"]
     assert (
         section["suppressed"] == {"captured_binding": 3} and section["captured_declarations"] == 3
@@ -384,6 +394,62 @@ def test_model_proof_and_inferred_edges_are_not_promoted_to_cleanup_or_primary_t
     assert sections["module_edges"]["omitted_occurrences"] == 0
     assert sections["inferred_module_edges"]["count"] == 1
     assert sections["calls"]["classifications"] == {"source_supported": 7, "producer_inferred": 11}
+
+
+def test_captured_ids_keep_redacted_source_endpoints_unambiguous(qualified, monkeypatch):
+    from project_assess.collector import _redact_data
+
+    paths = ["src/sk_" + "A" * 24 + ".py", "src/sk_" + "B" * 24 + ".py"]
+    captured = [
+        {**source(path), "evidence_id": f"e-captured-{index}"} for index, path in enumerate(paths)
+    ]
+
+    def run(argv, *, output=None, **kwargs):
+        if output:
+            raw = raw_result(paths[0])
+            raw["source_files"].update(rows=[{"path": path} for path in paths], count=2)
+            method = raw["methods"]["rows"][0]
+            raw["methods"].update(
+                rows=[{**method, "path": path} for path in paths],
+                count=2,
+                source_files=2,
+                retained_files=2,
+            )
+            raw["methods"]["file_coverage"].update(
+                rows=[
+                    {"path": path, "count": 1, "retained": 1, "identity_truncated": False}
+                    for path in paths
+                ],
+                count=2,
+                limit=2,
+            )
+            call = raw["calls"]["rows"][0]
+            raw["calls"].update(
+                rows=[{**call, "target_path": paths[1]}, {**call, "target_path": "outside.py"}],
+                count=2,
+            )
+            raw["module_edges"]["rows"][0]["target"] = paths[1]
+            output.write_text(json.dumps(raw))
+        return "complete"
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = _redact_data(analysis.analyze_joern(captured, snapshot=qualified))
+    by_id = {row["evidence_id"]: row for row in captured}
+    modules = result["modules"]
+    assert len(modules) == 2 and len({row["path"] for row in modules}) == 1
+    assert {row["source_evidence_id"] for row in modules} == set(by_id)
+    for row in [*modules, *result["topology"]["methods"], *result["topology"]["calls"]]:
+        assert row["digest"] == by_id[row["source_evidence_id"]]["digest"]
+    calls = result["topology"]["calls"]
+    resolved = next(row for row in calls if row["target_source_evidence_id"] is not None)
+    unresolved = next(row for row in calls if row["target_source_evidence_id"] is None)
+    assert resolved["target_source_evidence_id"] == captured[1]["evidence_id"]
+    assert resolved["target_digest"] == captured[1]["digest"]
+    assert unresolved["target_path"] is None and unresolved["target_digest"] is None
+    edge = result["topology"]["edges"][0]
+    assert edge["source"] == edge["target"]  # Safe labels can coincide; identities do not.
+    assert edge["source_evidence_id"] == captured[0]["evidence_id"]
+    assert edge["target_source_evidence_id"] == captured[1]["evidence_id"]
 
 
 @pytest.mark.parametrize(

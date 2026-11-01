@@ -603,7 +603,15 @@ async function checkPlanningEvidence(browser, info) {
       { id: "consolidate", title: "Consolidate lifecycle ownership", priority: "high", root_cause: "Ownership duplicated across callers", scope: "Every entry point, persisted transition and recovery caller", dimension_impacts: { maintainability: "Reduce coordinated edits", testing: "Protect shared public outcomes" }, evidence_ids: [source.id], acceptance: ["All supported callers preserve authority and recovery behavior"], burden_effect: "Replace duplicate upkeep; add no framework", depends_on: [], first_slice: "Move one path after agreeing the complete contract" },
       { id: "recovery", title: "Verify recovery guidance", priority: "medium", root_cause: "Guidance can drift from lifecycle ownership", scope: "Supported operator recovery workflows", dimension_impacts: { documentation: "Reliable recovery task" }, evidence_ids: [source.id], acceptance: ["A reader completes the recovery task"], burden_effect: "Maintain one canonical explanation", depends_on: ["consolidate"], first_slice: "Trace the documented recovery path" }
     ] };
-    review.findings = [{ severity: "critical", title: "Synthetic critical finding remains visible despite met goals", evidence_ids: [source.id] }];
+    const citationResponse = await page.request.get(`${origin}/api/source-context?assessment_id=${project.latest_assessment_id}&evidence_id=${source.id}&line=1&end_line=3&max_chars=4000`);
+    assert.equal(citationResponse.status(), 200);
+    const citation = await citationResponse.json();
+    review.findings = [{ severity: "critical", title: "Synthetic critical finding: statement follows return; remains visible despite met goals", evidence_ids: [source.id], support: {
+      confidence: "high", scope: "source", rationale: `The captured statement follows an unconditional return. ${hostile}`,
+      citations: [{ evidence_id: source.id, line: citation.line, end_line: citation.end_line, excerpt: citation.excerpt }],
+      counterevidence: `Fixture only; this proves neither runtime behavior nor a whole-project score. ${hostile}`,
+      limitations: ["Reachability is a finite source claim, not execution or safe deletion proof."]
+    } }];
     const session = await (await page.request.get(`${origin}/api/session`)).json();
     const challengeResponse = await page.request.post(`${origin}/api/challenge-template`, { data: { assessment_id: project.latest_assessment_id, review }, headers: { Origin: origin, "X-Project-Assess-Token": session.token } });
     assert.equal(challengeResponse.status(), 200);
@@ -611,7 +619,12 @@ async function checkPlanningEvidence(browser, info) {
     review.challenge = { schema_version: 1, status: "completed", reviewer_id: "browser-independent-reviewer", independence: "declared", draft_digest: challengePacket.draft_digest, evidence_ids: [source.id], items: [{ id: "scope", concern: `Check remaining callers ${hostile}`, evidence_ids: [source.id], response: { decision: "accepted", rationale: "Keep the full supported caller scope", evidence_ids: [source.id] } }], summary: "Independent fixture challenge completed", gaps: ["Source-only review"] };
     await page.locator("#review-editor > summary").click();
     await page.locator("#review-json").fill(JSON.stringify(review));
+    const pendingConfidence = await holdResponse(page, "**/api/evolve?*");
     await page.getByRole("button", { name: "Submit review", exact: true }).click();
+    await pendingConfidence.entered;
+    await expect(page.locator("#confidence-evidence")).toContainText("Updated confidence evidence is loading");
+    await expect(page.locator("#confidence-evidence")).not.toContainText("finding(s) have verified source spans");
+    await pendingConfidence.release();
     await expect(page.locator("#review-state")).toContainText("Saved review");
     await expect(page.locator("#plan-state")).toContainText("Plan is bound");
     await expect(page.locator("#plan-urgent")).toContainText("Synthetic critical finding");
@@ -624,6 +637,12 @@ async function checkPlanningEvidence(browser, info) {
     assert(roadmap.indexOf("Acceptance for the full outcome") < roadmap.indexOf("First implementation slice"));
     await expect(page.locator("#review-coverage")).toContainText("Partial project review");
     await expect(page.locator("#assessment-method")).toContainText("Fresh assessment · completed");
+    await page.locator("#confidence-evidence > summary").click();
+    await expect(page.locator("#confidence-evidence")).toContainText("1 declare high confidence in a source claim");
+    await page.locator("#findings details > summary").filter({ hasText: "source finding · declared high confidence" }).click();
+    await expect(page.locator("#findings")).toContainText("source spans verified");
+    await expect(page.locator("#findings")).toContainText(citation.excerpt);
+    await expect(page.locator("#findings")).toContainText(hostile);
     await page.locator("#review-coverage summary").filter({ hasText: "Change traces (1)" }).click();
     await expect(page.locator("#review-coverage")).toContainText(`Trace a meaningful change ${hostile}`);
     await expect(page.locator("#review-coverage")).toContainText("Two responsibilities need coordinated edits");
@@ -645,6 +664,8 @@ async function checkPlanningEvidence(browser, info) {
       const response = await route.fetch();
       const result = await response.json();
       result.items[0].metrics.caveat = hostile;
+      result.items[0].locations[0].path = "redacted-display-label.py";
+      result.items[0].source_evidence_id = source.id;
       await route.fulfill({ response, json: result });
     };
     await page.route("**/api/evidence-query?*", hostileLead);
@@ -852,8 +873,8 @@ try {
   await expect(page.locator("#goal-state")).toContainText("No goals saved");
   await expect(page.locator("#save")).toBeDisabled();
   await expect(page.locator("#ratings")).toContainText("Unknown");
-  await expect(ratingCard(page, "Security")).toContainText("Capability · medium confidence");
-  await expect(ratingCard(page, "Security")).toContainText("Estimated from source · medium confidence");
+  await expect(ratingCard(page, "Security")).toContainText("Capability · declared medium confidence");
+  await expect(ratingCard(page, "Security")).toContainText("Estimated from source · declared medium confidence");
   await expect(ratingCard(page, "Security")).toContainText("4 / 5");
   await expect(ratingCard(page, "Operability")).toContainText("Unknown");
   await expect(ratingCard(page, "Operability")).not.toContainText("Estimated from source");
@@ -919,8 +940,8 @@ try {
   await fixtureCommand("rereview");
   await page.reload();
   await expect(page.locator("#progress-summary")).toContainText("Re-rating a snapshot adds no engineering progress");
-  await expect(ratingCard(page, "Security")).toContainText("Observed · high confidence");
-  await expect(ratingCard(page, "Testing")).toContainText("Estimated from source · medium confidence");
+  await expect(ratingCard(page, "Security")).toContainText("Observed · declared high confidence");
+  await expect(ratingCard(page, "Testing")).toContainText("Estimated from source · declared medium confidence");
   await expect(page.locator("#progress-summary")).toContainText(`Assessed movement from baseline: +${improvementSteps - 1} steps closer`);
   await expect(page.locator("#progress-summary")).toContainText(`Engineering progress: +${improvementSteps} rubric steps`);
   await page.locator("#history .event").filter({ hasText: "Source scan" }).last().getByRole("button").click();
