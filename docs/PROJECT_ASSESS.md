@@ -353,7 +353,7 @@ An MCP host can launch the local server with this command, translated into that 
 uv --directory /path/to/project-assessment-toolkit run --extra mcp --locked pat --state-dir /path/outside/repos/assessment-state mcp --allowed-root /path/to/projects
 ```
 
-Repeat `--allowed-root ROOT` to admit additional local source roots. This guide does not install host configuration or enable remote access. The core runtime depends on `jsonschema` and `packaging`; the optional `mcp` extra adds the local stdio adapter. No cloud credentials or AI API key are required.
+Repeat `--allowed-root ROOT` to admit additional local source roots. This guide does not install host configuration or enable remote access. The core runtime depends on `jsonschema`, `packaging` and `PyYAML`; the optional `mcp` extra adds the local stdio adapter. No cloud credentials or AI API key are required.
 
 Agents can begin with `get_tool_info` and `start_assessment`, or `get_report(assessment_id, brief=True)` for a saved snapshot, then use `query_evidence` for bounded views and `inspect_source_context` for digest-matched source ranges. Add `--extra analysis` to the MCP launch when optional JavaScript parsers are wanted. The same captured evidence and allowed-root checks apply across interfaces.
 
