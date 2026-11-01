@@ -1,5 +1,6 @@
 """Regressions for persisted authorization, replay identity and progress attribution."""
 
+import hashlib
 import json
 import sqlite3
 
@@ -20,6 +21,34 @@ def imported_report(directory, source_root, kind):
     if kind == "junit":
         path = directory / "results.xml"
         path.write_text("<testsuite><testcase name='private-case'/></testsuite>")
+    elif kind == "observation":
+        path = directory / "observation.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": "pat.observation.v1",
+                    "type": "change_cost",
+                    "observed_at": "2026-10-31T12:00:00-04:00",
+                    "source": {
+                        "revision": None,
+                        "files": [
+                            {
+                                "path": "README.md",
+                                "digest": "sha256:"
+                                + hashlib.sha256(
+                                    (source_root / "README.md").read_bytes()
+                                ).hexdigest(),
+                            }
+                        ],
+                    },
+                    "scenario": {"name": "private-case", "scope": ["README.md"]},
+                    "results": [
+                        {"name": "edits", "value": 2, "unit": "files", "status": "observed"}
+                    ],
+                    "limitations": ["supplied observation"],
+                }
+            )
+        )
     else:
         path = directory / "test-value.json"
         path.write_text(
@@ -76,6 +105,7 @@ def test_review_replay_cannot_substitute_an_authorized_assessment(tmp_path):
         "evidence_query",
         "area_query",
         "area_dependency_query",
+        "controls_query",
         "overview",
         "source_context",
         "history",
@@ -83,7 +113,7 @@ def test_review_replay_cannot_substitute_an_authorized_assessment(tmp_path):
         "progress",
     ],
 )
-@pytest.mark.parametrize("report_kind", ["junit", "test-value"])
+@pytest.mark.parametrize("report_kind", ["junit", "test-value", "observation"])
 def test_revoked_imported_report_authority_is_rechecked_on_saved_reads(
     tmp_path, operation, report_kind
 ):
@@ -108,6 +138,9 @@ def test_revoked_imported_report_authority_is_rechecked_on_saved_reads(
         "area_dependency_query": lambda: restricted.query_evidence(
             snapshot["id"], view="area-dependencies"
         ),
+        "controls_query": lambda: restricted.query_evidence(
+            snapshot["id"], view="controls", dimension="security"
+        ),
         "overview": lambda: restricted.overview(snapshot["id"]),
         "source_context": lambda: restricted.source_context(
             snapshot["id"], snapshot["evidence"][0]["id"]
@@ -121,7 +154,7 @@ def test_revoked_imported_report_authority_is_rechecked_on_saved_reads(
 
 
 @pytest.mark.parametrize("summary", [False, True])
-@pytest.mark.parametrize("report_kind", ["junit", "test-value"])
+@pytest.mark.parametrize("report_kind", ["junit", "test-value", "observation"])
 def test_revoked_import_in_older_history_is_not_exposed_by_a_new_clean_scan(
     tmp_path, summary, report_kind
 ):

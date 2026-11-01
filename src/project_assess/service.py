@@ -17,6 +17,7 @@ from jsonschema import Draft202012Validator
 
 from .collector import collect
 from .confidence import MAX_FINDING_EXCERPT, confidence_assessment, validate_finding_support
+from .control_inventory import DIMENSIONS as CONTROL_DIMENSIONS
 from .dimension_inputs import dimension_inputs
 from .review_context import build_challenge_evidence_index, get_system_map
 from .rubric import DIMENSIONS, PROFILES, RUBRIC_VERSION, rubric
@@ -883,7 +884,14 @@ class AssessmentService:
         self._project(db, assessment["project_id"])
         if self.allowed_roots is not None:
             for evidence in assessment["evidence"]:
-                if evidence["kind"] in {"junit", "cobertura", "test-value", "ruff", "sarif"}:
+                if evidence["kind"] in {
+                    "junit",
+                    "cobertura",
+                    "test-value",
+                    "observation",
+                    "ruff",
+                    "sarif",
+                }:
                     path = Path(evidence["path"]).resolve()
                     if not any(path.is_relative_to(root) for root in self.allowed_roots):
                         raise PermissionError("Captured report is outside configured allowed roots")
@@ -1020,6 +1028,7 @@ class AssessmentService:
         path=None,
         role=None,
         candidate_kind=None,
+        dimension=None,
         line=None,
         offset=0,
         limit=20,
@@ -1039,9 +1048,12 @@ class AssessmentService:
             "provenance",
             "areas",
             "area-dependencies",
+            "controls",
         }
         if view not in views:
             raise ValueError("Unknown evidence query view")
+        if dimension is not None and (view != "controls" or dimension not in CONTROL_DIMENSIONS):
+            raise ValueError("Dimension filters require a supported control inventory dimension")
         if any(
             value is not None and (not isinstance(value, str) or len(value) > 256)
             for value in (kind, path, role, candidate_kind)
@@ -1081,7 +1093,11 @@ class AssessmentService:
             return entry["kind"]
 
         candidate_rows = []
-        for entry in entries if candidate_kind is not None or view == "candidates" else []:
+        for entry in (
+            entries
+            if (candidate_kind is not None and view != "controls") or view == "candidates"
+            else []
+        ):
             stats = entry.get("stats", {})
             definitions = {row["id"]: row for row in stats.get("definitions", []) if "id" in row}
             candidates = list(stats.get("candidate_index", stats.get("candidates", [])))
@@ -1168,6 +1184,15 @@ class AssessmentService:
                         **common,
                     }
                 )
+            elif view == "controls" and entry["kind"] == "control-analysis":
+                rows.extend(
+                    {**row, "kind": "file", "record_type": "control_file", **common}
+                    for row in stats.get("files", [])
+                )
+                rows.extend(
+                    {**row, "record_type": "control_signal", **common}
+                    for row in stats.get("signals", [])
+                )
             elif view == "candidates":
                 rows.extend(by_evidence.get(entry["id"], []))
             elif view == "snippets":
@@ -1251,6 +1276,11 @@ class AssessmentService:
         filtered = []
         seen_snippets = set()
         for row in rows:
+            if view == "controls":
+                if dimension is not None and dimension not in row.get("dimensions", []):
+                    continue
+                if candidate_kind is not None and row.get("kind") != candidate_kind:
+                    continue
             paths = (
                 [row["path"]]
                 if "path" in row
@@ -1275,7 +1305,7 @@ class AssessmentService:
                 continue
             if (
                 candidate_kind
-                and view not in {"candidates", "index", "details"}
+                and view not in {"candidates", "index", "details", "controls"}
                 and not any(location in candidate_paths for location in paths)
             ):
                 continue
@@ -1327,9 +1357,17 @@ class AssessmentService:
                     "javascript-analysis",
                     "source-analysis",
                     "analyzer-analysis",
+                    "control-analysis",
                 }
             ],
         }
+        if view == "controls":
+            result["caveat"] = (
+                "Coverage rows describe the supported syntax rules; signals describe mechanisms, "
+                "risk candidates or naming hints, not effective controls, defects or absence proof."
+                if any(entry["kind"] == "control-analysis" for entry in entries)
+                else "Control inventory was not collected in this snapshot."
+            )
         if navigation is not None:
             result["navigation_scope"] = {
                 "status": navigation["status"],

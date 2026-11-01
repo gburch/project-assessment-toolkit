@@ -16,7 +16,7 @@ from .source_context import read_context
 SOURCE_KINDS = frozenset(
     {"python", "javascript", "source", "documentation", "manifest", "configuration"}
 )
-REPORT_KINDS = frozenset({"junit", "coverage", "test-value"})
+REPORT_KINDS = frozenset({"junit", "coverage", "cobertura", "test-value", "observation"})
 MAX_FINDING_EXCERPT = 4000
 
 
@@ -147,7 +147,7 @@ def confidence_assessment(assessment, review):
         bound_reports = [
             entry
             for entry in reports
-            if entry["kind"] == "test-value"
+            if entry["kind"] in {"test-value", "observation"}
             and entry.get("stats", {}).get("sourceIdentity", {}).get("overall") == "matched"
         ]
         common = []

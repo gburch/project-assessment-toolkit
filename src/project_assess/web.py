@@ -130,6 +130,7 @@ def create_server(service, port=0):
                             "path",
                             "role",
                             "candidate_kind",
+                            "dimension",
                             "line",
                             "offset",
                             "limit",

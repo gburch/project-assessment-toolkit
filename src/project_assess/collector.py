@@ -21,6 +21,8 @@ from pathlib import Path
 from .analyzer_registry import dedicated_phase_limits, run_analyzer, validate_analyzers
 from .budgets import get_budget, pattern_allocations
 from .capture_context import attach_source_windows
+from .control_inventory import ControlInventory
+from .delivery_analysis import analyze_delivery, is_delivery_input
 from .diagnostics import sarif_report
 from .ecosystem import VERSION as ECOSYSTEM_VERSION
 from .ecosystem import dependency_inventory, javascript_signals, python_signals
@@ -31,9 +33,12 @@ from .javascript_analysis import (
     javascript_analyzer_identity,
     summarize_javascript,
 )
+from .observations import SCHEMA as OBSERVATION_SCHEMA
+from .observations import import_observation
 from .provenance import tool_info
 from .review_context import source_area
 from .rubric import RUBRIC_VERSION
+from .source_controls import analyze_python_controls
 from .static_analysis import MAX_FILES as MAX_STATIC_FILES
 from .static_analysis import MAX_SYMBOLS as MAX_STATIC_SYMBOLS
 from .static_analysis import VERSION as STATIC_VERSION
@@ -209,7 +214,11 @@ def _kind(path):
         return "documentation"
     if name in {"package.json", "pyproject.toml", "requirements.txt"}:
         return "manifest"
-    if suffix in _CONFIG or name in {"dockerfile", ".gitignore", "makefile"}:
+    if (
+        suffix in _CONFIG
+        or name in {"dockerfile", ".gitignore", "makefile"}
+        or is_delivery_input(path.as_posix())
+    ):
         return "configuration"
     return None
 
@@ -220,16 +229,21 @@ def _is_test(path):
 
 def _priority(path):
     kind, role = _kind(path), source_role(path.as_posix())["role"]
-    if kind == "manifest" or path.name in {
-        "src",
-        "frontend",
-        "backend",
-        "web",
-        "app",
-        "apps",
-        "services",
-        "packages",
-    }:
+    if (
+        kind == "manifest"
+        or is_delivery_input(path.as_posix())
+        or path.name
+        in {
+            "src",
+            "frontend",
+            "backend",
+            "web",
+            "app",
+            "apps",
+            "services",
+            "packages",
+        }
+    ):
         return 0
     if kind in {"python", "javascript", "source"} and role == "production":
         return 0
@@ -983,6 +997,7 @@ def collect(
         "reports": {},
     }
     evidence, findings, manifest, watched = [], [], [], []
+    control_inventory = ControlInventory()
     evidence_paths = set()
     documentation_texts, python_analysis, javascript_analysis, captured_sources = {}, [], [], {}
     ecosystem_manifests, ecosystem_inputs = {}, []
@@ -1220,6 +1235,7 @@ def collect(
                 complete = supported_text_complete = False
                 return
             stats = {}
+            control_record = None
             inventory = facts["inventory"]
             inventory["files"] += 1
             inventory["bytes"] += len(payload)
@@ -1231,6 +1247,9 @@ def collect(
                 facts[kind]["files"] += 1
                 if kind == "python":
                     stats, tree = _python(text)
+                    control_record = analyze_python_controls(
+                        path.as_posix(), tree, node_limit=budget.metric_nodes_per_file
+                    )
                     remaining = max(0, budget.pattern_functions - static_symbols)
                     record = analyze_python(
                         path.as_posix(),
@@ -1249,7 +1268,9 @@ def collect(
                     python_analysis.append(record)
                 else:
                     stats = _javascript(text)
-                    javascript_analysis.append(analyze_javascript(path.as_posix(), text))
+                    javascript_record = analyze_javascript(path.as_posix(), text)
+                    javascript_analysis.append(javascript_record)
+                    control_record = javascript_record.get("controls")
                 key = path.as_posix()
                 if key in analysis_reservations and not expired():
                     analysis_reserved -= analysis_reservations.pop(key)
@@ -1293,8 +1314,23 @@ def collect(
                 ".gitlab-ci.yml",
             }:
                 facts["ci"]["paths"].append(path.as_posix())
+            if is_delivery_input(path.as_posix()):
+                control_record = analyze_delivery(path.as_posix(), text)
+            if kind == "source":
+                control_record = {
+                    "path": path.as_posix(),
+                    "language": source_language(path.as_posix()),
+                    "status": "unsupported",
+                    "signals": [],
+                    "coverage": {},
+                    "gaps": [
+                        "No control grammar for this source language; inventory/text evidence remains available."
+                    ],
+                }
             stats.update(source_role(path.as_posix()))
             add_evidence(path.as_posix(), payload, kind, text, stats)
+            if control_record is not None:
+                control_inventory.add(control_record, evidence[-1])
         except (OSError, ValueError, SyntaxError, RecursionError):
             key = path.as_posix()
             analysis_reserved -= analysis_reservations.pop(key, 0)
@@ -1330,11 +1366,30 @@ def collect(
                         "syntax_analysis": "not_completed",
                     },
                 )
+                control_inventory.add(
+                    {
+                        "path": path.as_posix(),
+                        "language": source_language(path.as_posix()),
+                        "status": "unavailable",
+                        "signals": [],
+                        "coverage": {},
+                        "gaps": ["Captured source syntax/analysis could not be completed."],
+                    },
+                    evidence[-1],
+                )
             omit(path, _kind(path), expected[3], "read-or-parse-error")
 
     try:
         walk(descriptor, Path("."), 0)
         discovery_complete = complete
+        for path, _, _, kind in inputs:
+            if kind in {"python", "javascript", "source"}:
+                dimensions = ("security", "operability", "extensibility", "performance")
+                if kind in {"python", "source"}:
+                    dimensions = (*dimensions, "delivery")
+                control_inventory.expect(path.as_posix(), dimensions, supported=kind != "source")
+            elif is_delivery_input(path.as_posix()):
+                control_inventory.expect(path.as_posix(), ("delivery", "security", "extensibility"))
         if not discovery_complete:
             supported_text_complete = assets_complete = False
         python_inputs = sum(
@@ -1671,6 +1726,17 @@ def collect(
             "scope": analysis["scope"],
         }
         gaps.extend(analysis["gaps"])
+    controls = _redact_data(control_inventory.summarize())
+    control_payload = json.dumps(controls, sort_keys=True).encode()
+    control_id = add_evidence(
+        "<control-analysis>", control_payload, "control-analysis", "", controls
+    )
+    facts["control_analysis"] = {
+        key: controls[key]
+        for key in ("schema_version", "version", "status", "coverage", "limits", "caveat")
+    }
+    facts["control_analysis"]["evidence_id"] = control_id
+    gaps.extend("Control analysis: " + gap for gap in controls["gaps"])
     report_kinds = []
     unprocessed_reports = []
     json_report_total = 0
@@ -1712,13 +1778,20 @@ def collect(
             stats = ruff_report(payload, root, {entry["path"] for entry in manifest}, _redact)
             gaps.extend(stats["gaps"])
         elif is_json_report:
+            is_observation = False
             try:
-                kind, stats = _test_value_report(payload, root, manifest, revision)
+                document = _json(payload)
+                if isinstance(document, dict) and document.get("schema") == OBSERVATION_SCHEMA:
+                    is_observation = True
+                    kind, stats = import_observation(payload, manifest, revision, _redact)
+                else:
+                    kind, stats = _test_value_report(payload, root, manifest, revision)
             except ValueError as exc:
-                gaps.append("Malformed or unsupported test-value report: " + str(exc))
+                label = "observation" if is_observation else "test-value"
+                gaps.append("Malformed or unsupported " + label + " report: " + _redact(str(exc)))
                 complete = False
                 kind, stats = (
-                    "test-value",
+                    label,
                     {
                         "schema": None,
                         "gaps": {"count": 1, "reasons": ["malformed-or-unsupported-report"]},
@@ -1744,7 +1817,7 @@ def collect(
             if kind == "sarif":
                 previous["source_identity"] = "unverified"
                 previous["supplied"] = previous.get("supplied", 0) + stats["summary"]["supplied"]
-        elif kind == "test-value":
+        elif kind in {"test-value", "observation"}:
             # The adapter already returns bounded nested summaries.  Keep one
             # per supplied artifact; never merge claims as if they were facts.
             previous.setdefault("schemas", []).append(stats.get("schema"))
@@ -1918,7 +1991,9 @@ def collect(
         optional_analyses[name] = result
         add_optional_evidence(name, result)
     scope = {
-        "collector_version": 9,
+        "collector_version": 10,
+        "control_inventory_version": controls["version"],
+        "control_signal_limit": controls["limits"]["signals"],
         "rubric_version": RUBRIC_VERSION,
         "max_files": MAX_FILES,
         "max_file_bytes": MAX_FILE_BYTES,

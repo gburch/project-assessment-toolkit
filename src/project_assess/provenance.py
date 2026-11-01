@@ -67,6 +67,7 @@ def tool_info():
     versions = {}
     for name in (
         "pat-assess",
+        "PyYAML",
         "mcp",
         "tree-sitter",
         "tree-sitter-javascript",

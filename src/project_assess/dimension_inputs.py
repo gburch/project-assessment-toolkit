@@ -50,14 +50,31 @@ _PROVIDERS = {
         ("analyzer-analysis",),
         "Explicit optional analyzer models and candidates with their own limits.",
     ),
+    "controls": (
+        ("control-analysis",),
+        "Located Python/JS control signals and CI/manifest declarations, with per-file and per-dimension rule coverage.",
+    ),
+    "observations": (
+        ("observation",),
+        "Imported workload, recovery, delivery, change-cost, security or compatibility observations; identity matching does not authenticate execution.",
+    ),
 }
 
 # Shared providers are intentional. Their presence does not establish a control,
 # a dimension's quality, or that an agent inspected the relevant source paths.
 _DIMENSION_PROVIDERS = {
-    "security": ("source", "dependencies", "ci", "diagnostics", "optional", "guidance"),
-    "testing": ("source", "python", "javascript", "tests", "reports", "ci"),
-    "documentation": ("guidance", "documentation", "source"),
+    "security": (
+        "controls",
+        "observations",
+        "source",
+        "dependencies",
+        "ci",
+        "diagnostics",
+        "optional",
+        "guidance",
+    ),
+    "testing": ("source", "python", "javascript", "tests", "reports", "observations", "ci"),
+    "documentation": ("guidance", "documentation", "source", "observations"),
     "maintainability": (
         "source",
         "python",
@@ -66,15 +83,41 @@ _DIMENSION_PROVIDERS = {
         "dependencies",
         "optional",
         "diagnostics",
+        "observations",
     ),
-    "delivery": ("ci", "dependencies", "guidance", "reports", "source"),
-    "operability": ("source", "python", "javascript", "guidance", "diagnostics"),
-    "extensibility": ("source", "python", "javascript", "dependencies", "optional", "guidance"),
-    "performance": ("source", "python", "javascript", "optional", "guidance"),
+    "delivery": ("controls", "observations", "ci", "dependencies", "guidance", "reports", "source"),
+    "operability": (
+        "controls",
+        "observations",
+        "source",
+        "python",
+        "javascript",
+        "guidance",
+        "diagnostics",
+    ),
+    "extensibility": (
+        "controls",
+        "observations",
+        "source",
+        "python",
+        "javascript",
+        "dependencies",
+        "optional",
+        "guidance",
+    ),
+    "performance": (
+        "controls",
+        "observations",
+        "source",
+        "python",
+        "javascript",
+        "optional",
+        "guidance",
+    ),
 }
 _GAPS = {
     "security": [
-        "No built-in vulnerability or authorization-boundary analysis; dependency declarations and redaction do not establish security.",
+        "Fixed risky-API, TLS and declaration rules are not full vulnerability, authorization/dataflow or dependency-vulnerability analysis.",
         "Inspect relevant entry points, authority, validation and failure paths; supplied diagnostics cover only their selected rules.",
     ],
     "testing": [
@@ -88,19 +131,19 @@ _GAPS = {
         "Complexity, reuse and import hints do not establish unnecessary architecture or rigidity; inspect callers, invariants and representative changes.",
     ],
     "delivery": [
-        "CI/script inventory has no dedicated gate, release-provenance or rollback-control analysis.",
+        "Workflow gates, pins, permissions and command declarations are syntax facts; expressions, external actions and actual release/rollback effectiveness remain unverified.",
         "Inspect actual workflows and their failure/recovery paths; test reports alone do not establish release safety.",
     ],
     "operability": [
-        "No dedicated health, telemetry, retry/checkpoint or recovery-control inventory; these require source and runbook inspection.",
+        "Logging, catch/retry, health and recovery signals include unresolved naming hints; inspect ownership, failure handling and runbook applicability.",
         "Source controls do not establish successful diagnosis or recovery in operation.",
     ],
     "extensibility": [
         "Interface/import hints do not establish usable extension points, compatibility or change cost; trace required variants through real callers.",
     ],
     "performance": [
-        "Shared structure and narrow Python loop-I/O leads do not inventory all query, pagination, batching, backpressure or contention controls.",
-        "Capacity and latency remain unknown without applicable workload observations; no generic benchmark-report importer is available.",
+        "I/O-loop, query, paging/batching, timeout, cache and admission hints do not establish bottlenecks or complete dynamic behavior.",
+        "Capacity and latency need applicable workload observations; imported observations remain supplied claims even with matching source identity.",
     ],
 }
 
@@ -123,6 +166,12 @@ def _coverage(value):
                 for role, row in value[key].items()
                 if role in {"production", "test", "tooling", "unknown"} and isinstance(row, dict)
             }
+    if isinstance(value.get("dimensions"), dict):
+        result["dimensions"] = {
+            dimension: _compact(row)
+            for dimension, row in value["dimensions"].items()
+            if dimension in DIMENSIONS and isinstance(row, dict)
+        }
     return result
 
 
@@ -194,6 +243,10 @@ def dimension_inputs(assessment):
             dimension: {
                 "provider_ids": list(_DIMENSION_PROVIDERS[dimension]),
                 "limitations": list(_GAPS[dimension]),
+                "control_coverage": facts.get("control_analysis", {})
+                .get("coverage", {})
+                .get("dimensions", {})
+                .get(dimension),
             }
             for dimension in DIMENSIONS
         },

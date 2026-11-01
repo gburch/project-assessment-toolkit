@@ -107,12 +107,13 @@ def create_mcp(service):
         path: str | None = None,
         role: str | None = None,
         candidate_kind: str | None = None,
+        dimension: str | None = None,
         line: int | None = None,
         offset: int = 0,
         limit: int = 20,
         max_chars: int = 24000,
     ) -> dict[str, Any]:
-        """Page captured index/details/candidates/snippets/graph/hotspots/coverage/provenance or complete areas/area-dependencies directories. Area directories support path/role filters; other views also accept kind/candidate_kind/line. path is a substring; roles are production/test/tooling/unknown heuristics. Source is never reread. max_chars bounds serialized output."""
+        """Page captured evidence, complete area directories or controls. Controls accepts dimension and includes file coverage plus located signals; candidate_kind='file' selects coverage rows. Other filters retain their ordinary scope. Source is never reread; max_chars bounds serialized output."""
         return service.query_evidence(
             assessment_id,
             view=view,
@@ -120,6 +121,7 @@ def create_mcp(service):
             path=path,
             role=role,
             candidate_kind=candidate_kind,
+            dimension=dimension,
             line=line,
             offset=offset,
             limit=limit,

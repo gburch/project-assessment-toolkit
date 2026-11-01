@@ -99,7 +99,7 @@ def test_shared_handoffs_expose_inputs_without_creating_judgments(tmp_path):
     packet = service.challenge_template(assessment["id"], draft)
     assert packet["context"]["dimension_inputs"] == expected
     assert set(expected["dimensions"]) == set(DIMENSIONS)
-    assert "No built-in vulnerability" in markdown_report(report)
+    assert expected["dimensions"]["security"]["limitations"][0] in markdown_report(report)
     assert report["review"] is None
 
 

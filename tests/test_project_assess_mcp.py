@@ -14,6 +14,9 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     (root / "README.md").write_text("# Project\nA minimal, captured project.\n")
+    (root / "app.py").write_text(
+        'import subprocess\nraise RuntimeError("never execute")\nsubprocess.run(["echo"], shell=True)\n'
+    )
     state = tmp_path / "state"
     reports = tmp_path / "reports"
     reports.mkdir()
@@ -136,6 +139,19 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 )
                 assert not queried.is_error and queried.structured_content["returned"] == 1
                 assert queried.structured_content["items"][0]["path"] == "README.md"
+                controls = await session.call_tool(
+                    "query_evidence",
+                    {
+                        "assessment_id": snapshot["id"],
+                        "view": "controls",
+                        "dimension": "security",
+                        "candidate_kind": "security.shell_execution",
+                    },
+                )
+                assert not controls.is_error and controls.structured_content["items"]
+                assert all(
+                    "security" in row["dimensions"] for row in controls.structured_content["items"]
+                )
                 for view in ("areas", "area-dependencies"):
                     directory = await session.call_tool(
                         "query_evidence", {"assessment_id": snapshot["id"], "view": view}

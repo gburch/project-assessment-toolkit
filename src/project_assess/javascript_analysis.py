@@ -16,9 +16,11 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import PurePosixPath
 
 from .generic_analysis import source_area
+from .js_controls import DIMENSIONS as CONTROL_DIMENSIONS
+from .js_controls import analyze_javascript_controls
 from .static_analysis import source_role
 
-VERSION = "2"
+VERSION = "3"
 SUPPORTED_TREE_SITTER = ">=0.25.2,<0.26"
 MAX_BYTES = 8 * 1024 * 1024
 MAX_NODES = 100_000
@@ -223,6 +225,21 @@ def analyze_javascript(path: str, text: str) -> dict:
         "imports": [],
         "functions": [],
         "candidates": [],
+        "controls": {
+            "path": path,
+            "language": "javascript/typescript",
+            "dimensions": list(CONTROL_DIMENSIONS),
+            "role": source_role(path)["role"],
+            "status": "unavailable" if not identity["available"] else "not_analyzed",
+            "coverage": {
+                "nodes_examined": 0,
+                "signals_total": 0,
+                "signals_retained": 0,
+                "signals_omitted": 0,
+            },
+            "signals": [],
+            "gaps": ["Source controls require a successful bounded syntax parse."],
+        },
         "module": {
             "lines": text.count("\n") + bool(text),
             "function_count": 0,
@@ -270,6 +287,10 @@ def analyze_javascript(path: str, text: str) -> dict:
         record["gaps"].append(
             "JavaScript/TypeScript parse errors or missing syntax; metrics are partial and dead-code leads suppressed"
         )
+    record["controls"] = {
+        **analyze_javascript_controls(path, raw, nodes, partial=partial, node_limit=MAX_NODES),
+        "role": record["role"],
+    }
     references = Counter(
         _text(node, raw)
         for node, _ in nodes
@@ -655,6 +676,13 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
             "functions_total": sum(row["module"]["function_count"] for row in selected),
             "functions_analyzed": len(hotspots),
             "partial_functions": sum(row["partial"] for row in hotspots),
+            "control_files": sum(
+                bool(row.get("controls", {}).get("coverage", {}).get("nodes_examined"))
+                for row in selected
+            ),
+            "partial_control_files": sum(
+                row.get("controls", {}).get("status") == "partial" for row in selected
+            ),
         },
         "summary": {
             "functions": len(hotspots),
@@ -675,6 +703,14 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
                     (function["nesting"] for function in row["functions"]), default=0
                 ),
                 "detail_selected": row["path"] in details,
+                "control_coverage": {
+                    "status": row.get("controls", {}).get("status", "unestablished"),
+                    **{
+                        key: value
+                        for key, value in row.get("controls", {}).get("coverage", {}).items()
+                        if isinstance(value, int)
+                    },
+                },
                 "retained_function_details": len(row["functions"]) if row["path"] in details else 0,
                 "omitted_function_details": max(
                     0,

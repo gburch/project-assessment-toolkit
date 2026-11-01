@@ -95,6 +95,7 @@ def parser():
             "provenance",
             "areas",
             "area-dependencies",
+            "controls",
         ),
         default="index",
     )
@@ -106,6 +107,10 @@ def parser():
     ):
         query.add_argument("--" + field, help=help_text)
     query.add_argument("--line", type=int)
+    query.add_argument(
+        "--dimension",
+        choices=("security", "delivery", "operability", "extensibility", "performance"),
+    )
     query.add_argument("--offset", type=int, default=0)
     query.add_argument("--limit", type=int, default=20)
     query.add_argument("--max-chars", type=int, default=24000)
@@ -236,6 +241,7 @@ def main(argv=None):
                         "path",
                         "role",
                         "candidate_kind",
+                        "dimension",
                         "line",
                         "offset",
                         "limit",

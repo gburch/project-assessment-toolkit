@@ -12,6 +12,9 @@ def test_installed_cli_roundtrip_without_source_path_imports(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     (root / "README.md").write_text("# Project\nA starting point.\n")
+    (root / "app.py").write_text(
+        'import subprocess\nraise RuntimeError("never execute")\nsubprocess.run(["echo"], shell=True)\n'
+    )
     state = tmp_path / "state"
     args = ["--state-dir", str(state)]
     executable = Path(sys.executable).with_name("pat.exe" if os.name == "nt" else "pat")
@@ -41,6 +44,20 @@ def test_installed_cli_roundtrip_without_source_path_imports(tmp_path):
     assert brief["assessment_id"] == snapshot["id"] and brief["source"] == snapshot["source"]
     assert "evidence" not in brief and brief["planning_status"]["status"] == "no_review"
     assert brief["planning_status"]["gap_status"] == "no_goals"
+    controls = json.loads(
+        command(
+            "evidence-query",
+            snapshot["id"],
+            "--view",
+            "controls",
+            "--dimension",
+            "security",
+            "--candidate-kind",
+            "security.shell_execution",
+        )
+    )
+    assert controls["items"] and all("security" in row["dimensions"] for row in controls["items"])
+    assert controls["items"][0]["source_evidence_id"]
     index = json.loads(
         command("evidence-query", snapshot["id"], "--path", "README.md", "--limit", "1")
     )

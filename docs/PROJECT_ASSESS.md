@@ -43,18 +43,24 @@ The brief and shared report alignment expose `dimension_inputs`: a bounded direc
 
 | Dimension | Deterministic inputs available | Important limits |
 |---|---|---|
-| Security | Declared dependencies, source/configuration, supplied Ruff/SARIF diagnostics | No built-in vulnerability or authorization-boundary analysis; redaction protects collection rather than assessing security |
+| Security | Import-aware risky APIs/TLS flags, authorization integration/gate hints, CI permissions/references, declared dependencies, supplied Ruff/SARIF | No complete authorization/dataflow analysis, exploit proof or vulnerability-database lookup; redaction protects collection |
 | Testing | Test/setup hints, native syntax metrics, supplied JUnit/coverage/test-value results | Sampling, scenario relevance, effectiveness and source binding remain explicit |
 | Documentation | Duplicate text, local links/anchors, captured guidance | Semantic freshness and usability require review or observations |
 | Maintainability | Complexity, imports, reuse, interface/forwarding and dead-code leads | Necessity, rigidity and actual change amplification require caller/change context |
-| Delivery | CI configuration paths, manifest scripts, source and operating guidance | No dedicated gate, release-provenance or rollback-control analysis |
-| Operability | Source/runbooks and shared structural/diagnostic leads | No dedicated health, telemetry or recovery-control inventory |
-| Extensibility | Structure/import/interface hints, declarations and source | Extension and compatibility contracts require actual variant/caller inspection |
-| Performance | Complexity, narrow Python loop-I/O leads and optional models | No complete query/backpressure/contention inventory or generic workload-report importer |
+| Delivery | GitHub Actions/CircleCI jobs, dependencies, permissions, timeouts, failures, pins, artifacts, command categories; lockfiles and manifest/process declarations | Dynamic expressions/external actions and actual reproducible release/rollback effectiveness remain unknown |
+| Operability | Logging, catches, waits/retry, health and recovery/checkpoint/queue hints; imported recovery observations | Naming hints and declared mechanisms require actual diagnosis/recovery context |
+| Extensibility | Interfaces, injection/registration/discovery hints, entry points/exports and compatibility declarations | Extension usability and compatibility require actual variant/caller inspection |
+| Performance | Python/JS I/O-loop, query, batch/paging, timeout, cache, admission/backpressure/synchronization hints; imported observations | No full dynamic model or workload capacity proof; unresolved receivers/options remain explicit |
 
 Use `evidence-query ID --view areas` and `--view area-dependencies` with `--offset`/`--limit` to enumerate the complete captured production directory and cross-area import groups. These views accept `--path`; other semantic filters are unsupported. Responses preserve source/scope identity, citation omissions and graph limits. The compact map still shows 20 areas/dependency groups, and the independent challenge packet remains a bounded navigation sample. Continue through `next_offset` and choose source inspections appropriate to the project's workflows before using local Doctor candidates to prioritize work.
 
 Collection version 9 selects test-value and ecosystem inputs across roles and path areas after discovery, reuses the original source parse, and assembles bounded detail after capture. JavaScript retains cheap module overviews beyond its rich-detail budget; generic block comparison distributes its existing window budget across files/areas. Coverage reports distinguish examined detail from retained output. These changes do not add scores or execute assessed code, and they do not make every analysis complete.
+
+Collection version 10 adds one shared `control-analysis` record. It preserves per-file status, source evidence identity, observed/retained kind counts and per-dimension coverage; native syntax traversal and per-file signal work remain bounded. The global 8,000-signal sample reserves dimension/kind/semantic-variant representatives before file rounds, with a bounded representative pool. Inspect all omissions: counts are not maturity measures and zero hits are not absence proof. Other source languages remain explicit unsupported inputs for these native control rules; optional models and supplied SARIF remain separate evidence.
+
+Use `evidence-query ID --view controls --dimension security` (or delivery/operability/extensibility/performance), with ordinary pagination/path/role filters. This view includes coverage rows and located signals; `--candidate-kind file` selects only coverage, while a signal kind selects those records. YAML locations are source nodes; JSON/TOML manifest facts have document-level locators. The report and UI show scanner scope separately from score confidence. YAML data parsing uses [PyYAML's representation API](https://pyyaml.org/wiki/PyYAMLDocumentation), with bounded token/node/depth handling and rejected ambiguous/custom-tag constructs; it loads no assessed configuration as code. PyYAML is [MIT licensed](https://github.com/yaml/pyyaml/blob/main/LICENSE).
+
+Existing workload/recovery/delivery/change-cost/security/extension observations can be imported as [versioned JSON reports](../.agents/skills/project-assess/references/observation-report.md). Matching declared revision/file hashes establishes only that scope's source identity. Origin, execution, timestamp, scenario relevance and effectiveness remain supplied claims; importing evidence changes no score or goal.
 
 ## Local workflow
 

@@ -106,6 +106,15 @@ function renderRatings(report) {
         box.append(detail);
       }
     }
+    const controlCoverage = report.goal_alignment?.dimension_inputs?.dimensions?.[dim]?.control_coverage;
+    if (controlCoverage) {
+      const detail = node("details");
+      detail.id = `scanner-${dim}`;
+      detail.append(node("summary", "Scanner coverage"));
+      detail.append(node("p", `${controlCoverage.examined_files} of ${controlCoverage.input_files} eligible files examined for supported rules; ${controlCoverage.partial_files} partial, ${controlCoverage.unsupported_files} unsupported, ${controlCoverage.uncaptured_files} uncaptured.`));
+      detail.append(node("p", `${controlCoverage.retained_signals} located signals retained. These describe source mechanisms or review hints; they do not establish effectiveness or a score.`, "secondary"));
+      box.append(detail);
+    }
     const architecture = report.assessment.facts?.maintainability;
     if (dim === "maintainability" && architecture) {
       const detail = node("details");
@@ -502,6 +511,7 @@ async function queryEvidence(append = false) {
   if (!append) for (const [key, id] of [["view", "query-view"], ["kind", "query-kind"], ["role", "query-role"], ["candidate_kind", "query-candidate"], ["path", "query-path"]]) {
     if ($(id).value) parameters.set(key, $(id).value);
   }
+  if (!append && $("query-view").value === "controls" && $("query-dimension").value) parameters.set("dimension", $("query-dimension").value);
   parameters.set("offset", String(append ? queryNext : 0));
   queryParams = parameters.toString();
   $("query-submit").disabled = $("query-more").disabled = true;
@@ -522,6 +532,7 @@ async function queryEvidence(append = false) {
   }
 }
 $("evidence-query-form").addEventListener("submit", (event) => { event.preventDefault(); queryEvidence(); });
+$("query-view").addEventListener("change", () => { $("query-dimension").disabled = $("query-view").value !== "controls"; });
 $("query-more").addEventListener("click", () => queryEvidence(true));
 $("evidence-query-form").addEventListener("input", () => {
   ++queryLoad;
