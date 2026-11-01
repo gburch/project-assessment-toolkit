@@ -11,19 +11,21 @@ import importlib
 import json
 import posixpath
 import re
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import PurePosixPath
 
+from .generic_analysis import source_area
 from .static_analysis import source_role
 
-VERSION = "1"
+VERSION = "2"
 SUPPORTED_TREE_SITTER = ">=0.25.2,<0.26"
 MAX_BYTES = 8 * 1024 * 1024
 MAX_NODES = 100_000
 MAX_FUNCTION_NODES = 6000
 MAX_FUNCTIONS = 1000
 MAX_FILES = 1000
+MAX_OVERVIEW_FILES = 20_000
 MAX_CANDIDATES = 100
 MAX_INDEX = 20_000
 MAX_IMPORTS = 20_000
@@ -477,20 +479,58 @@ def _retained(candidates, limit):
     return result
 
 
+def _detail_records(records):
+    """Spread the unchanged rich-file allowance across roles and path areas."""
+    roles = defaultdict(lambda: defaultdict(deque))
+    for row in sorted(
+        records,
+        key=lambda row: (
+            -max((function["decisions"] for function in row["functions"]), default=0),
+            -row["module"]["function_count"],
+            row["path"],
+        ),
+    ):
+        roles[row["role"]][source_area(row["path"])].append(row)
+    area_order = {role: deque(sorted(areas)) for role, areas in roles.items()}
+    # Every present role participates before production receives its extra turn.
+    # Within each role, areas and files continue rotating independently.
+    order = ["production", "unknown", "test", "tooling", "production"]
+    order += sorted(set(roles) - set(order))
+    while any(area_order.values()):
+        for role in order:
+            if not area_order.get(role):
+                continue
+            area = area_order[role].popleft()
+            row = roles[role][area].popleft()
+            if roles[role][area]:
+                area_order[role].append(area)
+            yield row
+
+
 def summarize_javascript(records: list[dict], javascript_files: int | None = None) -> dict:
     """Summarize captured records; resolve relative imports only against their paths."""
     total = len(records) if javascript_files is None else javascript_files
-    selected = sorted(records, key=lambda row: row["path"])[:MAX_FILES]
+    selected = sorted(records, key=lambda row: row["path"])[:MAX_OVERVIEW_FILES]
+    details = set()
+    for row in _detail_records(selected):
+        if len(details) >= MAX_FILES:
+            break
+        details.add(row["path"])
     identity = selected[0]["analyzer"] if selected else javascript_analyzer_identity()
     gaps = {gap for row in selected for gap in row["gaps"]}
     if total > len(selected):
         gaps.add("JavaScript file limit or collection gap; some files lack AST analysis")
+    if len(details) < len(selected):
+        gaps.add(
+            "JavaScript rich-file detail limit reached; per-file overview/imports retained across captured files"
+        )
     candidates, clones, hotspots = [], defaultdict(list), []
     roles = {row["path"]: row["role"] for row in selected}
     paths, edges, unresolved = set(roles), [], 0
     for row in selected:
-        candidates.extend(dict(candidate) for candidate in row["candidates"])
-        for function in row["functions"]:
+        if row["path"] in details:
+            candidates.extend(dict(candidate) for candidate in row["candidates"])
+        for function in row["functions"] if row["path"] in details else ():
             hotspots.append(
                 {
                     "path": row["path"],
@@ -505,33 +545,42 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
             )
             if function["fingerprint"]:
                 clones[function["fingerprint"]].append(function["location"])
-        for imported in row["imports"]:
-            base = posixpath.normpath(
-                posixpath.join(posixpath.dirname(row["path"]), imported["source"])
+    pending = deque((row, 0) for row in _detail_records(selected) if row["imports"])
+    import_total = sum(len(row["imports"]) for row in selected)
+    imports_examined = 0
+    while pending and imports_examined < MAX_IMPORTS:
+        row, position = pending.popleft()
+        imported = row["imports"][position]
+        imports_examined += 1
+        base = posixpath.normpath(
+            posixpath.join(posixpath.dirname(row["path"]), imported["source"])
+        )
+        options = {base}
+        suffix = PurePosixPath(base).suffix
+        if not suffix:
+            options.update(
+                base + extension for extension in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
             )
-            options = {base}
-            suffix = PurePosixPath(base).suffix
-            if not suffix:
-                options.update(
-                    base + extension for extension in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
-                )
-                options.update(
-                    base + "/index" + extension for extension in (".js", ".jsx", ".ts", ".tsx")
-                )
-            elif suffix == ".js" and base not in paths:
-                options.update(base[:-3] + extension for extension in (".ts", ".tsx"))
-            matches = sorted(options & paths)
-            if len(matches) == 1 and len(edges) < MAX_IMPORTS:
-                edges.append(
-                    {
-                        "source": row["path"],
-                        "target": matches[0],
-                        "line": imported["line"],
-                        "phase": imported["phase"],
-                    }
-                )
-            else:
-                unresolved += 1
+            options.update(
+                base + "/index" + extension for extension in (".js", ".jsx", ".ts", ".tsx")
+            )
+        elif suffix == ".js" and base not in paths:
+            options.update(base[:-3] + extension for extension in (".ts", ".tsx"))
+        matches = sorted(options & paths)
+        if len(matches) == 1 and len(edges) < MAX_IMPORTS:
+            edges.append(
+                {
+                    "source": row["path"],
+                    "target": matches[0],
+                    "line": imported["line"],
+                    "phase": imported["phase"],
+                }
+            )
+        else:
+            unresolved += 1
+        if position + 1 < len(row["imports"]):
+            pending.append((row, position + 1))
+    imports_omitted = import_total - imports_examined
     for locations in clones.values():
         if len(locations) > 1:
             candidates.append(
@@ -564,6 +613,8 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
         gaps.add(
             "Some relative imports were unresolved, ambiguous or exceeded the edge limit; package aliases and tsconfig resolution are unsupported"
         )
+    if imports_omitted:
+        gaps.add("JavaScript import target limit reached; remaining import resolution is unknown")
     if len(candidates) > MAX_CANDIDATES:
         gaps.add(
             "JavaScript rich candidate sample is bounded; inspect the compact index and module overview"
@@ -572,8 +623,10 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
         gaps.add("JavaScript candidate index limit reached")
     partial = (
         total > len(selected)
+        or len(details) < len(selected)
         or any(row["status"] != "complete" for row in selected)
         or unresolved > 0
+        or imports_omitted > 0
         or len(candidates) > MAX_CANDIDATES
     )
     retained, indexed = _retained(candidates, MAX_CANDIDATES), _retained(candidates, MAX_INDEX)
@@ -597,6 +650,8 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
             "parsed_files": sum(row["parsed"] for row in selected),
             "complete_files": sum(row["status"] == "complete" for row in selected),
             "overview_files": len(selected),
+            "detail_files": len(details),
+            "omitted_detail_files": len(selected) - len(details),
             "functions_total": sum(row["module"]["function_count"] for row in selected),
             "functions_analyzed": len(hotspots),
             "partial_functions": sum(row["partial"] for row in hotspots),
@@ -613,6 +668,19 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
                 "role_basis": row["role_basis"],
                 "status": row["status"],
                 **row["module"],
+                "max_decision_points": max(
+                    (function["decisions"] for function in row["functions"]), default=0
+                ),
+                "max_control_nesting": max(
+                    (function["nesting"] for function in row["functions"]), default=0
+                ),
+                "detail_selected": row["path"] in details,
+                "retained_function_details": len(row["functions"]) if row["path"] in details else 0,
+                "omitted_function_details": max(
+                    0,
+                    row["module"]["function_count"]
+                    - (len(row["functions"]) if row["path"] in details else 0),
+                ),
                 "inbound": inbound[row["path"]],
                 "outbound": outbound[row["path"]],
             }
@@ -621,9 +689,12 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
         "topology": {
             "edges": edges,
             "complete": not unresolved
+            and not imports_omitted
             and total == len(selected)
             and all(row["status"] == "complete" for row in selected),
             "unresolved_relative_imports": unresolved,
+            "imports_examined": imports_examined,
+            "imports_omitted": imports_omitted,
             "caveat": "Captured relative imports only; no filesystem, package, alias or tsconfig resolution. Type-only/deferred edges retain their phase; not a runtime graph or entrypoint inventory.",
         },
         "hotspots": sorted(
@@ -652,7 +723,10 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
             "nodes_per_function": MAX_FUNCTION_NODES,
             "functions_per_file": MAX_FUNCTIONS,
             "files": MAX_FILES,
+            "overview_files": MAX_OVERVIEW_FILES,
+            "detail_selection": "role_and_area_round_robin_with_production_weight",
             "import_edges": MAX_IMPORTS,
+            "import_targets": MAX_IMPORTS,
             "candidates": MAX_CANDIDATES,
             "candidate_index": MAX_INDEX,
             "decision_threshold": DECISION_THRESHOLD,

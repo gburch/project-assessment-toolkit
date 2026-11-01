@@ -14,7 +14,7 @@ import subprocess
 import time
 import tomllib
 import xml.etree.ElementTree as ET
-from collections import Counter
+from collections import Counter, defaultdict, deque
 from dataclasses import replace
 from pathlib import Path
 
@@ -32,6 +32,7 @@ from .javascript_analysis import (
     summarize_javascript,
 )
 from .provenance import tool_info
+from .review_context import source_area
 from .rubric import RUBRIC_VERSION
 from .static_analysis import MAX_FILES as MAX_STATIC_FILES
 from .static_analysis import MAX_SYMBOLS as MAX_STATIC_SYMBOLS
@@ -55,6 +56,7 @@ MAX_DETAIL_PER_FILE = get_budget("standard").pattern_functions_per_file
 MAX_DEPTH = 64
 MAX_EXCERPT = 800
 MAX_GIT_OUTPUT_BYTES = 4 * 1024 * 1024
+MAX_EXCLUDED_DIRECTORY_PREFIXES = 100
 _SKIP_DIRS = {
     ".git",
     ".hg",
@@ -351,15 +353,175 @@ def _documentation(text):
     }
 
 
-def _static_value_analysis(root, source_rows, manifest, revision):
+def _analysis_paths(paths):
+    """Alternate roles and areas before spending bounded detailed-analysis work."""
+    groups = defaultdict(lambda: defaultdict(deque))
+    for path in sorted(paths):
+        groups[source_role(path)["role"]][source_area(path)].append(path)
+    areas = {role: deque(sorted(group)) for role, group in groups.items()}
+    order = ("test", "production", "unknown", "tooling")
+    while any(areas.values()):
+        for role in order:
+            if not areas.get(role):
+                continue
+            area = areas[role].popleft()
+            yield groups[role][area].popleft()
+            if groups[role][area]:
+                areas[role].append(area)
+
+
+def _analysis_coverage(paths, analyzed, failed=(), definition_counts=None):
+    """Describe captured-input selection without implying semantic coverage."""
+    analyzed, failed = set(analyzed), set(failed)
+    groups = {}
+    roles = {}
+    for path in sorted(paths):
+        role, area = source_role(path)["role"], source_area(path)
+        group = groups.setdefault(
+            (role, area),
+            {
+                "role": role,
+                "path": area,
+                "eligible_files": 0,
+                "analyzed_files": 0,
+                "omitted_files": 0,
+                "failed_files": 0,
+            },
+        )
+        group["eligible_files"] += 1
+        group["analyzed_files"] += path in analyzed
+        group["omitted_files"] += path not in analyzed
+        group["failed_files"] += path in failed
+        counts = roles.setdefault(
+            role,
+            {"eligible_files": 0, "analyzed_files": 0, "omitted_files": 0, "failed_files": 0},
+        )
+        counts["eligible_files"] += 1
+        counts["analyzed_files"] += path in analyzed
+        counts["omitted_files"] += path not in analyzed
+        counts["failed_files"] += path in failed
+        if definition_counts is not None:
+            examined, retained = definition_counts.get(path, (0, 0))
+            for counter in (counts, group):
+                counter["definitions_examined"] = counter.get("definitions_examined", 0) + examined
+                counter["definitions_retained"] = counter.get("definitions_retained", 0) + retained
+                counter["definitions_analyzed"] = counter.get("definitions_analyzed", 0) + retained
+                counter["definitions_omitted"] = (
+                    counter.get("definitions_omitted", 0) + examined - retained
+                )
+    result = {
+        "selection": "role_then_area_round_robin",
+        "eligible_files": len(paths),
+        "analyzed_files": len(analyzed),
+        "omitted_files": len(paths) - len(analyzed),
+        "failed_files": len(failed),
+        "roles": roles,
+        "eligible_areas": len(groups),
+        "analyzed_areas": sum(group["analyzed_files"] > 0 for group in groups.values()),
+        "omitted_areas": sum(group["analyzed_files"] == 0 for group in groups.values()),
+        "areas": list(groups.values())[:100],
+        "omitted_coverage_areas": max(0, len(groups) - 100),
+        "caveat": "Captured eligible inputs only. Roles and areas are path heuristics; analyzed files do not establish complete behavior or usage coverage.",
+    }
+    if definition_counts is not None:
+        for key in (
+            "definitions_examined",
+            "definitions_analyzed",
+            "definitions_retained",
+            "definitions_omitted",
+        ):
+            result[key] = sum(counts[key] for counts in roles.values())
+        result["definition_count_basis"] = (
+            "Python AST definitions and lexical JavaScript registration candidates inventoried in selected files before bounded rich analysis; omitted files remain unknown."
+        )
+    return result
+
+
+def _prepare_source_analysis(root, path, text, tree, quota):
+    """Reuse the current captured AST for a preallocated share of rich detail."""
+    from .test_value import static as static_tool
+
+    kind, examined, failed = _kind(Path(path)), 0, False
+    try:
+        if kind == "python":
+            functions = sorted(
+                (
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+                ),
+                key=lambda node: node.lineno,
+            )
+            examined = len(functions)
+            # Preserve both test oracles and helpers when one test file
+            # contains many definitions, without rich work for every one.
+            tests = [node for node in functions if node.name.startswith("test_")]
+            helpers = [node for node in functions if not node.name.startswith("test_")]
+            test_quota = min(len(tests), (quota + 1) // 2)
+            helper_quota = min(len(helpers), quota - test_quota)
+            test_quota = min(len(tests), quota - helper_quota)
+            chosen = [
+                group[i * len(group) // count]
+                for group, count in ((tests, test_quota), (helpers, helper_quota))
+                for i in range(count)
+            ]
+            found, found_gaps, _ = static_tool.python_rows(
+                root / path, root, tree, selected_lines={node.lineno for node in chosen}
+            )
+            signals = python_signals(path, tree)
+        else:
+            offsets = static_tool._js_definition_offsets(text)
+            examined = len(offsets)
+            count = min(quota, len(offsets))
+            selected_offsets = {offsets[i * len(offsets) // count] for i in range(count)}
+            found, found_gaps = static_tool._js_file(
+                root / path, root, text, selected_offsets=selected_offsets
+            )
+            found_gaps.append(
+                {"path": path, "reason": "javascript-lexical-analysis-not-parse-proof"}
+            )
+            signals = javascript_signals(path, text)
+    except (TypeError, ValueError, SyntaxError, RecursionError):
+        failed = True
+        found, found_gaps = [], [{"path": path, "reason": "static-analysis-error"}]
+        signals = {
+            "path": path,
+            "status": "partial",
+            "signals": [],
+            "gaps": ["Source syntax analysis failed."],
+        }
+    if examined > len(found):
+        found_gaps.append({"path": path, "reason": "static-definition-limit"})
+    for row in found:
+        if len(row.get("setupLeads", [])) > 32:
+            row["setupLeadCount"] = len(row["setupLeads"])
+            row["setupLeads"] = row["setupLeads"][:32]
+            found_gaps.append({"path": path, "reason": "static-setup-lead-limit"})
+    role = source_role(path)["role"]
+    for signal in signals["signals"]:
+        signal["scope"] = "test" if role == "test" else "tooling" if role == "tooling" else "source"
+    return {"rows": found, "gaps": found_gaps}, signals, (examined, len(found)), failed
+
+
+def _static_value_analysis(root, source_rows, manifest, revision, coverage):
     """Summarize bounded rows prepared from the collector's existing AST/text."""
     from .test_value import static as static_tool
 
     max_definitions, max_groups, max_candidates, max_gaps = MAX_STATIC_DEFINITIONS, 256, 512, 128
     rows, gaps = [], []
+    pending = deque(path for path in _analysis_paths(source_rows) if source_rows[path]["rows"])
+    queues = {path: deque(prepared["rows"]) for path, prepared in source_rows.items()}
+    while pending:
+        path = pending.popleft()
+        rows.append(queues[path].popleft())
+        if queues[path]:
+            pending.append(path)
     for _, prepared in sorted(source_rows.items()):
-        rows.extend(prepared["rows"])
         gaps.extend(prepared["gaps"])
+    if coverage["omitted_files"]:
+        gaps.append(
+            {"reason": "static-input-omissions", "omitted_files": coverage["omitted_files"]}
+        )
 
     raw_groups, raw_candidates = static_tool.summarize_rows(rows)
     groups = [
@@ -408,6 +570,7 @@ def _static_value_analysis(root, source_rows, manifest, revision):
             "candidates": len(raw_candidates),
             "gaps": len(gaps),
         },
+        "coverage": coverage,
         "definitions": rows[:max_definitions],
         "groups": groups[:max_groups],
         "candidates": candidates[:max_candidates],
@@ -419,6 +582,33 @@ def _static_value_analysis(root, source_rows, manifest, revision):
             "gaps": len(gaps) <= max_gaps,
         },
     }
+
+
+def _static_value_payload(analysis):
+    """Keep retained-role coverage honest when the fixed byte budget trims rows."""
+    coverage = analysis["coverage"]
+    roles, areas = Counter(), Counter()
+    for row in analysis["definitions"]:
+        role, area = source_role(row["path"])["role"], source_area(row["path"])
+        roles[role] += 1
+        areas[(role, area)] += 1
+    coverage["definitions_retained"] = len(analysis["definitions"])
+    coverage["definitions_omitted"] = (
+        coverage["definitions_examined"] - coverage["definitions_retained"]
+    )
+    coverage["definitions_output_omitted"] = (
+        coverage["definitions_analyzed"] - coverage["definitions_retained"]
+    )
+    for role, group in coverage["roles"].items():
+        group["definitions_retained"] = roles[role]
+        group["definitions_omitted"] = group["definitions_examined"] - roles[role]
+        group["definitions_output_omitted"] = group["definitions_analyzed"] - roles[role]
+    for group in coverage["areas"]:
+        retained = areas[(group["role"], group["path"])]
+        group["definitions_retained"] = retained
+        group["definitions_omitted"] = group["definitions_examined"] - retained
+        group["definitions_output_omitted"] = group["definitions_analyzed"] - retained
+    return json.dumps(analysis, sort_keys=True).encode()
 
 
 def _json(payload):
@@ -733,6 +923,7 @@ def collect(
         "max_static_evidence_bytes": MAX_STATIC_EVIDENCE_BYTES,
         "max_static_definitions": MAX_STATIC_DEFINITIONS,
         "max_git_output_bytes": MAX_GIT_OUTPUT_BYTES,
+        "excluded_directory_prefixes": MAX_EXCLUDED_DIRECTORY_PREFIXES,
     }
     dedicated = {
         name: limits
@@ -794,11 +985,14 @@ def collect(
     evidence, findings, manifest, watched = [], [], [], []
     evidence_paths = set()
     documentation_texts, python_analysis, javascript_analysis, captured_sources = {}, [], [], {}
-    ecosystem_manifests, ecosystem_inputs = [], []
-    ecosystem_truncated = False
+    ecosystem_manifests, ecosystem_inputs = {}, []
     source_rows = {}
-    static_symbols, value_definitions = 0, 0
+    source_definition_counts, source_analysis_failed = {}, set()
+    analysis_reservations, analysis_selected = {}, set()
+    analysis_reserved = analysis_retained = 0
+    static_symbols = 0
     gaps, excluded, unsupported = [], Counter(), Counter()
+    excluded_directory_prefixes = []
     inputs, skipped, unsearched_directories = [], [], []
     complete, supported_text_complete, assets_complete = True, True, True
     python_source_stable = True
@@ -922,11 +1116,16 @@ def collect(
                     continue
                 if stat.S_ISDIR(info.st_mode):
                     if name in _SKIP_DIRS or name.lower() in _SECRET_DIRS:
-                        excluded[
+                        reason = (
                             "dependency/build/VCS directories"
                             if name in _SKIP_DIRS
                             else "credential directories"
-                        ] += 1
+                        )
+                        excluded[reason] += 1
+                        if len(excluded_directory_prefixes) < MAX_EXCLUDED_DIRECTORY_PREFIXES:
+                            excluded_directory_prefixes.append(
+                                {"path": _redact(path.as_posix()), "reason": reason}
+                            )
                         continue
                     child = os.open(
                         name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory
@@ -958,8 +1157,8 @@ def collect(
             total, \
             asset_total, \
             static_symbols, \
-            value_definitions, \
-            ecosystem_truncated
+            analysis_reserved, \
+            analysis_retained
         name = path.name
         try:
             # A supplied report is handled below by its dedicated bounded
@@ -1051,64 +1250,19 @@ def collect(
                 else:
                     stats = _javascript(text)
                     javascript_analysis.append(analyze_javascript(path.as_posix(), text))
-                if len(ecosystem_inputs) < MAX_STATIC_FILES:
-                    ecosystem_input = (
-                        python_signals(path.as_posix(), tree)
-                        if kind == "python"
-                        else javascript_signals(path.as_posix(), text)
+                key = path.as_posix()
+                if key in analysis_reservations and not expired():
+                    analysis_reserved -= analysis_reservations.pop(key)
+                    quota = max(0, MAX_STATIC_DEFINITIONS - analysis_retained - analysis_reserved)
+                    prepared, signals, counts, failed = _prepare_source_analysis(
+                        root, key, text, tree if kind == "python" else None, quota
                     )
-                    for signal in ecosystem_input["signals"]:
-                        signal["scope"] = (
-                            "test"
-                            if _is_test(path)
-                            else "tooling"
-                            if set(path.parts) & {"scripts", "tools", ".github"}
-                            else "source"
-                        )
-                    ecosystem_inputs.append(ecosystem_input)
-                else:
-                    ecosystem_truncated = True
-                if (
-                    len(source_rows) < MAX_STATIC_FILES
-                    and value_definitions < MAX_STATIC_DEFINITIONS
-                ):
-                    from .test_value import static as static_tool
-
-                    try:
-                        if kind == "python":
-                            found, found_gaps, _ = static_tool.python_rows(root / path, root, tree)
-                        else:
-                            found, found_gaps = static_tool._js_file(root / path, root, text)
-                            found_gaps.append(
-                                {
-                                    "path": path.as_posix(),
-                                    "reason": "javascript-lexical-analysis-not-parse-proof",
-                                }
-                            )
-                    except (TypeError, ValueError, SyntaxError, RecursionError):
-                        found, found_gaps = (
-                            [],
-                            [{"path": path.as_posix(), "reason": "static-analysis-error"}],
-                        )
-                    remaining = MAX_STATIC_DEFINITIONS - value_definitions
-                    if len(found) > remaining:
-                        found_gaps.append(
-                            {"path": path.as_posix(), "reason": "static-definition-limit"}
-                        )
-                    found = found[:remaining]
-                    for row in found:
-                        if len(row.get("setupLeads", [])) > 32:
-                            row["setupLeadCount"] = len(row["setupLeads"])
-                            row["setupLeads"] = row["setupLeads"][:32]
-                            found_gaps.append(
-                                {"path": path.as_posix(), "reason": "static-setup-lead-limit"}
-                            )
-                    value_definitions += len(found)
-                    source_rows[path.as_posix()] = {"rows": found, "gaps": found_gaps}
-                else:
-                    gaps.append(
-                        "Test-value static input limit reached; remaining inputs were not analyzed"
-                    )
+                    source_rows[key] = prepared
+                    source_definition_counts[key] = counts
+                    analysis_retained += counts[1]
+                    if failed:
+                        source_analysis_failed.add(key)
+                    ecosystem_inputs.append(signals)
                 for key, value in stats.items():
                     facts[kind][key] += value
                 stats["is_test"] = _is_test(path)
@@ -1133,10 +1287,7 @@ def collect(
                 for key in ("dependencies", "dev_dependencies"):
                     manifests[key] += stats[key]
                 manifests["scripts"].extend(stats["scripts"])
-                if len(ecosystem_manifests) < MAX_STATIC_FILES:
-                    ecosystem_manifests.append(stats["dependency_inventory"])
-                else:
-                    ecosystem_truncated = True
+                ecosystem_manifests[path.as_posix()] = stats["dependency_inventory"]
             if any(part in {".github", ".circleci", ".ssci"} for part in path.parts) or name in {
                 "Jenkinsfile",
                 ".gitlab-ci.yml",
@@ -1145,6 +1296,23 @@ def collect(
             stats.update(source_role(path.as_posix()))
             add_evidence(path.as_posix(), payload, kind, text, stats)
         except (OSError, ValueError, SyntaxError, RecursionError):
+            key = path.as_posix()
+            analysis_reserved -= analysis_reservations.pop(key, 0)
+            if key in captured_sources and key in analysis_selected and key not in source_rows:
+                source_analysis_failed.add(key)
+                source_rows[key] = {
+                    "rows": [],
+                    "gaps": [{"path": key, "reason": "static-analysis-error"}],
+                }
+                source_definition_counts[key] = (0, 0)
+                ecosystem_inputs.append(
+                    {
+                        "path": key,
+                        "status": "partial",
+                        "signals": [],
+                        "gaps": ["Source syntax analysis failed."],
+                    }
+                )
             gaps.append("Unable to collect or parse input safely: " + path.as_posix())
             # Captured source bytes remain inspectable even when syntax or
             # metric analysis fails. Optional tools must receive evidence-backed
@@ -1172,6 +1340,19 @@ def collect(
         python_inputs = sum(
             kind == "python" and size <= MAX_SOURCE_FILE_BYTES for _, _, size, kind in inputs
         )
+        detail_paths = list(
+            _analysis_paths(
+                path.as_posix()
+                for path, _, size, kind in inputs
+                if kind in {"python", "javascript"} and size <= MAX_SOURCE_FILE_BYTES
+            )
+        )[:MAX_STATIC_FILES]
+        share, remainder = divmod(MAX_STATIC_DEFINITIONS, max(1, len(detail_paths)))
+        analysis_reservations = {
+            path: share + (index < remainder) for index, path in enumerate(detail_paths)
+        }
+        analysis_selected = set(detail_paths)
+        analysis_reserved = sum(analysis_reservations.values())
         fair_detail_budget = min(
             budget.pattern_functions_per_file,
             max(1, budget.pattern_functions // max(python_inputs, 1)),
@@ -1249,15 +1430,40 @@ def collect(
     finally:
         os.close(descriptor)
     analysis_omissions = []
-    if source_rows and expired():
+    native_paths = [
+        path for path in captured_sources if _kind(Path(path)) in {"python", "javascript"}
+    ]
+    analyzed_paths = source_rows.keys() - source_analysis_failed
+    source_value_coverage = _analysis_coverage(
+        native_paths, analyzed_paths, source_analysis_failed, source_definition_counts
+    )
+    source_value_coverage["file_limit_omissions"] = len(set(native_paths) - analysis_selected)
+    source_value_coverage["deadline_omissions"] = len(
+        (set(native_paths) & analysis_selected) - source_rows.keys()
+    )
+    ecosystem_source_coverage = _analysis_coverage(
+        native_paths, analyzed_paths, source_analysis_failed
+    )
+    ecosystem_source_coverage.update(
+        {key: source_value_coverage[key] for key in ("file_limit_omissions", "deadline_omissions")}
+    )
+    if native_paths and expired():
         analysis_omissions.append({"analysis": "test-value-static", "reason": "deadline"})
-    if source_rows and not expired():
+    if native_paths and not expired():
         try:
-            analysis = _redact_data(_static_value_analysis(root, source_rows, manifest, revision))
+            if source_value_coverage["deadline_omissions"]:
+                analysis_omissions.append({"analysis": "test-value-static", "reason": "deadline"})
+            if source_value_coverage["file_limit_omissions"]:
+                gaps.append(
+                    "Test-value static input file limit reached; remaining inputs were not analyzed"
+                )
+            analysis = _redact_data(
+                _static_value_analysis(root, source_rows, manifest, revision, source_value_coverage)
+            )
             for key in ("definitions", "groups", "candidates", "gaps"):
                 analysis["bounded"][key] = len(analysis[key]) == analysis["counts"][key]
             analysis["bounded"]["output"] = False
-            payload = json.dumps(analysis, sort_keys=True).encode()
+            payload = _static_value_payload(analysis)
             truncated = False
             truncation_gap = {
                 "reason": "static-evidence-output-bound",
@@ -1274,7 +1480,7 @@ def collect(
                             analysis["bounded"][key] = False
                             truncated = True
                             changed = True
-                            payload = json.dumps(analysis, sort_keys=True).encode()
+                            payload = _static_value_payload(analysis)
                             if len(payload) <= MAX_STATIC_EVIDENCE_BYTES:
                                 break
                     if not changed:
@@ -1282,7 +1488,7 @@ def collect(
                 if truncated:
                     analysis["gaps"].append(truncation_gap)
                     analysis["bounded"]["gaps"] = False
-                    payload = json.dumps(analysis, sort_keys=True).encode()
+                    payload = _static_value_payload(analysis)
                 if len(payload) > MAX_STATIC_EVIDENCE_BYTES:
                     if not truncated:
                         analysis["gaps"].append(truncation_gap)
@@ -1290,21 +1496,21 @@ def collect(
                     for key in ("definitions", "groups", "candidates"):
                         analysis[key] = []
                         analysis["bounded"][key] = False
-                    payload = json.dumps(analysis, sort_keys=True).encode()
+                    payload = _static_value_payload(analysis)
                     if len(payload) > MAX_STATIC_EVIDENCE_BYTES:
                         analysis["gaps"] = [truncation_gap]
                         analysis["bounded"]["gaps"] = False
-                        payload = json.dumps(analysis, sort_keys=True).encode()
+                        payload = _static_value_payload(analysis)
             # Serialize only after all flags and explicit truncation gaps are
             # finalized; the stored digest and stats must describe one payload.
             analysis["bounded"]["output"] = False
-            payload = json.dumps(analysis, sort_keys=True).encode()
+            payload = _static_value_payload(analysis)
             if len(payload) <= MAX_STATIC_EVIDENCE_BYTES:
                 analysis["bounded"]["output"] = True
-                payload = json.dumps(analysis, sort_keys=True).encode()
+                payload = _static_value_payload(analysis)
                 if len(payload) > MAX_STATIC_EVIDENCE_BYTES:
                     analysis["bounded"]["output"] = False
-                    payload = json.dumps(analysis, sort_keys=True).encode()
+                    payload = _static_value_payload(analysis)
             evidence_id = add_evidence(
                 "<test-value-static-analysis>",
                 payload,
@@ -1316,6 +1522,7 @@ def collect(
                 "evidence_id": evidence_id,
                 "schema": analysis["schema"],
                 "counts": analysis["counts"],
+                "coverage": analysis["coverage"],
                 "source_count": analysis["provenance"]["sourceCount"],
                 "captured_only": True,
             }
@@ -1550,9 +1757,24 @@ def collect(
     if (revision, dirty) != (end_revision, end_dirty):
         gaps.append("Git identity changed during collection")
         complete = supported_text_complete = assets_complete = False
-    ecosystem = _redact_data(summarize_ecosystem(ecosystem_manifests, ecosystem_inputs))
+    manifest_paths = list(_analysis_paths(ecosystem_manifests))[:MAX_STATIC_FILES]
+    ecosystem_truncated = (
+        len(ecosystem_manifests) > len(manifest_paths) or len(native_paths) > MAX_STATIC_FILES
+    )
+    ecosystem = _redact_data(
+        summarize_ecosystem(
+            [ecosystem_manifests[path] for path in manifest_paths], ecosystem_inputs
+        )
+    )
+    ecosystem["coverage"] = ecosystem_source_coverage
+    ecosystem["manifest_coverage"] = _analysis_coverage(ecosystem_manifests, manifest_paths)
     if ecosystem_truncated:
         ecosystem["gaps"].append("Ecosystem input file limit reached; inventory is partial")
+        ecosystem["status"] = "partial"
+    if ecosystem_source_coverage["omitted_files"]:
+        ecosystem["gaps"].append(
+            "Some captured ecosystem source inputs were not analyzed; inspect selection coverage and collection omissions."
+        )
         ecosystem["status"] = "partial"
     if not supported_text_complete:
         ecosystem["gaps"].append("Source capture is incomplete; ecosystem evidence is partial")
@@ -1571,6 +1793,8 @@ def collect(
         "evidence_id": ecosystem_id,
         "dependency_count": ecosystem["counts"]["dependencies"],
         "signal_count": ecosystem["counts"]["signals"],
+        "coverage": ecosystem["coverage"],
+        "manifest_coverage": ecosystem["manifest_coverage"],
         "gaps": ecosystem["gaps"],
         "limits": ecosystem["limits"],
     }
@@ -1597,6 +1821,14 @@ def collect(
             role_counts[role]["lines"] += entry["lines"]
     facts["inventory"]["roles"] = role_counts
     facts["collection"] = {
+        "completeness_scope": "eligible regular files after configured directory, credential, symlink and Git selection exclusions",
+        "excluded_directory_prefixes": excluded_directory_prefixes,
+        "omitted_excluded_directory_prefixes": max(
+            0,
+            excluded["dependency/build/VCS directories"]
+            + excluded["credential directories"]
+            - len(excluded_directory_prefixes),
+        ),
         "priority": "application source and manifests/configuration before tests, tooling and unsupported assets",
         "eligible_files_seen": len(inputs),
         "captured_files": len(manifest),
@@ -1686,7 +1918,7 @@ def collect(
         optional_analyses[name] = result
         add_optional_evidence(name, result)
     scope = {
-        "collector_version": 8,
+        "collector_version": 9,
         "rubric_version": RUBRIC_VERSION,
         "max_files": MAX_FILES,
         "max_file_bytes": MAX_FILE_BYTES,

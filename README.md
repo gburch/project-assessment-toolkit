@@ -55,7 +55,7 @@ Version **0.3.0** adds standard/deep collection budgets, broad complexity metric
 
 Version **0.3.2** rejects unsupported or incomplete state before writing and initializes new state atomically. Static test evidence labels bare `assert` counts separately from recognized unittest-style calls; changed counting semantics start a new comparison scope. Vulture's redundant conditions remain distinct from unreachable statements.
 
-Version **0.7.0** adds verified source citations and separates confidence in findings from confidence in project scores. Representative challenge packets, fair provider sampling and preserved source identities improve review coverage without larger budgets. See [confidence support](.agents/skills/project-assess/references/evolve-review.md#confidence-support).
+Version **0.7.1** repairs coverage gaps in test-value, JavaScript and duplicate analysis, adds paginated access to the complete captured project map, and exposes existing inputs and missing checks for every dimension. Verified source citations remain separate from confidence in project scores. See [scanner coverage](docs/PROJECT_ASSESS.md#scanner-coverage) and [confidence support](.agents/skills/project-assess/references/evolve-review.md#confidence-support).
 
 Version **0.6.0** labels review freshness, records cited change traces and binds an independent challenge to the exact draft. Legacy reviews remain readable; declared independence and structural validation do not certify judgment quality. See the [review workflow](.agents/skills/project-assess/references/evolve-review.md#freshness-change-traces-and-independent-challenge).
 

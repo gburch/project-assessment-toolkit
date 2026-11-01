@@ -221,6 +221,147 @@ def test_static_value_leads_use_captured_source_and_do_not_change_doc_facts(tmp_
     assert not sentinel.exists()
 
 
+def test_test_value_budgets_preserve_test_and_production_areas(tmp_path, monkeypatch):
+    from project_assess.test_value import static
+
+    monkeypatch.setattr(collector, "MAX_STATIC_FILES", 4)
+    monkeypatch.setattr(collector, "MAX_STATIC_DEFINITIONS", 8)
+    production = "".join(f"def helper_{i}():\n    return {i}\n" for i in range(100))
+    write(tmp_path, "src/app/alpha/first.py", production)
+    write(tmp_path, "src/app/alpha/second.py", production)
+    write(tmp_path, "src/app/zeta/main.py", production)
+    tests = (
+        "def fixture():\n    return 1\n"
+        "def test_first():\n    assert result() == 1\n"
+        "def test_second():\n    assert result() == 2\n"
+        "def test_third():\n    assert result() == 3\n"
+    )
+    sentinel = tmp_path / "executed"
+    write(tmp_path, "tests/alpha/test_one.py", tests + f"open({str(sentinel)!r}, 'w')\n")
+    write(tmp_path, "tests/zeta/test_one.py", tests)
+    hashes = []
+    original = static._body_hash
+
+    def track_rich_work(node):
+        hashes.append(node.name)
+        return original(node)
+
+    monkeypatch.setattr(static, "_body_hash", track_rich_work)
+    first = collector.collect(tmp_path)
+    summary = first["facts"]["test_value_static"]
+    analysis = next(
+        row["stats"] for row in first["evidence"] if row["id"] == summary["evidence_id"]
+    )
+    assert len(hashes) == analysis["counts"]["definitions"] == 8
+    assert any(row["kind"] == "test" for row in analysis["definitions"])
+    assert any(row["path"].startswith("src/") for row in analysis["definitions"])
+    coverage = analysis["coverage"]
+    assert coverage == summary["coverage"]
+    assert coverage["eligible_files"] == 5
+    assert coverage["analyzed_files"] == 4 and coverage["omitted_files"] == 1
+    assert coverage["analyzed_areas"] == coverage["eligible_areas"] == 4
+    assert coverage["roles"]["test"]["analyzed_files"] == 2
+    assert coverage["roles"]["production"]["analyzed_files"] == 2
+    assert coverage["roles"]["production"]["omitted_files"] == 1
+    assert coverage["definitions_examined"] == 208
+    assert coverage["definitions_retained"] == 8
+    assert coverage["definitions_omitted"] == 200
+    assert not sentinel.exists()
+    second = collector.collect(tmp_path)
+    repeated = second["facts"]["test_value_static"]
+    repeated_analysis = next(
+        row["stats"] for row in second["evidence"] if row["id"] == repeated["evidence_id"]
+    )
+    assert repeated_analysis == analysis
+    assert len(hashes) == 16 and not sentinel.exists()
+
+
+def test_static_value_output_trimming_preserves_roles_and_reports_retained_rows(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(collector, "MAX_STATIC_EVIDENCE_BYTES", 15_000)
+    for directory, prefix in (("src/app", "operation"), ("tests", "test_value")):
+        write(
+            tmp_path,
+            f"{directory}/many.py",
+            "".join(f"def {prefix}_{i}():\n    assert result() == {i}\n" for i in range(40)),
+        )
+    snapshot = collector.collect(tmp_path)
+    summary = snapshot["facts"]["test_value_static"]
+    analysis = next(
+        row["stats"] for row in snapshot["evidence"] if row["id"] == summary["evidence_id"]
+    )
+    assert len(json.dumps(analysis, sort_keys=True).encode()) <= collector.MAX_STATIC_EVIDENCE_BYTES
+    assert not analysis["bounded"]["definitions"]
+    coverage = analysis["coverage"]
+    assert coverage["definitions_analyzed"] == 80
+    assert coverage["definitions_retained"] == len(analysis["definitions"]) < 80
+    assert coverage["definitions_output_omitted"] == 80 - len(analysis["definitions"])
+    for role in ("test", "production"):
+        counts = coverage["roles"][role]
+        assert counts["definitions_retained"] > 0
+        assert counts["definitions_retained"] == sum(
+            collector.source_role(row["path"])["role"] == role for row in analysis["definitions"]
+        )
+    assert all(area["definitions_retained"] > 0 for area in coverage["areas"])
+
+
+def test_excluded_directory_scope_is_bounded_redacted_and_never_reads_contents(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(collector, "MAX_EXCLUDED_DIRECTORY_PREFIXES", 2)
+    for directory in ("src/app/build", "src/api_key=private-label/credentials", "src/zeta/build"):
+        write(tmp_path, f"{directory}/hidden.py", "raise AssertionError('never inspect')\n")
+    reads = []
+
+    def forbidden_read(*args):
+        reads.append(args)
+        raise AssertionError("Excluded directory contents must not be read")
+
+    monkeypatch.setattr(collector, "_read_at", forbidden_read)
+    snapshot = collector.collect(tmp_path)
+    scope = snapshot["facts"]["collection"]
+    assert not reads
+    assert len(scope["excluded_directory_prefixes"]) == 2
+    assert scope["omitted_excluded_directory_prefixes"] == 1
+    assert "private-label" not in json.dumps(scope)
+    assert any(
+        row["path"] == "[REDACTED SENSITIVE LINE]" for row in scope["excluded_directory_prefixes"]
+    )
+    assert any(row["path"] == "src/app/build" for row in scope["excluded_directory_prefixes"])
+    assert "after configured" in scope["completeness_scope"]
+    assert not any(row["kind"] == "python" for row in snapshot["evidence"])
+
+
+def test_ecosystem_sampling_reaches_later_source_and_manifest_areas(tmp_path, monkeypatch):
+    monkeypatch.setattr(collector, "MAX_STATIC_FILES", 2)
+    for name in ("first", "second", "third"):
+        write(tmp_path, f"src/app/alpha/{name}.py", "import sqlite3\n")
+    write(tmp_path, "src/app/zeta/main.py", "import sqlite3\n")
+    for area, name in (("alpha", "one"), ("alpha", "two"), ("zeta", "three")):
+        write(
+            tmp_path,
+            f"packages/{area}/{name}/pyproject.toml",
+            f'[project]\ndependencies=["{name}>=1"]\n',
+        )
+    snapshot = collector.collect(tmp_path)
+    summary = snapshot["facts"]["ecosystem_fit"]
+    analysis = next(
+        row["stats"] for row in snapshot["evidence"] if row["id"] == summary["evidence_id"]
+    )
+    assert {row["path"] for row in analysis["signals"]} == {
+        "src/app/alpha/first.py",
+        "src/app/zeta/main.py",
+    }
+    assert {row["name"] for row in analysis["dependencies"]} == {"one", "three"}
+    coverage = summary["coverage"]
+    assert coverage["eligible_files"] == 4 and coverage["analyzed_files"] == 2
+    assert coverage["omitted_files"] == 2 and coverage["analyzed_areas"] == 2
+    assert summary["manifest_coverage"]["eligible_files"] == 3
+    assert summary["manifest_coverage"]["omitted_files"] == 1
+    assert analysis["status"] == "partial"
+
+
 def test_captured_unittest_check_basis_and_adapter_identity_do_not_execute_source(tmp_path):
     from project_assess.test_value import static
 

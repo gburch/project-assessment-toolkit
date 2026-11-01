@@ -38,7 +38,7 @@ def test_actual_grammars_parse_four_source_forms_without_executing_them(
 
     assert record["available"] and record["parsed"] and record["status"] == "complete"
     assert record["role"] == "production"
-    assert record["analyzer"]["version"] == "1"
+    assert record["analyzer"]["version"] == "2"
     assert all(record["analyzer"]["packages"].values())
     assert record["module"]["function_count"] == 1
     assert record["functions"][0]["decisions"] == 1
@@ -291,3 +291,132 @@ def test_actual_bundled_report_app_parses_and_fingerprints_without_native_crash(
 
     assert record["parsed"] and record["status"] == "complete"
     assert record["functions"] and any(row["fingerprint"] for row in record["functions"])
+
+
+def test_overview_and_import_context_survive_rich_file_cap(parser_available, monkeypatch):
+    monkeypatch.setattr(javascript, "MAX_FILES", 2)
+    records = [
+        javascript.analyze_javascript(f"src/first/file{number}.ts", "export const value = () => 1;")
+        for number in range(3)
+    ]
+    records.append(
+        javascript.analyze_javascript(
+            "src/last/owner.ts",
+            "import {value} from '../first/file2'; export function run(x) { if(x) return value(); return 0; }",
+        )
+    )
+    before = deepcopy(records)
+
+    result = javascript.summarize_javascript(records)
+
+    assert result == javascript.summarize_javascript(list(reversed(records)))
+    assert records == before
+    assert result["coverage"]["overview_files"] == result["coverage"]["parsed_files"] == 4
+    assert result["coverage"]["functions_total"] == 4
+    assert result["coverage"]["detail_files"] == 2
+    assert result["coverage"]["omitted_detail_files"] == 2
+    assert result["status"] == "partial"
+    assert result["topology"]["complete"]  # Relative-import coverage has its own bound.
+    assert result["topology"]["edges"] == [
+        {
+            "source": "src/last/owner.ts",
+            "target": "src/first/file2.ts",
+            "line": 1,
+            "phase": "static",
+        }
+    ]
+    modules = {row["path"]: row for row in result["modules"]}
+    assert len(modules) == 4
+    assert modules["src/last/owner.ts"]["detail_selected"]
+    assert modules["src/last/owner.ts"]["max_decision_points"] == 1
+    assert sum(row["omitted_function_details"] for row in modules.values()) == 2
+    assert any("rich-file detail limit" in gap for gap in result["gaps"])
+
+
+def test_overview_cap_and_graph_bound_remain_explicit(parser_available, monkeypatch):
+    monkeypatch.setattr(javascript, "MAX_OVERVIEW_FILES", 2)
+    records = [
+        javascript.analyze_javascript(path, "export const value = 1;")
+        for path in ("src/first.ts", "src/second.ts", "src/third.ts")
+    ]
+
+    result = javascript.summarize_javascript(records)
+
+    assert result["coverage"]["javascript_files"] == 3
+    assert result["coverage"]["overview_files"] == 2
+    assert result["status"] == "partial" and not result["topology"]["complete"]
+    assert any("lack AST analysis" in gap for gap in result["gaps"])
+
+
+def test_more_than_one_thousand_captured_modules_keep_overview(parser_available):
+    base = javascript.analyze_javascript("src/base.ts", "export const value = 1;")
+    records = []
+    for number in range(1001):
+        row = deepcopy(base)
+        row["path"] = f"src/file{number:04}.ts"
+        records.append(row)
+
+    result = javascript.summarize_javascript(records)
+
+    assert result["coverage"]["overview_files"] == 1001
+    assert result["coverage"]["detail_files"] == 1000
+    assert result["coverage"]["omitted_detail_files"] == 1
+    assert result["modules"][-1]["path"] == "src/file1000.ts"
+    assert result["status"] == "partial"
+
+
+def test_import_resolution_budget_samples_files_and_keeps_omissions_honest(
+    parser_available, monkeypatch
+):
+    records = [
+        javascript.analyze_javascript(path, source)
+        for path, source in (
+            ("src/early/one.ts", "import '../shared'; import '../other';"),
+            ("src/later/one.ts", "import '../shared';"),
+            ("src/shared.ts", "export const value = 1;"),
+            ("src/other.ts", "export const value = 2;"),
+        )
+    ]
+    monkeypatch.setattr(javascript, "MAX_IMPORTS", 2)
+
+    result = javascript.summarize_javascript(records)
+
+    assert result["coverage"]["overview_files"] == 4
+    assert result["topology"]["imports_examined"] == 2
+    assert result["topology"]["imports_omitted"] == 1
+    assert {edge["source"] for edge in result["topology"]["edges"]} == {
+        "src/early/one.ts",
+        "src/later/one.ts",
+    }
+    assert result["status"] == "partial" and not result["topology"]["complete"]
+    assert any("import target limit" in gap for gap in result["gaps"])
+
+
+def test_rich_file_budget_keeps_test_and_tooling_context_amid_production_flood(
+    parser_available, monkeypatch
+):
+    monkeypatch.setattr(javascript, "MAX_FILES", 4)
+    records = [
+        javascript.analyze_javascript(path, "function run(x) { if(x) return 1; return 0; }")
+        for path in (
+            *(f"src/production/file{number}.ts" for number in range(12)),
+            "src/later/owner.ts",
+            "tests/test_example.ts",
+            "scripts/build.ts",
+        )
+    ]
+
+    result = javascript.summarize_javascript(records)
+
+    assert result == javascript.summarize_javascript(list(reversed(records)))
+    assert result["coverage"]["overview_files"] == len(records)
+    assert result["coverage"]["detail_files"] == 4
+    selected = [row for row in result["modules"] if row["detail_selected"]]
+    assert {row["role"] for row in selected} == {"production", "test", "tooling"}
+    assert {row["path"] for row in selected if row["role"] == "production"} == {
+        "src/later/owner.ts",
+        "src/production/file0.ts",
+    }
+    assert result["coverage"]["functions_analyzed"] == 4
+    assert result["coverage"]["omitted_detail_files"] == len(records) - 4
+    assert result["status"] == "partial"

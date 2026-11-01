@@ -136,6 +136,36 @@ def test_area_and_citation_bounds_are_deterministic_and_never_infer_debt_from_si
     assert not ({"score", "debt", "priority", "capability", "burden"} & larger.keys())
 
 
+def test_full_navigation_preserves_all_areas_dependencies_and_existing_compact_default():
+    paths = [f"src/package/area{i:02}/file.py" for i in range(27)]
+    snapshot = {
+        "evidence": [source(path, f"e-{i}") for i, path in enumerate(paths)]
+        + [
+            analysis(
+                "static-analysis",
+                "e-analysis",
+                [],
+                [
+                    {"source": path, "target": paths[(i + 1) % len(paths)], "line": 1}
+                    for i, path in enumerate(paths)
+                ],
+                complete=False,
+            )
+        ],
+    }
+    before = deepcopy(snapshot)
+    compact = get_system_map(snapshot)
+    full = get_system_map(snapshot, compact=False)
+    assert len(compact["areas"]) == len(compact["cross_area_dependencies"]) == 20
+    assert compact["omitted_areas"] == compact["omitted_cross_area_dependencies"] == 7
+    assert len(full["areas"]) == len(full["cross_area_dependencies"]) == 27
+    assert full["omitted_areas"] == full["omitted_cross_area_dependencies"] == 0
+    assert full["areas"][:20] == compact["areas"]
+    assert full["cross_area_dependencies"][:20] == compact["cross_area_dependencies"]
+    assert full["status"] == compact["status"] == "partial"
+    assert snapshot == before
+
+
 def test_missing_snapshot_fields_and_language_without_native_syntax_remain_unknown():
     empty = get_system_map({})
     assert empty["status"] == "not_collected" and empty["areas"] == [] and empty["gaps"]

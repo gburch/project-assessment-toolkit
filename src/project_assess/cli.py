@@ -93,6 +93,8 @@ def parser():
             "hotspots",
             "coverage",
             "provenance",
+            "areas",
+            "area-dependencies",
         ),
         default="index",
     )

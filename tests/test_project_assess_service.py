@@ -1206,6 +1206,85 @@ def test_evidence_query_exposes_captured_graph_hotspots_and_whole_scope(tmp_path
     assert provenance["items"][0]["source"] == snapshot["source"]
 
 
+def test_area_directories_page_complete_captured_scope_without_rereading_or_changing_scores(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "project"
+    for number in range(27):
+        folder = root / "src" / "package" / f"area{number:02}"
+        folder.mkdir(parents=True)
+        (folder / "module.py").write_text(
+            f"import package.area{(number + 1) % 27:02}.module\n"
+            "def normalize(value):\n    return value\n"
+            "raise RuntimeError('assessment must never execute this file')\n"
+        )
+    for number in range(7):
+        (root / "src/package/area00" / f"extra{number}.py").write_text("VALUE = 1\n")
+    (root / "tests").mkdir()
+    (root / "tests/test_module.py").write_text("assert True\n")
+    service = AssessmentService(tmp_path / "state", [root])
+    snapshot = service.scan(root)
+    reviewed(service, snapshot, capability=3, burden=2)
+    before = service.get_report(snapshot["id"])
+    compact = service.overview(snapshot["id"])["system_map"]
+    assert compact["area_count"] == 27 and compact["omitted_areas"] == 7
+    assert len(compact["cross_area_dependencies"]) == 20
+    assert compact["omitted_cross_area_dependencies"] == 7
+    (root / "src/package/area26/module.py").write_text("raise RuntimeError('new live bytes')\n")
+    monkeypatch.setattr(
+        "project_assess.service.collect", lambda *_args, **_kwargs: pytest.fail("query rescanned")
+    )
+
+    def pages(view):
+        rows, offset = [], 0
+        while True:
+            page = service.query_evidence(snapshot["id"], view=view, offset=offset, limit=7)
+            assert page["source"] == snapshot["source"]
+            assert page["scope_digest"] == snapshot["scope_digest"]
+            assert page["collection_complete"] == snapshot["complete"]
+            assert page["navigation_scope"]["status"] == compact["status"]
+            assert page["matched"] == 27 and 0 < page["returned"] <= 7
+            assert page["remaining"] == 27 - offset - page["returned"]
+            rows.extend(page["items"])
+            if page["next_offset"] is None:
+                assert page["remaining"] == 0
+                return rows
+            assert page["next_offset"] > offset
+            offset = page["next_offset"]
+
+    areas = pages("areas")
+    dependencies = pages("area-dependencies")
+    assert {row["path"] for row in areas} == {
+        f"src/package/area{number:02}" for number in range(27)
+    }
+    assert len({(row["source_area"], row["target_area"]) for row in dependencies}) == 27
+    captured_ids = {row["id"] for row in snapshot["evidence"]}
+    assert all(set(row["evidence_ids"]) <= captured_ids for row in [*areas, *dependencies])
+    assert all(len(row["source_evidence_ids"]) <= 5 for row in areas)
+    larger = next(row for row in areas if row["path"] == "src/package/area00")
+    assert larger["files"] == 8 and larger["omitted_source_evidence_ids"] == 3
+    adjacent = service.query_evidence(
+        snapshot["id"], view="area-dependencies", path="area26", role="production"
+    )
+    assert len(adjacent["items"]) == 2
+    assert {row["source_area"] for row in adjacent["items"]} == {
+        "src/package/area25",
+        "src/package/area26",
+    }
+    assert service.query_evidence(snapshot["id"], view="areas", role="test")["matched"] == 0
+    assert service.get_report(snapshot["id"]) == before
+
+
+@pytest.mark.parametrize("view", ["areas", "area-dependencies"])
+@pytest.mark.parametrize(
+    "options", [{"kind": "python"}, {"candidate_kind": "unused_symbol"}, {"line": 1}]
+)
+def test_area_directory_rejects_filters_that_cannot_slice_aggregated_scope(assessed, view, options):
+    service, _, snapshot = assessed
+    with pytest.raises(ValueError, match="Area directory views support path and role"):
+        service.query_evidence(snapshot["id"], view=view, **options)
+
+
 @pytest.mark.parametrize(
     "options",
     [

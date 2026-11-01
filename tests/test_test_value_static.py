@@ -232,6 +232,62 @@ def test_nested_checks_belong_to_the_nested_definition(tmp_path):
     assert nested["id"].endswith("::test_outer::Inner::test_nested")
 
 
+def test_selected_python_rows_preserve_nested_names_and_skip_unselected_rich_work(
+    tmp_path, monkeypatch
+):
+    from project_assess.test_value import static
+
+    source = (
+        "def test_outer():\n"
+        "    assert outer_result()\n"
+        "    class Inner:\n"
+        "        def test_nested():\n"
+        "            assert nested_result()\n"
+        "def helper():\n"
+        "    return other_result()\n"
+    )
+    tree = ast.parse(source)
+    path = tmp_path / "test_nested.py"
+    all_rows, _, _ = static.python_rows(path, tmp_path, tree)
+    work = []
+    original = static._body_hash
+
+    def track_hash(node):
+        work.append(node.name)
+        return original(node)
+
+    monkeypatch.setattr(static, "_body_hash", track_hash)
+    rows, gaps, _ = static.python_rows(path, tmp_path, tree, selected_lines={4})
+    assert not gaps and rows == [all_rows[1]]
+    assert rows[0]["id"].endswith("::test_outer::Inner::test_nested")
+    assert work == ["test_nested"]
+
+
+def test_selected_javascript_rows_bound_balancing_work_and_preserve_facts(tmp_path, monkeypatch):
+    from project_assess.test_value import static
+
+    source = (
+        "test('first', () => expect(value()).toBe(1));\n"
+        "test('second', () => expect(value()).toBe(2));\n"
+        "test.each([[1], [2]])('matrix', (value) => expect(value).toBeTruthy());\n"
+    )
+    path = tmp_path / "values.test.js"
+    expected, _ = static._js_file(path, tmp_path, source)
+    offsets = static._js_definition_offsets(source)
+    work = []
+    original = static._balanced_end
+
+    def track_balance(masked, start):
+        work.append(start)
+        return original(masked, start)
+
+    monkeypatch.setattr(static, "_balanced_end", track_balance)
+    rows, gaps = static._js_file(path, tmp_path, source, selected_offsets={offsets[-1]})
+    assert not gaps and rows == [expected[-1]]
+    assert rows[0]["kind"] == "js-matrix"
+    assert len(work) == 1
+
+
 def test_static_receipt_versions_additive_assertion_facts(tmp_path):
     from project_assess.test_value import static
 

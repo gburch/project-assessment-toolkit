@@ -17,6 +17,7 @@ from jsonschema import Draft202012Validator
 
 from .collector import collect
 from .confidence import MAX_FINDING_EXCERPT, confidence_assessment, validate_finding_support
+from .dimension_inputs import dimension_inputs
 from .review_context import build_challenge_evidence_index, get_system_map
 from .rubric import DIMENSIONS, PROFILES, RUBRIC_VERSION, rubric
 
@@ -417,6 +418,7 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
         "review_coverage": _review_coverage(review),
         "assessment_method": _assessment_method(review),
         "confidence_assessment": confidence_assessment(assessment, review),
+        "dimension_inputs": dimension_inputs(assessment),
         "system_map": get_system_map(assessment),
         "plan": plan,
         "planning_status": planning_status,
@@ -974,6 +976,7 @@ class AssessmentService:
             "review_coverage": alignment["review_coverage"],
             "assessment_method": _assessment_method(review, compact=True),
             "confidence_assessment": confidence_assessment(assessment, review),
+            "dimension_inputs": alignment["dimension_inputs"],
             "system_map": alignment["system_map"],
             "urgent_findings": [
                 {key: row.get(key) for key in ("severity", "title", "evidence_ids")}
@@ -1034,6 +1037,8 @@ class AssessmentService:
             "hotspots",
             "coverage",
             "provenance",
+            "areas",
+            "area-dependencies",
         }
         if view not in views:
             raise ValueError("Unknown evidence query view")
@@ -1048,6 +1053,11 @@ class AssessmentService:
             raise ValueError("Require offset >= 0, limit 1..100 and max_chars 2000..100000")
         if line is not None and (type(line) is not int or line < 1):
             raise ValueError("line must be a positive integer")
+        navigation_view = view in {"areas", "area-dependencies"}
+        if navigation_view and any(value is not None for value in (kind, candidate_kind, line)):
+            raise ValueError(
+                "Area directory views support path and role filters, not kind, candidate_kind or line"
+            )
         with self._db() as db:
             assessment = self._assessment(db, assessment_id)
         entries = assessment["evidence"]
@@ -1134,7 +1144,7 @@ class AssessmentService:
             for location in row.get("locations", []):
                 candidate_ranges.setdefault(location["path"], []).append(location)
         rows = []
-        for entry in entries:
+        for entry in entries if not navigation_view else []:
             if kind is not None and entry["kind"] != kind:
                 continue
             stats = entry.get("stats", {})
@@ -1203,6 +1213,27 @@ class AssessmentService:
                         **common,
                     }
                 )
+        navigation = None
+        if navigation_view:
+            navigation = get_system_map(assessment, compact=False)
+            if view == "areas":
+                rows = [
+                    {**area, "record_type": "area", "role": "production"}
+                    for area in navigation["areas"]
+                ]
+            else:
+                rows = [
+                    {
+                        **dependency,
+                        "record_type": "area_dependency",
+                        "role": "production",
+                        "locations": [
+                            {"path": dependency["source_area"]},
+                            {"path": dependency["target_area"]},
+                        ],
+                    }
+                    for dependency in navigation["cross_area_dependencies"]
+                ]
         if view == "coverage" and kind is None:
             rows.extend({"record_type": "collection_gap", "gap": gap} for gap in assessment["gaps"])
         if view == "provenance":
@@ -1299,6 +1330,19 @@ class AssessmentService:
                 }
             ],
         }
+        if navigation is not None:
+            result["navigation_scope"] = {
+                "status": navigation["status"],
+                "production_files": navigation["production_files"],
+                "production_areas": navigation["area_count"],
+                "cross_area_dependencies": len(navigation["cross_area_dependencies"]),
+                "excluded_files_by_role": navigation["excluded_files_by_role"],
+                "excluded_nonproduction_or_uncaptured_import_edges": navigation[
+                    "excluded_nonproduction_or_uncaptured_import_edges"
+                ],
+                "citations_per_group": navigation["limits"]["citations_per_group"],
+                "caveat": navigation["caveat"],
+            }
         if view == "snippets" and not filtered:
             result["gap"] = (
                 "No matching source window was captured; the range is unknown. Rescan with a compatible collector or inspect source separately and verify its digest."
@@ -1328,6 +1372,8 @@ class AssessmentService:
         result["returned"] = len(result["items"])
         end = offset + result["returned"]
         result["next_offset"] = end if end < len(filtered) else None
+        if navigation is not None:
+            result["remaining"] = max(0, len(filtered) - end)
         if len(json.dumps(result, indent=2)) > max_chars:
             raise ValueError("Output budget is too small for snapshot identity; raise max_chars")
         return result
@@ -1967,6 +2013,7 @@ class AssessmentService:
                 "omitted_collection_gaps": max(0, len(assessment["gaps"]) - 50),
                 "inventory": assessment["facts"].get("inventory", {}),
                 "system_map": get_system_map(assessment),
+                "dimension_inputs": dimension_inputs(assessment),
                 "evidence_index": selected_evidence["items"],
                 "evidence_selection": selected_evidence["selection"],
                 "omitted_evidence": selected_evidence["selection"]["omitted"],
@@ -2451,6 +2498,30 @@ def _planning_markdown(alignment):
             )
     else:
         lines.append("Review coverage was not recorded.")
+    inputs = alignment.get("dimension_inputs")
+    if inputs:
+        lines += [
+            "",
+            "## Deterministic inputs",
+            "",
+            _markdown_text(inputs["caveat"]),
+            "",
+            "| Dimension | Available evidence providers | Missing analysis and limits |",
+            "| --- | --- | --- |",
+        ]
+        for dimension, row in inputs["dimensions"].items():
+            available = [
+                name for name in row["provider_ids"] if inputs["providers"][name]["evidence_count"]
+            ]
+            lines.append(
+                "| "
+                + _markdown_text(dimension)
+                + " | "
+                + _markdown_text(", ".join(available) or "none collected")
+                + " | "
+                + _markdown_text(" ".join(row["limitations"]))
+                + " |"
+            )
     system = alignment.get("system_map")
     if system:
         lines += [

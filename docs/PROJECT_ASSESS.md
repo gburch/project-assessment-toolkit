@@ -35,6 +35,27 @@ Whole-project maintainability review also traces **systemic debt**: domains, sha
 
 Broad scoring starts with the shared **system map**, a bounded inventory of captured production areas and phased cross-area imports. It helps a reviewer inspect the system before local Doctor candidates; paths and counts do not establish semantic ownership or quality. Reviews record per-dimension coverage (`reviewed`, `partial`, `unreviewed`) with rationale and citations. Whole-project unreviewed dimensions cannot receive numeric grades. Reports and Evolve distinguish broad, partial, focused and unestablished review scope. Legacy records remain readable with breadth unestablished; structural validation does not prove the truth or completeness of a review.
 
+## Scanner coverage
+
+Source discovery, captured bytes, parsed syntax, detailed analysis and source actually inspected by a reviewer have separate scopes. Completeness describes eligible inputs after dependency/build, credential and symlink exclusions; inspect exclusions and unsupported languages as well as budget omissions. An inventory or an analysis row does not establish whole-project understanding.
+
+The brief and shared report alignment expose `dimension_inputs`: a bounded directory of existing evidence providers, their captured IDs/coverage and the analysis missing for each dimension. Shared providers deliberately support multiple questions. Empty providers mean no such evidence was collected, rather than a missing practice in the assessed project.
+
+| Dimension | Deterministic inputs available | Important limits |
+|---|---|---|
+| Security | Declared dependencies, source/configuration, supplied Ruff/SARIF diagnostics | No built-in vulnerability or authorization-boundary analysis; redaction protects collection rather than assessing security |
+| Testing | Test/setup hints, native syntax metrics, supplied JUnit/coverage/test-value results | Sampling, scenario relevance, effectiveness and source binding remain explicit |
+| Documentation | Duplicate text, local links/anchors, captured guidance | Semantic freshness and usability require review or observations |
+| Maintainability | Complexity, imports, reuse, interface/forwarding and dead-code leads | Necessity, rigidity and actual change amplification require caller/change context |
+| Delivery | CI configuration paths, manifest scripts, source and operating guidance | No dedicated gate, release-provenance or rollback-control analysis |
+| Operability | Source/runbooks and shared structural/diagnostic leads | No dedicated health, telemetry or recovery-control inventory |
+| Extensibility | Structure/import/interface hints, declarations and source | Extension and compatibility contracts require actual variant/caller inspection |
+| Performance | Complexity, narrow Python loop-I/O leads and optional models | No complete query/backpressure/contention inventory or generic workload-report importer |
+
+Use `evidence-query ID --view areas` and `--view area-dependencies` with `--offset`/`--limit` to enumerate the complete captured production directory and cross-area import groups. These views accept `--path`; other semantic filters are unsupported. Responses preserve source/scope identity, citation omissions and graph limits. The compact map still shows 20 areas/dependency groups, and the independent challenge packet remains a bounded navigation sample. Continue through `next_offset` and choose source inspections appropriate to the project's workflows before using local Doctor candidates to prioritize work.
+
+Collection version 9 selects test-value and ecosystem inputs across roles and path areas after discovery, reuses the original source parse, and assembles bounded detail after capture. JavaScript retains cheap module overviews beyond its rich-detail budget; generic block comparison distributes its existing window budget across files/areas. Coverage reports distinguish examined detail from retained output. These changes do not add scores or execute assessed code, and they do not make every analysis complete.
+
 ## Local workflow
 
 Requires macOS or Linux, Python 3.11+ and uv. From the PAT checkout:
@@ -46,6 +67,8 @@ uv run --locked pat analyzers
 uv run --locked pat --state-dir /path/outside/repos/assessment-state scan /path/to/project --brief
 uv run --locked pat --state-dir /path/outside/repos/assessment-state list
 uv run --locked pat --state-dir /path/outside/repos/assessment-state report ASSESSMENT_ID --brief
+uv run --locked pat --state-dir /path/outside/repos/assessment-state evidence-query ASSESSMENT_ID --view areas --limit 20
+uv run --locked pat --state-dir /path/outside/repos/assessment-state evidence-query ASSESSMENT_ID --view area-dependencies --limit 20
 uv run --locked pat --state-dir /path/outside/repos/assessment-state evidence-query ASSESSMENT_ID --view coverage
 uv run --locked pat --state-dir /path/outside/repos/assessment-state evidence-query ASSESSMENT_ID --view graph --role production
 uv run --locked pat --state-dir /path/outside/repos/assessment-state evidence-query ASSESSMENT_ID --view candidates --limit 20

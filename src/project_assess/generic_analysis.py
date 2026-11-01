@@ -8,18 +8,20 @@ from __future__ import annotations
 
 import hashlib
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from pathlib import PurePosixPath
 
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "1"
+VERSION = "2"
 MAX_CANDIDATES = 100
 MAX_INDEX = 20_000
 BLOCK_LINES = 12
 BLOCK_STRIDE = 1
 MIN_BLOCK_CHARACTERS = 200
 MAX_LOCATIONS = 20
+MAX_COVERAGE_AREAS = 256
+_ROLE_ORDER = {"production": 0, "unknown": 1, "test": 2, "tooling": 3}
 _LANGUAGES = {
     ".py": "python",
     ".pyi": "python-stub",
@@ -75,6 +77,13 @@ _CAVEAT = (
 
 def source_language(path: str) -> str | None:
     return _LANGUAGES.get(PurePosixPath(path).suffix.lower())
+
+
+def source_area(path: str) -> str:
+    """Use one stable path heuristic for navigation and bounded sampling."""
+    directories = PurePosixPath(path).parts[:-1]
+    start = next((i + 1 for i, part in enumerate(directories) if part in {"src", "lib"}), 0)
+    return "/".join(directories[: start + min(2, len(directories) - start)]) or "(root)"
 
 
 def source_text_facts(path: str, text: str) -> dict:
@@ -139,43 +148,114 @@ def _merged_blocks(groups, file_hashes):
     }
 
 
+def _block_allocations(modules, max_blocks):
+    """Give files area-balanced breadth before weighted deeper comparisons."""
+    grouped = defaultdict(lambda: defaultdict(deque))
+    demands, allocated = {}, Counter()
+    for row in sorted(modules, key=lambda row: row["path"]):
+        path = row["path"]
+        demands[path] = row["block_windows"]
+        if demands[path]:
+            grouped[row["role"]][row["area"]].append(path)
+    order = []
+    # One window per eligible file precedes deeper work on any file. This
+    # ordering also drives the first actual comparison pass under a deadline.
+    for role in sorted(grouped, key=lambda value: (_ROLE_ORDER.get(value, 4), value)):
+        areas = {area: deque(paths) for area, paths in grouped[role].items()}
+        while areas:
+            for area in sorted(areas):
+                path = areas[area].popleft()
+                order.append(path)
+                if len(order) <= max_blocks:
+                    allocated[path] = 1
+                if not areas[area]:
+                    del areas[area]
+    remaining = max(0, max_blocks - sum(allocated.values()))
+    pending, area_order = {}, {}
+    for role, areas in grouped.items():
+        pending[role] = {
+            area: deque(path for path in paths if allocated[path] < demands[path])
+            for area, paths in areas.items()
+        }
+        pending[role] = {area: paths for area, paths in pending[role].items() if paths}
+        area_order[role] = deque(sorted(pending[role]))
+    roles = ["production", "production", "unknown", "test", "tooling"]
+    roles += sorted(set(pending) - set(roles))
+    while remaining and any(area_order.values()):
+        for role in roles:
+            if not remaining or not area_order.get(role):
+                continue
+            area = area_order[role].popleft()
+            paths = pending[role][area]
+            path = paths.popleft()
+            allocated[path] += 1
+            remaining -= 1
+            if allocated[path] < demands[path]:
+                paths.append(path)
+            if paths:
+                area_order[role].append(area)
+    return order, allocated
+
+
+def _window_indices(total, count):
+    """Nested samples retain their first windows as the allocation grows."""
+    if count >= total:
+        return range(total)
+    selected = [0]
+    if count > 1:
+        selected.append(total - 1)
+    intervals = deque([(1, total - 2)])
+    while intervals and len(selected) < count:
+        start, end = intervals.popleft()
+        if start > end:
+            continue
+        middle = (start + end) // 2
+        selected.append(middle)
+        intervals.extend(((start, middle - 1), (middle + 1, end)))
+    return sorted(selected[:count])
+
+
 def summarize_source_text(sources: dict[str, str], *, max_blocks=40_000, deadline=None):
     """Summarize captured text only; retain one shared bound for block comparisons."""
     if type(max_blocks) is not int or not 0 <= max_blocks <= 1_000_000:
         raise ValueError("max_blocks must be an integer between 0 and 1000000")
     modules, candidates, gaps = [], [], []
     files, blocks, file_hashes = defaultdict(list), defaultdict(list), {}
-    block_count, block_limited, timed_out = 0, False, False
-
-    def priority(item):
-        path = item[0]
-        role = source_role(path)["role"]
-        native = source_language(path) in {"python", "javascript", "typescript"}
-        return ({"production": 0, "unknown": 1, "test": 2, "tooling": 3}.get(role, 4), native, path)
-
-    for path, text in sorted(sources.items(), key=priority):
+    block_count, timed_out = 0, False
+    for path, text in sorted(sources.items()):
         facts = source_text_facts(path, text)
-        modules.append({"path": path, **facts})
+        modules.append(
+            {
+                "path": path,
+                **facts,
+                "area": source_area(path),
+                "block_windows": max(0, facts["nonblank_lines"] - BLOCK_LINES + 1),
+                "blocks_examined": 0,
+            }
+        )
         file_hashes[path] = _fingerprint(text)
         # Whole-file equality is inexpensive and retains literal/whitespace differences.
         if facts["nonblank_lines"] >= BLOCK_LINES and len(text) >= MIN_BLOCK_CHARACTERS:
             files[file_hashes[path]].append({"path": path, "line": 1, "end_line": facts["lines"]})
-        if timed_out or block_limited:
-            continue
+    by_path = {row["path"]: row for row in modules}
+    order, allocations = _block_allocations(modules, max_blocks)
+    block_limited = sum(row["block_windows"] for row in modules) > max_blocks
+
+    def examine(path, indices):
+        nonlocal block_count, timed_out
         if deadline is not None and time.monotonic() >= deadline:
             timed_out = True
-            continue
+            return
+        text = sources[path]
         meaningful = [
             (number, line) for number, line in enumerate(text.splitlines(), 1) if line.strip()
         ]
-        for index in range(0, max(0, len(meaningful) - BLOCK_LINES + 1), BLOCK_STRIDE):
-            if block_count >= max_blocks:
-                block_limited = True
-                break
+        for index in indices:
             if deadline is not None and block_count % 256 == 0 and time.monotonic() >= deadline:
                 timed_out = True
                 break
             block_count += 1
+            by_path[path]["blocks_examined"] += 1
             window = meaningful[index : index + BLOCK_LINES]
             # Avoid obvious all-comment/license fragments without pretending to parse comments.
             code_lines = sum(
@@ -194,6 +274,42 @@ def summarize_source_text(sources: dict[str, str], *, max_blocks=40_000, deadlin
                     "_nonblank_end": index + BLOCK_LINES - 1,
                 }
             )
+
+    # Compare one real window in every allocated file before deeper work.
+    # Whole-file equality above remains full-scope even when this phase expires.
+    for path in order:
+        if allocations[path]:
+            examine(path, (0,))
+            if timed_out:
+                break
+    if not timed_out:
+        for path in order:
+            if allocations[path] > 1:
+                indices = _window_indices(by_path[path]["block_windows"], allocations[path])
+                examine(path, (index for index in indices if index))
+                if timed_out:
+                    break
+    areas = {}
+    for row in modules:
+        row["blocks_omitted"] = row["block_windows"] - row["blocks_examined"]
+        key = (row["role"], row["area"])
+        area = areas.setdefault(
+            key,
+            {
+                "path": row["area"],
+                "role": row["role"],
+                "files": 0,
+                "examined_files": 0,
+                "eligible_files": 0,
+                "blocks_examined": 0,
+                "blocks_omitted": 0,
+            },
+        )
+        area["files"] += 1
+        area["eligible_files"] += row["block_windows"] > 0
+        area["examined_files"] += row["blocks_examined"] > 0
+        area["blocks_examined"] += row["blocks_examined"]
+        area["blocks_omitted"] += row["blocks_omitted"]
     roles = {row["path"]: row["role"] for row in modules}
     languages = {row["path"]: row["language"] for row in modules}
     blocks = _merged_blocks(blocks, file_hashes)
@@ -261,7 +377,17 @@ def summarize_source_text(sources: dict[str, str], *, max_blocks=40_000, deadlin
                 sorted(Counter(row["language"] or "unknown" for row in modules).items())
             ),
             "blocks_examined": block_count,
+            "blocks_omitted": sum(row["blocks_omitted"] for row in modules),
+            "eligible_block_files": sum(row["block_windows"] > 0 for row in modules),
+            "block_files_examined": sum(row["blocks_examined"] > 0 for row in modules),
+            "block_files_omitted": sum(
+                row["block_windows"] > 0 and not row["blocks_examined"] for row in modules
+            ),
             "block_analysis_complete": not (block_limited or timed_out),
+            "area_count": len(areas),
+            "areas": list(areas.values())[:MAX_COVERAGE_AREAS],
+            "omitted_areas": max(0, len(areas) - MAX_COVERAGE_AREAS),
+            "sampling": "one_window_per_file_by_role_and_area_then_weighted_area_refill; nested_spread_within_file",
         },
         "modules": sorted(modules, key=lambda row: row["path"]),
         "candidates": retained,
@@ -283,6 +409,7 @@ def summarize_source_text(sources: dict[str, str], *, max_blocks=40_000, deadlin
             "locations_per_candidate": MAX_LOCATIONS,
             "candidates": MAX_CANDIDATES,
             "candidate_index": MAX_INDEX,
+            "coverage_areas": MAX_COVERAGE_AREAS,
         },
         "gaps": gaps,
         "caveat": _CAVEAT,

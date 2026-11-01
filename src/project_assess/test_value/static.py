@@ -323,7 +323,7 @@ def _assertion_nodes(function: ast.FunctionDef | ast.AsyncFunctionDef):
 
 
 def python_rows(
-    path: Path, root: Path, tree: ast.Module
+    path: Path, root: Path, tree: ast.Module, *, selected_lines: set[int] | None = None
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], dict[str, list[str]]]:
     """Index a captured AST without reading files, parsing again or executing source."""
     relative = str(path.relative_to(root))
@@ -346,6 +346,11 @@ def python_rows(
             self._function(node)
 
         def _function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            if selected_lines is not None and node.lineno not in selected_lines:
+                self.parents.append(node.name)
+                self.generic_visit(node)
+                self.parents.pop()
+                return
             qualified = "::".join([relative, *self.parents, node.name])
             case_count, dynamic, decorators = _decorator_info(node)
             assertions = list(ast.walk(node))
@@ -598,15 +603,30 @@ def _first_js_argument(value: str) -> str:
     return value
 
 
+_JS_REGISTRATION = re.compile(r"\b(?:it|test|describe)\s*\(")
+_JS_EACH = re.compile(r"\.each\s*\(")
+
+
+def _js_definition_offsets(text: str) -> list[int]:
+    """Cheap lexical candidates before bounded registration/matrix detail work."""
+    masked = _mask_js(text)
+    return sorted(
+        match.start()
+        for pattern in (_JS_REGISTRATION, _JS_EACH)
+        for match in pattern.finditer(masked)
+    )
+
+
 def _js_file(
-    path: Path, root: Path, text: str
+    path: Path, root: Path, text: str, *, selected_offsets: set[int] | None = None
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     relative = str(path.relative_to(root))
     masked = _mask_js(text)
     rows: list[dict[str, Any]] = []
     gaps: list[dict[str, str]] = []
-    pattern = re.compile(r"\b(?:it|test|describe)\s*\(")
-    for match in pattern.finditer(masked):
+    for match in _JS_REGISTRATION.finditer(masked):
+        if selected_offsets is not None and match.start() not in selected_offsets:
+            continue
         end = _balanced_end(masked, match.end() - 1)
         if end is None:
             gaps.append({"path": relative, "reason": "javascript-unbalanced-registration"})
@@ -622,8 +642,9 @@ def _js_file(
                 "confidence": "low",
             }
         )
-    each_pattern = re.compile(r"\.each\s*\(")
-    for match in each_pattern.finditer(masked):
+    for match in _JS_EACH.finditer(masked):
+        if selected_offsets is not None and match.start() not in selected_offsets:
+            continue
         end = _balanced_end(masked, match.end() - 1)
         if end is None:
             gaps.append({"path": relative, "reason": "javascript-unbalanced-each"})

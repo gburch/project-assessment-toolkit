@@ -136,6 +136,14 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 )
                 assert not queried.is_error and queried.structured_content["returned"] == 1
                 assert queried.structured_content["items"][0]["path"] == "README.md"
+                for view in ("areas", "area-dependencies"):
+                    directory = await session.call_tool(
+                        "query_evidence", {"assessment_id": snapshot["id"], "view": view}
+                    )
+                    assert not directory.is_error
+                    assert directory.structured_content["source"] == snapshot["source"]
+                    assert directory.structured_content["items"] == []
+                    assert directory.structured_content["remaining"] == 0
                 context = await session.call_tool(
                     "inspect_source_context",
                     {

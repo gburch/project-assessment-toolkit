@@ -62,6 +62,10 @@ def test_installed_cli_roundtrip_without_source_path_imports(tmp_path):
     assert json.loads(command("evidence-query", snapshot["id"], "--view", "coverage"))[
         "collection_gap_count"
     ] == len(snapshot["gaps"])
+    for view in ("areas", "area-dependencies"):
+        directory = json.loads(command("evidence-query", snapshot["id"], "--view", view))
+        assert directory["view"] == view and directory["source"] == snapshot["source"]
+        assert directory["items"] == [] and directory["remaining"] == 0
     identity = json.loads(command("info"))
     assert identity["distribution"] == "pat-assess" and identity["code_digest"].startswith(
         "sha256:"

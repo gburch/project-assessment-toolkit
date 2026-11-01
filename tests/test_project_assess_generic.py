@@ -144,3 +144,92 @@ def test_aligned_nonblank_windows_still_merge_across_different_blank_line_spacin
         "src/A.swift": (2, 19),
         "src/B.swift": (2, 36),
     }
+
+
+def test_small_budget_reaches_later_areas_and_reports_exact_window_omissions():
+    sources = {
+        **{
+            f"src/early/file{number}.swift": statements(f"early-{number}") * 10
+            for number in range(3)
+        },
+        "src/later/one.swift": statements("late-one"),
+        "src/later/two.swift": statements("late-two"),
+        "tests/test_example.swift": statements("testing"),
+    }
+
+    result = generic.summarize_source_text(sources, max_blocks=12)
+
+    assert result == generic.summarize_source_text(
+        dict(reversed(list(sources.items()))), max_blocks=12
+    )
+    assert result["coverage"]["blocks_examined"] == 12
+    assert result["coverage"]["block_files_examined"] == len(sources)
+    assert result["coverage"]["block_files_omitted"] == 0
+    modules = {row["path"]: row for row in result["modules"]}
+    assert all(row["blocks_examined"] > 0 for row in modules.values())
+    assert all(
+        row["blocks_examined"] + row["blocks_omitted"] == row["block_windows"]
+        for row in modules.values()
+    )
+    assert result["coverage"]["blocks_omitted"] == sum(
+        row["blocks_omitted"] for row in modules.values()
+    )
+    areas = {row["path"]: row for row in result["coverage"]["areas"]}
+    assert areas["src/later"]["examined_files"] == 2
+    assert areas["src/later"]["blocks_examined"] >= 2
+    assert not result["coverage"]["block_analysis_complete"]
+
+
+def test_later_subtree_reuse_is_found_before_deep_early_file_work():
+    shared = statements("late-copy")
+    sources = {
+        "src/early/huge.swift": statements("early") * 100,
+        "src/later/one.swift": shared + "\noneDistinctEnding();",
+        "src/later/two.swift": shared + "\ntwoDistinctEnding();",
+    }
+
+    result = generic.summarize_source_text(sources, max_blocks=3)
+
+    assert result["coverage"]["blocks_examined"] == 3
+    matches = [row for row in result["candidate_index"] if row["kind"] == "duplicate_source_block"]
+    assert len(matches) == 1
+    assert {location["path"] for location in matches[0]["locations"]} == {
+        "src/later/one.swift",
+        "src/later/two.swift",
+    }
+
+
+def test_zero_block_budget_preserves_full_scope_file_equality():
+    sources = {
+        "src/early/one.java": statements("same"),
+        "src/later/two.java": statements("same"),
+    }
+
+    result = generic.summarize_source_text(sources, max_blocks=0)
+
+    assert result["coverage"]["blocks_examined"] == 0
+    assert result["coverage"]["block_files_omitted"] == 2
+    assert result["coverage"]["blocks_omitted"] == 14
+    duplicates = [
+        row for row in result["candidate_index"] if row["kind"] == "duplicate_source_file"
+    ]
+    assert len(duplicates) == 1
+    assert {location["path"] for location in duplicates[0]["locations"]} == set(sources)
+
+
+def test_deadline_keeps_actual_per_file_coverage_and_whole_file_matches(monkeypatch):
+    sources = {
+        "src/first/a.java": statements("shared"),
+        "src/later/b.java": statements("shared"),
+    }
+    clock = iter([0, 0, 0, 10])
+    monkeypatch.setattr(generic.time, "monotonic", lambda: next(clock, 10))
+
+    result = generic.summarize_source_text(sources, max_blocks=8, deadline=5)
+
+    assert result["status"] == "partial"
+    assert result["coverage"]["block_files_examined"] == 2
+    assert result["coverage"]["blocks_examined"] == 2
+    assert all(row["blocks_examined"] == 1 for row in result["modules"])
+    assert any(row["kind"] == "duplicate_source_file" for row in result["candidate_index"])
+    assert any("deadline" in gap for gap in result["gaps"])

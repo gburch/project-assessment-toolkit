@@ -3,19 +3,12 @@
 from collections import Counter, defaultdict, deque
 from pathlib import PurePosixPath
 
-from .generic_analysis import source_language
+from .generic_analysis import source_area, source_language
 from .static_analysis import source_role
 
 MAX_AREAS = 20
 MAX_DEPENDENCIES = 20
 MAX_CITATIONS = 5
-
-
-def source_area(path):
-    """Use one stable path heuristic for review navigation and bounded sampling."""
-    directories = PurePosixPath(path).parts[:-1]
-    start = next((i + 1 for i, part in enumerate(directories) if part in {"src", "lib"}), 0)
-    return "/".join(directories[: start + min(2, len(directories) - start)]) or "(root)"
 
 
 def _number(value):
@@ -190,8 +183,8 @@ def build_challenge_evidence_index(assessment, change_traces, limit=80):
     }
 
 
-def get_system_map(assessment):
-    """Summarize captured production paths and native imports without reading source."""
+def get_system_map(assessment, *, compact=True):
+    """Group captured production paths/imports; compact=False supplies query paging."""
     evidence = assessment.get("evidence", [])
     analyses = sorted(
         [
@@ -312,6 +305,14 @@ def get_system_map(assessment):
             ids[:MAX_CITATIONS],
             max(0, len(ids) - MAX_CITATIONS),
         )
+    area_rows = sorted(areas.values(), key=lambda row: (-row["files"], row["path"]))
+    dependency_rows = sorted(
+        dependencies.values(),
+        key=lambda row: (-row["import_edges"], row["source_area"], row["target_area"]),
+    )
+    if compact:
+        area_rows = area_rows[:MAX_AREAS]
+        dependency_rows = dependency_rows[:MAX_DEPENDENCIES]
     return {
         "schema_version": 1,
         "status": "not_collected"
@@ -325,13 +326,10 @@ def get_system_map(assessment):
         "production_files": len(production),
         "excluded_files_by_role": dict(sorted(excluded.items())),
         "area_count": len(areas),
-        "areas": sorted(areas.values(), key=lambda row: (-row["files"], row["path"]))[:MAX_AREAS],
-        "omitted_areas": max(0, len(areas) - MAX_AREAS),
-        "cross_area_dependencies": sorted(
-            dependencies.values(),
-            key=lambda row: (-row["import_edges"], row["source_area"], row["target_area"]),
-        )[:MAX_DEPENDENCIES],
-        "omitted_cross_area_dependencies": max(0, len(dependencies) - MAX_DEPENDENCIES),
+        "areas": area_rows,
+        "omitted_areas": len(areas) - len(area_rows),
+        "cross_area_dependencies": dependency_rows,
+        "omitted_cross_area_dependencies": len(dependencies) - len(dependency_rows),
         "excluded_nonproduction_or_uncaptured_import_edges": excluded_edges,
         "native_import_graphs": graphs,
         "collection": {
@@ -354,8 +352,8 @@ def get_system_map(assessment):
             ]
         ),
         "limits": {
-            "areas": MAX_AREAS,
-            "dependencies": MAX_DEPENDENCIES,
+            "areas": MAX_AREAS if compact else None,
+            "dependencies": MAX_DEPENDENCIES if compact else None,
             "citations_per_group": MAX_CITATIONS,
         },
         "caveat": "Path/role heuristics are orientation, not semantic domains, debt, grades or priority. Counts cover captured records; partial module counts can be lower bounds and unknown function counts remain unknown. Native static import phases are not runtime calls or cycle proof. Larger areas need not have more debt.",

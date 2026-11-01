@@ -74,6 +74,8 @@ def test_review_replay_cannot_substitute_an_authorized_assessment(tmp_path):
         "badge",
         "evidence",
         "evidence_query",
+        "area_query",
+        "area_dependency_query",
         "overview",
         "source_context",
         "history",
@@ -102,6 +104,10 @@ def test_revoked_imported_report_authority_is_rechecked_on_saved_reads(
         "badge": lambda: restricted.get_badge(snapshot["id"]),
         "evidence": lambda: restricted.evidence(snapshot["id"]),
         "evidence_query": lambda: restricted.query_evidence(snapshot["id"], view="provenance"),
+        "area_query": lambda: restricted.query_evidence(snapshot["id"], view="areas"),
+        "area_dependency_query": lambda: restricted.query_evidence(
+            snapshot["id"], view="area-dependencies"
+        ),
         "overview": lambda: restricted.overview(snapshot["id"]),
         "source_context": lambda: restricted.source_context(
             snapshot["id"], snapshot["evidence"][0]["id"]

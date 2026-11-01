@@ -112,7 +112,7 @@ def create_mcp(service):
         limit: int = 20,
         max_chars: int = 24000,
     ) -> dict[str, Any]:
-        """Page captured index/details/candidates/snippets/graph/hotspots/coverage/provenance. kind filters evidence; candidate_kind filters leads. path is a substring; roles are production/test/tooling/unknown heuristics. Source is never reread. max_chars bounds serialized output."""
+        """Page captured index/details/candidates/snippets/graph/hotspots/coverage/provenance or complete areas/area-dependencies directories. Area directories support path/role filters; other views also accept kind/candidate_kind/line. path is a substring; roles are production/test/tooling/unknown heuristics. Source is never reread. max_chars bounds serialized output."""
         return service.query_evidence(
             assessment_id,
             view=view,
