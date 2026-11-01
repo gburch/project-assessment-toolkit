@@ -116,6 +116,8 @@ def test_badges_are_deterministic_shields_data_and_accessible_standalone_svg(rep
         "desc",
         "rect",
         "path",
+        "circle",
+        "ellipse",
         "g",
         "text",
     }
@@ -129,8 +131,9 @@ def test_badges_are_deterministic_shields_data_and_accessible_standalone_svg(rep
         visible = visible_text(card)
         if dimension == "summary":
             assert "8/8" in visible and "known" in visible.lower()
-            assert re.search(r"0\s+critical", visible, re.IGNORECASE)
-            assert re.search(r"0\s+high", visible, re.IGNORECASE)
+            assert "2026-10-30" in visible
+            # Zero counts are not shown: absent reports are not a clean bill of health.
+            assert "critical" not in visible.lower()
         else:
             assert "Capability" in visible and "Burden" in visible
             assert "3/5" in visible and "2/5" in visible

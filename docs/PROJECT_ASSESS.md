@@ -166,23 +166,27 @@ substantive assessment in the response, with the interactive HTML link alongside
 Keep assessed source outside the state directory too; state and its exports are
 reserved for PAT's own writes.
 
-The HTML report opens directly from disk without network access. **Compare
-dimensions** shows all eight named dimensions with separate capability and burden
-tracks, exact scores, target markers, directional gaps and declared confidence.
-Known scores remain visible when the other axis is unknown. Select a row to inspect
-recommendations, rationale, burden evidence and what would strengthen confidence;
-on mobile its explanation appears directly below that row. Descriptive gap counts
-can overlap and do not form an overall grade or priority ranking.
+The HTML report opens directly from disk without network access. It leads with the
+authored verdict, today's and intended purpose, and the plan's initiatives as **Do
+next** cards. **Dimensions** draws each capability and upkeep burden as a level
+vial: the shaded zone is the saved target, the better end is always on the right
+(burden runs heavy to light), and an arrow shows a gap. A filled marker means high
+confidence, half-filled medium and hollow low; a dashed outline marks a source
+estimate. Unknown scores get an empty vial and never sit at zero. Select a row to
+expand its rationale, linked initiatives, next steps and evidence. Findings, the
+full improvement plan, purpose and fit, coverage, downloads and snapshot identity
+follow, collapsed until opened.
 
-**Explore in 3D** starts the optional Three.js view. Engineering dimension,
-capability height and burden depth are independent axes. Drag to rotate or use the
-capability and burden projections; named lanes and selection stay synchronized with
-the comparison. The selected goal region represents a capability minimum and burden
-ceiling. Guides show actual deficits, never a need to reduce extra capability or
-raise low burden. Unknown axes stay unpositioned rather than becoming zero. The
-comparison works without WebGL, and 3D does not start until requested.
+**Level map** plots every dimension by burden and capability on one chart; scores
+that coincide share a numbered marker, and repeated clicks step through them.
+**What moved** is the optional Three.js view: each snapshot of the project, up to
+twelve, is one level map stacked back in time, with a path per dimension. Ratings
+from a different rubric, or snapshots without a review, appear as empty layers.
+Presets show the latest snapshot, capability over time and burden over time; drag
+to orbit. 3D does not start until requested, and the other views work without
+WebGL.
 
-The local workspace also shows the badges and both views, with unsaved target previews
+The local workspace also shows the badges and the same views, with unsaved target previews
 clearly labeled; only **Save goals** changes the stored targets. **Download
 interactive report** returns the same offline HTML. Reports and JSON can contain
 private source evidence: exporting is not publication. Three.js is bundled locally

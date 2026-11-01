@@ -101,7 +101,7 @@ async function assertImages(page, selector) {
   await expect.poll(() => page.locator(selector).evaluateAll((images) => images.every((image) => image.complete && image.naturalWidth > 0))).toBe(true);
 }
 async function assertProjectContext(page) {
-  const section = page.locator('section[aria-labelledby="project-context-heading"]');
+  const section = page.locator('section[aria-labelledby="project-context-heading"], details#purpose');
   await expect(section.locator(".context-summary article").first()).toContainText("Personal application · Prototype");
   await expect(section.locator(".context-summary article").last()).toContainText("Personal application");
   await expect(section.locator(".context-summary article").last()).toContainText("User-stated");
@@ -121,24 +121,25 @@ async function assertInspectorPlacement(page, dimension) {
   await expect.poll(() => map.evaluate((node, id) => {
     const detail = node.querySelector(".dm-detail");
     const selected = node.querySelector(`.dm-dimension[data-dimension="${id}"]`);
-    return matchMedia("(max-width: 940px)").matches && node.dataset.mode === "compare"
+    return node.dataset.mode === "compare"
       ? selected.nextElementSibling === detail
       : detail.parentElement.classList.contains("dm-workspace");
-  }, dimension), { message: "inspector must stay beside desktop exploration or immediately after the selected mobile row" }).toBe(true);
+  }, dimension), { message: "rows must expand in place; map views keep the inspector beside the picture" }).toBe(true);
 }
 async function assertComparison(page, { guides = "4", fresh = true } = {}) {
   const map = page.locator("#dimension-map");
   await expect(map).toHaveAttribute("data-mode", "compare");
-  await expect(map.getByRole("button", { name: "Compare dimensions", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await expect(map.getByRole("button", { name: "Explore in 3D", exact: true })).toHaveAttribute("aria-pressed", "false");
+  await expect(map.getByRole("button", { name: "Dimensions", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(map.getByRole("button", { name: "What moved", exact: true })).toHaveAttribute("aria-pressed", "false");
   if (fresh) await expect(map.locator("canvas")).toHaveCount(0);
   await expect(map.locator(".dm-dimension")).toHaveCount(8);
   await expect(map).toHaveAttribute("data-current-count", "7");
   await expect(map).toHaveAttribute("data-goal-count", "8");
   await expect(map).toHaveAttribute("data-guide-count", guides);
-  await expect(map.locator(".dm-summary")).toContainText(`${guides === "4" ? 3 : 2} of 7 capabilities below minimum`);
-  await expect(map.locator(".dm-summary")).toContainText(`${guides} of 8 burdens above ceiling`);
-  await expect(map.locator(".dm-summary")).toContainText("1 of 8 dimensions have unknown scores");
+  await expect(map.locator(".dm-summary")).toContainText(`${guides === "4" ? 4 : 5} of 8 level`);
+  await expect(map.locator(".dm-summary")).toContainText(`${guides === "4" ? 3 : 2} below capability target`);
+  await expect(map.locator(".dm-summary")).toContainText(`${guides} over burden ceiling`);
+  await expect(map.locator(".dm-summary")).toContainText("1 unknown");
   await expect(map.locator(".dm-axis-capability .dm-current")).toHaveCount(7);
   await expect(map.locator(".dm-axis-burden .dm-current")).toHaveCount(8);
   await expect(map.locator(".dm-axis-capability .dm-target")).toHaveCount(8);
@@ -162,13 +163,14 @@ async function assertComparison(page, { guides = "4", fresh = true } = {}) {
   await expect(operability.locator(".dm-axis-burden .dm-current")).toHaveCount(1);
   await expect(operability.locator(".dm-axis-burden .dm-axis-gap")).toHaveText("Reduce burden by 2 steps");
   await operability.click();
-  await expect(map.locator(".dm-gap-summary")).toContainText("Goal distance: capability unknown, burden −2 rubric steps");
+  await expect(map.locator(".dm-gap-summary")).toContainText("Gap: capability unknown · burden −2");
   await assertInspectorPlacement(page, "operability");
   const extensibility = map.locator('.dm-dimension[data-dimension="extensibility"]');
   await expect(extensibility.locator(".dm-axis-burden")).toContainText("0 / 5");
   await expect(extensibility.locator(".dm-axis-burden .dm-current")).toHaveCount(1);
   await expect(extensibility.locator(".dm-axis-burden .dm-current")).toHaveAttribute("data-value", "0");
-  assert.equal(await extensibility.locator(".dm-axis-burden .dm-current").evaluate((mark) => mark.style.left), "0%");
+  // Burden runs heavy to light, so the lightest burden sits at the right end.
+  assert.equal(await extensibility.locator(".dm-axis-burden .dm-current").evaluate((mark) => mark.style.left), "100%");
   await extensibility.focus();
   await page.keyboard.press("Enter");
   await expect(map).toHaveAttribute("data-selected-dimension", "extensibility");
@@ -178,9 +180,26 @@ async function assertComparison(page, { guides = "4", fresh = true } = {}) {
 }
 async function explore3d(page) {
   const map = page.locator("#dimension-map");
-  await map.getByRole("button", { name: "Explore in 3D", exact: true }).click();
+  await map.getByRole("button", { name: "What moved", exact: true }).click();
   await expect(map).toHaveAttribute("data-mode", "3d");
-  await expect(map.getByRole("button", { name: "Explore in 3D", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(map.getByRole("button", { name: "What moved", exact: true })).toHaveAttribute("aria-pressed", "true");
+}
+async function assertLevelMap(page) {
+  const map = page.locator("#dimension-map");
+  await map.getByRole("button", { name: "Level map", exact: true }).click();
+  await expect(map).toHaveAttribute("data-mode", "map");
+  await assertInspectorPlacement(page, await map.getAttribute("data-selected-dimension"));
+  // Seven known points; maintainability and performance share one position.
+  await expect(map.locator(".dm-cluster")).toHaveCount(6);
+  const shared = map.getByRole("button", { name: /^Maintainability, Performance & Scalability: capability 1, burden 3/ });
+  await shared.click();
+  await expect(map).toHaveAttribute("data-selected-dimension", "maintainability");
+  await shared.click();
+  await expect(map).toHaveAttribute("data-selected-dimension", "performance");
+  await expect(map.locator(".dm-levelmap .dm-note")).toContainText("Operability");
+  await expect(map.locator(".dm-plot-gap")).toHaveCount(1);
+  await map.getByRole("button", { name: "Dimensions", exact: true }).click();
+  await map.locator('.dm-dimension[data-dimension="extensibility"]').click();
 }
 async function assertMap(page) {
   const map = page.locator("#dimension-map");
@@ -202,30 +221,35 @@ async function assertMap(page) {
   await map.getByRole("combobox", { name: "Inspect dimension", exact: true }).selectOption("operability");
   await expect(map.locator(".dm-detail")).toContainText("Unknown");
   await expect(map.locator(".dm-detail")).toContainText("4 / 5");
-  await expect(map.locator(".dm-gap-summary")).toContainText("Goal distance: capability unknown, burden −2 rubric steps");
-  await expect(map.locator(".dm-status")).toContainText("not positioned at zero");
+  await expect(map.locator(".dm-gap-summary")).toContainText("Gap: capability unknown · burden −2");
+  await expect(map.locator(".dm-stage-note")).toContainText("not positioned at zero");
+  await expect(map).toHaveAttribute("data-snapshot-count", "1");
   await map.getByRole("combobox", { name: "Inspect dimension", exact: true }).selectOption("security");
-  await map.getByRole("button", { name: "Compare dimensions", exact: true }).click();
+  await map.getByRole("button", { name: "Dimensions", exact: true }).click();
   await map.locator(".dm-dimension[data-dimension=testing]").focus();
   await expect(map.locator(".dm-dimension[data-dimension=testing]")).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(map).toHaveAttribute("data-selected-dimension", "testing");
-  await expect(map.locator(".dm-detail")).toContainText("capability +2, burden −2");
+  await expect(map.locator(".dm-detail")).toContainText("Gap: capability +2 · burden −2");
   await expect(map.locator(".dm-rationale")).toContainText("</script><script>window.pwned=1</script>");
   assert.equal(await page.evaluate(() => window.pwned), undefined);
   await explore3d(page);
-  await map.getByRole("button", { name: "3D overview", exact: true }).click();
+  await map.getByRole("button", { name: "Angle", exact: true }).click();
   await settle(page);
   const canvas = map.locator("canvas");
   const original = digest(await canvas.screenshot());
-  await map.getByRole("button", { name: "Capability view", exact: true }).click();
+  await map.getByRole("button", { name: "Latest", exact: true }).click();
   await settle(page);
   const front = digest(await canvas.screenshot());
-  assert.notEqual(front, original, "capability preset must change actual rendered geometry");
-  await map.getByRole("button", { name: "Burden view", exact: true }).click();
+  assert.notEqual(front, original, "latest preset must change actual rendered geometry");
+  await map.getByRole("button", { name: "Capability over time", exact: true }).click();
   await settle(page);
-  assert.notEqual(digest(await canvas.screenshot()), front, "burden preset must change actual rendered geometry");
-  await map.getByRole("button", { name: "Reset view", exact: true }).click();
+  const side = digest(await canvas.screenshot());
+  assert.notEqual(side, front, "capability-over-time preset must change actual rendered geometry");
+  await map.getByRole("button", { name: "Burden over time", exact: true }).click();
+  await settle(page);
+  assert.notEqual(digest(await canvas.screenshot()), side, "burden-over-time preset must change actual rendered geometry");
+  await map.getByRole("button", { name: "Angle", exact: true }).click();
   await settle(page);
   const beforeDrag = digest(await canvas.screenshot());
   const box = await canvas.boundingBox();
@@ -240,7 +264,7 @@ async function assertMap(page) {
     left: parseFloat(item.style.left), top: parseFloat(item.style.top),
   }));
   const exploredProjection = await selectedProjection();
-  await map.getByRole("button", { name: "Compare dimensions", exact: true }).click();
+  await map.getByRole("button", { name: "Dimensions", exact: true }).click();
   await expect(map).toHaveAttribute("data-selected-dimension", "testing");
   await assertInspectorPlacement(page, "testing");
   await explore3d(page);
@@ -250,7 +274,7 @@ async function assertMap(page) {
   const restoredProjection = await selectedProjection();
   for (const axis of ["left", "top"]) assert(Math.abs(restoredProjection[axis] - exploredProjection[axis]) < 0.5,
     "switching comparison and 3D must preserve the explored camera projection");
-  await expect(map.getByRole("button", { name: "3D overview", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(map.getByRole("button", { name: "Angle", exact: true })).toHaveAttribute("aria-pressed", "true");
 }
 
 let browser;
@@ -266,6 +290,8 @@ try {
   await assertImages(page, "#badges img");
   await assertComparison(page);
   await accessibility(page, "live comparison desktop accessibility");
+  await assertLevelMap(page);
+  await accessibility(page, "live level map accessibility");
   await page.locator("#dimension-map").locator("..").screenshot({ path: path.join(output, "pat-compare-desktop.png") });
   for (const colorScheme of ["light", "dark"]) {
     await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
@@ -347,6 +373,7 @@ try {
   await assertImages(standalone, ".badges img");
   await assertComparison(standalone);
   await accessibility(standalone, "offline comparison report accessibility");
+  await assertLevelMap(standalone);
   await standalone.locator("#dimension-map").locator("..").screenshot({ path: path.join(output, "pat-compare-offline.png") });
   await explore3d(standalone);
   await assertMap(standalone);
