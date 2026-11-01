@@ -22,6 +22,8 @@ RUBRIC_VERSION = "5"
 _BURDEN_GUIDANCE = {
     "principle": (
         "Burden measures upkeep, coordination and friction, including justified safeguards. "
+        "A necessary control can still impose costly or obstructive burden; justification "
+        "guides the remedy, not a discount to experienced cost. "
         "All burden anchors permit source-supported estimates; time logs are not required. "
         "Cite concrete work implied by the inspected design or workflow, not artifact counts alone."
     ),
@@ -42,7 +44,21 @@ _BURDEN_GUIDANCE = {
     "confidence": (
         "Rate burden confidence independently of capability confidence. Use low confidence for "
         "limited source inference, and increase it when inspected workflows, history or direct "
-        "observations corroborate the cost. Levels 4–5 need evidence of dominating burden."
+        "observations corroborate the cost. Missing measurements lower confidence, not burden; "
+        "a manageable rating needs affirmative support, not merely an intended fast path. "
+        "Levels 4–5 need evidence of dominating burden, which may include attributed maintainer "
+        "experience; do not invent precise effort shares."
+    ),
+    "calibration": (
+        "Distinguish documented intended workflows, attributed maintainer experience and "
+        "independently verified measurements. Reconcile contrary experience before retaining "
+        "a lower rating. Trace focused iteration, required final gates, setup, queue waits, "
+        "reruns and recovery; assess their frequency and effect on valuable changes. "
+        "Required feedback waits count as burden even when tests and controls are effective. "
+        "Separate absolute runtime from the share of change cycles it obstructs. "
+        "Large or historically layered modules warrant ownership/change-path inspection; "
+        "neither counts alone nor the absence of incident receipts establishes their cost. "
+        "Shared causes can affect several dimensions, but must not be summed as independent costs."
     ),
     "examples": {
         "simple_source": (
