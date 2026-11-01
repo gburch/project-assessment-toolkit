@@ -66,6 +66,56 @@ Use `evidence-query ID --view burden --dimension testing` (any of the eight dime
 
 Import attributable maintainer or contributor experience with `scan ROOT --report FILE` using [`pat.burden-context.v1`](../.agents/skills/project-assess/references/burden-evidence.md). Keep reports outside assessed repositories. Record attribution, report time, experience period, scope, frequency, workflow stage, timing semantics and limitations without inventing measurements. Unknown source identity or dates remain explicit gaps. A joint “tests OR security on most changes” claim does not establish individual frequency for both; summed testcase time is not wall time or blocked waiting. A matching revision does not authenticate the reporter or establish current applicability.
 
+## Project maturity and intended purpose
+
+PAT combines the bundled `project-maturity` and `project-intent` skills before
+choosing an engineering roadmap. The first establishes realized scope and
+readiness; the second establishes the intended destination and ranks the useful
+work to align them. Use `pat skills` to locate the selected build's entry points,
+and `pat --state-dir STATE rubric` for their versioned anchors.
+
+| Scope milestone | What distinguishes it |
+| --- | --- |
+| Exploration | An idea or bounded proof whose supported use is not established. |
+| Personal utility | One owner performs a focused job. |
+| Personal application | One owner relies on connected application workflows. |
+| Shared tool | Other people can independently perform a bounded job. |
+| Team application | Collaborators share workflows, state or responsibilities. |
+| Public / commercial application | Independent users receive a supported product lifecycle; payment is optional. |
+| Extension platform | Others build integrations or extensions through supported contracts. |
+| Ecosystem foundation | Independent authors/operators rely on sustained compatibility and lifecycle commitments. |
+
+These are branching scope landmarks, not prestige grades or a mandatory ladder.
+Readiness is assessed separately: **sketch → prototype → working → dependable →
+operated → proven**, with evidence and confidence. A dependable personal utility
+may be the right endpoint; a platform prototype can still need its first reliable
+tests. Age, file counts, framework choices and billing code do not establish a
+milestone, adoption or runtime effectiveness.
+
+Current explicit owner intent takes precedence over repository aspirations.
+Otherwise the reviewer records documented intent or a provisional inference from
+actual workflows, callers and constraints, with alternatives and limitations.
+Unknown intent remains unknown when evidence cannot support a useful inference;
+it does not block a provisional diagnosis. README claims do not prove customers
+or deployment, and historical AI-generated plans are revisable.
+
+The optional versioned `review.project_context` holds `current`, `intended` and
+`alignment`. Review templates include unjudged defaults; old reviews remain
+unestablished. Current judgments and documented/inferred intentions cite the
+captured snapshot. Owner-stated intent can instead have explicit attribution.
+Ordered priority areas explain their direction and rationale and can reference
+the existing `plan.initiatives`; deferred work identifies later-scope machinery
+that is unnecessary now. Reports, Doctor and Evolve share this context.
+
+Rank applicable critical obligations, blocked valuable workflows, demonstrated
+burden and dependencies of the intended next state. Consider underinvestment and
+overinvestment together. Personal intent does not remove active-data or security
+guarantees; platform ambitions do not automatically justify a plugin framework or
+microservices. Context does not change the eight engineering ratings, badges,
+3D axes, existing capability minima or burden ceilings. Numerical goals are saved
+only after user selection. A context clarification records assessment progress,
+not engineering progress.
+
 ## Local workflow
 
 When asking an agent to "run PAT", expect a reviewed assessment: an inline verdict,

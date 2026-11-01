@@ -22,9 +22,9 @@ _LABELS = {
 }
 _STYLE = """
 :root{color-scheme:light dark;--bg:#f5f4ef;--surface:#fffefa;--text:#202e34;--muted:#52656b;--line:#ccd6d5;--accent:#08615b;--accent-text:#fff;--focus:#08615b;--warn:#8c3927;font:16px/1.6 system-ui,-apple-system,sans-serif}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}main{max-width:1120px;margin:auto;padding:2rem}h1,h2,h3{line-height:1.25;overflow-wrap:anywhere}h1{font-size:2.2rem;letter-spacing:-.04em;margin:.25rem 0}h2{margin-top:0}section{margin:2rem 0 3rem}p,li,td,th,summary{overflow-wrap:anywhere}a{color:var(--accent)}.secondary{color:var(--muted)}.eyebrow{letter-spacing:.1em;text-transform:uppercase;color:var(--accent);font-size:.8rem}.badges{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center}.badges img{max-width:100%;height:auto}table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,td{text-align:left;vertical-align:top;padding:.65rem .4rem;border-bottom:1px solid var(--line)}.table-wrap{overflow-x:auto}details{margin:1rem 0}summary{cursor:pointer;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.85rem;padding:1rem;background:var(--surface);border:1px solid var(--line);border-radius:.5rem}code{overflow-wrap:anywhere}.finding,.initiative{padding:1rem 0;border-bottom:1px solid var(--line)}button,input,select{font:inherit}button:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}main{max-width:1120px;margin:auto;padding:2rem}h1,h2,h3{line-height:1.25;overflow-wrap:anywhere}h1{font-size:2.2rem;letter-spacing:-.04em;margin:.25rem 0}h2{margin-top:0}section{margin:2rem 0 3rem}p,li,td,th,summary{overflow-wrap:anywhere}a{color:var(--accent)}.secondary{color:var(--muted)}.eyebrow{letter-spacing:.1em;text-transform:uppercase;color:var(--accent);font-size:.8rem}.badges{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center}.badges img{max-width:100%;height:auto}table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,td{text-align:left;vertical-align:top;padding:.65rem .4rem;border-bottom:1px solid var(--line)}.table-wrap{overflow-x:auto}details{margin:1rem 0}summary{cursor:pointer;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.85rem;padding:1rem;background:var(--surface);border:1px solid var(--line);border-radius:.5rem}code{overflow-wrap:anywhere}.context-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem 2rem}.context-summary article{min-width:0}.context-priorities li{padding:.3rem 0}.context-priorities p{margin:.3rem 0}.finding,.initiative{padding:1rem 0;border-bottom:1px solid var(--line)}button,input,select{font:inherit}button:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
 @media(prefers-color-scheme:dark){:root{--bg:#152126;--surface:#1c2c31;--text:#e8f1ee;--muted:#b1c6c3;--line:#405557;--accent:#8edbd0;--accent-text:#122e2a;--focus:#8edbd0;--warn:#ffbba7}}
-@media(max-width:540px){main{padding:1rem}h1{font-size:1.8rem}th,td{padding:.5rem .25rem;font-size:.88rem}.badges{display:grid;grid-template-columns:1fr}}
+@media(max-width:540px){.context-summary{grid-template-columns:1fr}main{padding:1rem}h1{font-size:1.8rem}th,td{padding:.5rem .25rem;font-size:.88rem}.badges{display:grid;grid-template-columns:1fr}}
 """
 
 
@@ -108,11 +108,114 @@ def _value(value):
     return "Unknown" if value is None else f"{value} / 5"
 
 
+def _context_html(context):
+    """Present the shared authored context; this renderer assigns no milestones."""
+    lines = [
+        '<section aria-labelledby="project-context-heading"><h2 id="project-context-heading">Project maturity and intended purpose</h2>'
+    ]
+    if context.get("status") != "recorded":
+        lines.append(
+            "<p>No maturity or intended-purpose judgment is recorded for this review. Existing engineering scores are unchanged.</p>"
+        )
+    else:
+        current, intended = context["current"], context["intended"]
+        lines += [
+            '<div class="context-summary"><article><h3>Current codebase</h3><p><strong>'
+            + _text(current.get("milestone_label", "Unknown"))
+            + " · "
+            + _text(current.get("readiness_label", "Unknown"))
+            + "</strong></p><p>Declared confidence: "
+            + _text(current["confidence"])
+            + "</p><p>"
+            + _text(current["rationale"])
+            + '</p><p class="secondary">Evidence: '
+            + _text(", ".join(current["evidence_ids"]) or "none recorded")
+            + "</p></article><article><h3>Intended destination</h3><p><strong>"
+            + _text(intended.get("milestone_label", "Unknown"))
+            + "</strong></p><p>Basis: "
+            + _text(intended.get("basis_label", "Unknown"))
+            + "; declared confidence: "
+            + _text(intended["confidence"])
+            + "</p><p>"
+            + _text(intended["statement"])
+            + "</p>",
+        ]
+        if intended.get("attribution"):
+            lines.append("<p>Attribution: " + _text(intended["attribution"]) + "</p>")
+        lines.append(
+            '<p class="secondary">Evidence: '
+            + _text(", ".join(intended["evidence_ids"]) or "no captured source citation")
+            + "</p></article></div>"
+        )
+        alignment = context["alignment"]
+        lines += [
+            "<h3>Fit and ranked focus</h3><p><strong>"
+            + _text(alignment.get("direction_label", "Unknown"))
+            + "</strong> — "
+            + _text(alignment["rationale"])
+            + "</p>"
+        ]
+        if alignment["priorities"]:
+            lines.append('<ol class="context-priorities">')
+            for priority in alignment["priorities"]:
+                lines.append(
+                    "<li><strong>"
+                    + _text(priority.get("dimension_label", "Unknown"))
+                    + " · "
+                    + _text(priority.get("direction_label", "Unknown"))
+                    + "</strong><p>"
+                    + _text(priority["rationale"])
+                    + "</p>"
+                )
+                if priority["initiative_ids"]:
+                    lines.append(
+                        '<p class="secondary">Plan initiatives: '
+                        + ", ".join(
+                            '<a href="#initiative-'
+                            + _text(identity)
+                            + '">'
+                            + _text(identity)
+                            + "</a>"
+                            for identity in priority["initiative_ids"]
+                        )
+                        + "</p>"
+                    )
+                lines.append("</li>")
+            lines.append("</ol>")
+        else:
+            lines.append("<p>No ranked focus areas are recorded.</p>")
+        for title, values in (
+            ("Deferred work", alignment["deferred"]),
+            ("Alternative goals", intended["alternatives"]),
+            ("Intent limitations", intended["limitations"]),
+        ):
+            if values:
+                lines.append("<h3>" + title + "</h3>" + _list(values))
+    if context.get("gaps"):
+        lines.append("<h3>Context gaps</h3>" + _list(context["gaps"]))
+    lines.append(
+        '<p class="secondary">'
+        + _text(
+            context.get(
+                "profile_note",
+                "Scope milestones are not quality grades or required growth steps. Existing numeric goals remain independent.",
+            )
+        )
+        + "</p></section>"
+    )
+    return "\n".join(lines)
+
+
 def report_html(report):
     """Render an offline document with no external resources or executable report text."""
     from .service import markdown_report
 
     model = dimension_map_data(report)
+    from .project_context import project_context_assessment
+
+    context = project_context_assessment(
+        report["assessment"], report.get("review"), report.get("goals")
+    )
     assessment, review = report["assessment"], report.get("review") or {}
     badges = badge_assets(report)
     bundle = _asset_text("dimension-map.generated.js")
@@ -183,9 +286,10 @@ def report_html(report):
             else " Collection is partial; inspect the retained scope and gaps."
         )
         + "</p>",
-        '<div class="badges">' + badge_image("summary") + "</div></header>",
-        '<section aria-label="Dimension badges"><div class="badges">'
-        + "".join(badge_image(d) for d in DIMENSIONS)
+        "</header>",
+        _context_html(context),
+        '<section aria-label="Assessment badges"><div class="badges">'
+        + "".join(badge_image(d) for d in ("summary", *DIMENSIONS))
         + "</div></section>",
         '<section aria-labelledby="map-heading"><h2 id="map-heading">Explore capability and burden</h2>'
         '<div id="dimension-map"></div><noscript><p>Interactive exploration needs JavaScript. The scorecard and report below remain available.</p></noscript></section>',
@@ -281,7 +385,9 @@ def report_html(report):
         ]
         for item in plan.get("initiatives", []):
             lines.append(
-                '<article class="initiative"><h3>'
+                '<article class="initiative"'
+                + (' id="initiative-' + _text(item["id"]) + '"' if item.get("id") else "")
+                + "><h3>"
                 + _text(item.get("title", "Initiative"))
                 + "</h3>"
             )

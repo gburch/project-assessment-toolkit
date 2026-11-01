@@ -228,6 +228,8 @@ def test_installed_cli_roundtrip_without_source_path_imports(tmp_path):
     catalog = json.loads(skills.stdout)
     assert {
         "project-assess",
+        "project-maturity",
+        "project-intent",
         "doc-value",
         "test-value",
     } <= {row["name"] for row in catalog}

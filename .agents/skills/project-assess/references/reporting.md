@@ -22,6 +22,13 @@ system map and relevant dimension providers; do not stop after the first test
 leads or translate every candidate into a confirmed finding. Group symptoms into
 the important causes and full intended improvement, then choose a first slice.
 
+Establish current maturity and intended purpose before choosing that improvement.
+Use the main skill's project-maturity and project-intent workflow, recording
+`review.project_context` with the current milestone/readiness, intended destination
+and its basis, and ordered focus areas tied to the existing plan. A useful personal
+utility can already fit its goal; a platform ambition is not evidence of current
+platform maturity. Keep owner intent, documented aspiration and inference distinct.
+
 Missing selected goals means there is no saved target comparison. Complete the
 assessment and give a clearly provisional improvement scenario without saving
 targets or blocking on profile selection. Missing runtime proof limits the
@@ -44,7 +51,9 @@ substantive explanation; avoid replacing it with scan statistics and links.
 Organize the response so the user can assess the judgment without opening files:
 
 - **Verdict and context:** what the project does, whom it serves, what fits its
-  needs and the principal constraints or costs of valuable change.
+  needs and the principal constraints or costs of valuable change. Show current
+  milestone/readiness → intended destination, each with evidence/confidence and
+  the intended goal's basis. Legacy missing context remains unestablished.
 - **Scorecard:** current capability and burden for all eight dimensions in a
   whole-project review, with separate confidence for each axis and selected
   capability minimums/burden ceilings when available. Explain unknowns. For a
@@ -58,7 +67,10 @@ Organize the response so the user can assess the judgment without opening files:
 - **Right-sized improvement plan:** explain the main causes, adequate target
   state, coherent initiatives, expected capability/burden direction, preserved
   guarantees and acceptance evidence. Give the first useful slice within that
-  plan. Avoid inventing exact score gains, time savings or a deletion quota.
+  plan. Show the ranked areas to focus on, why they matter for the intended job,
+  and what can be deferred. Preserve explicitly selected numerical goals and
+  label inferred-purpose recommendations provisional. Avoid inventing exact
+  score gains, time savings or a deletion quota.
 - **Coverage and confidence:** identify source/tool versions, review freshness,
   analyzed and inspected scope, omissions, actually selected optional analyzers,
   imported versus executed evidence, and the challenge result. Explain which

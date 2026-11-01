@@ -30,7 +30,7 @@ for name in ('static/index.html', 'static/app.js', 'static/style.css', 'static/d
     assert (base / name).is_file() and (base / name).read_bytes()
 joern = next(row for row in list_analyzers() if row['name'] == 'joern')
 assert not joern['available']
-for name in ('project-assess', 'doc-value', 'test-value'):
+for name in ('project-assess', 'project-maturity', 'project-intent', 'doc-value', 'test-value'):
     skill = base / '.agents/skills' / name / 'SKILL.md'
     assert skill.is_file()
     for target in re.findall(r'\]\(([^)]+)\)', skill.read_text()):
@@ -222,6 +222,12 @@ def main():
             "core scan preserves facts and explicit unavailable Joern evidence without external tools",
         )
         review = cli("review-template", snapshot["id"])
+        check(
+            "personal_app" in cli("rubric")["project_context"]["milestones"]
+            and review["project_context"]["current"]["milestone"] is None
+            and cli("report", snapshot["id"])["project_context"]["status"] == "unestablished",
+            "installed maturity rubric preserves unjudged current scope and intent",
+        )
         fresh = cli("review-template", snapshot["id"], "--mode", "fresh")
         fresh["methodology"]["reviewer_id"] = "wheel-fixture-reviewer"
         review_file = output / "review.json"
@@ -245,6 +251,20 @@ def main():
                 evidence_ids=[snapshot["evidence"][0]["id"]],
             )
         source_entry = next(row for row in snapshot["evidence"] if row["path"] == "app.py")
+        review["project_context"]["current"].update(
+            milestone="experiment",
+            readiness="prototype",
+            rationale="Synthetic source has a bounded implementation without established use.",
+            evidence_ids=[source_entry["id"]],
+        )
+        review["project_context"]["intended"].update(
+            milestone="personal_app",
+            basis="user_stated",
+            confidence="high",
+            statement="Build connected personal workflows without a commercial destination.",
+            attribution="Synthetic owner statement in the wheel delivery fixture.",
+            limitations=["Destination is a fixture input, not independently observed adoption."],
+        )
         context = cli(
             "source-context", snapshot["id"], source_entry["id"], "--line", "1", "--end-line", "2"
         )
@@ -270,6 +290,13 @@ def main():
         ]
         review_file.write_text(json.dumps(review))
         saved = cli("review", snapshot["id"], "--input", review_file)
+        report = cli("report", snapshot["id"])
+        check(
+            report["project_context"]["current"]["milestone"] == "experiment"
+            and report["project_context"]["intended"]["milestone"] == "personal_app"
+            and report["goals"] is None,
+            "installed context roundtrip preserves distinct current and intended scope without saving goals",
+        )
         exported = cli("export-report", snapshot["id"])
         check(
             exported["assessment_id"] == snapshot["id"]

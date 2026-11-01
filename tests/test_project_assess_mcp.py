@@ -54,6 +54,9 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
             async with mcp.ClientSession(read, write, read_timeout_seconds=15) as session:
                 initialization = await session.initialize()
                 assert initialization.server_info.name == "PAT"
+                rubric = await session.call_tool("get_rubric", {})
+                assert not rubric.is_error
+                assert "platform" in rubric.structured_content["project_context"]["milestones"]
                 discovered = await session.list_tools()
                 names = {tool.name for tool in discovered.tools}
                 assert {
@@ -135,6 +138,7 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                     and brief.structured_content["assessment_id"] == snapshot["id"]
                 )
                 assert "evidence" not in brief.structured_content
+                assert brief.structured_content["project_context"]["status"] == "unestablished"
                 exported = await session.call_tool(
                     "export_report", {"assessment_id": snapshot["id"]}
                 )
@@ -315,6 +319,18 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                         rationale="A synthetic scored review for this protocol fixture, not a real capability assessment.",
                         evidence_ids=[source_evidence],
                     )
+                scored["project_context"]["current"].update(
+                    milestone="personal_utility",
+                    readiness="prototype",
+                    evidence_ids=[source_evidence],
+                    rationale="A synthetic focused workflow with no runtime validation.",
+                )
+                scored["project_context"]["intended"].update(
+                    milestone="personal_app",
+                    basis="user_stated",
+                    statement="Keep the future application personal and useful.",
+                    attribution="Synthetic owner statement for protocol validation.",
+                )
                 scored_review = await session.call_tool(
                     "submit_review",
                     {
@@ -357,6 +373,10 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 assert alignment["status"] == "ready"
                 assert alignment["review_id"] == scored_review.structured_content["id"]
                 assert alignment["goal_revision"] == scored_goals.structured_content["revision"]
+                context = alignment["project_context"]
+                assert context["current"]["milestone"] == "personal_utility"
+                assert context["intended"]["milestone"] == "personal_app"
+                assert context["intended"]["basis"] == "user_stated"
                 for dimension, current, target in (("testing", 3, 4), ("extensibility", 2, 3)):
                     item = alignment["dimensions"][dimension]
                     assert item["action"] == "strengthen"

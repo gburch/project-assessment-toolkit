@@ -24,6 +24,13 @@ from .confidence import (
 )
 from .control_inventory import DIMENSIONS as CONTROL_DIMENSIONS
 from .dimension_inputs import dimension_inputs
+from .project_context import (
+    PROJECT_CONTEXT_SCHEMA,
+    project_context_assessment,
+    project_context_rubric,
+    project_context_template,
+    validate_project_context,
+)
 from .review_context import build_challenge_evidence_index, get_system_map
 from .rubric import DIMENSIONS, PROFILES, RUBRIC_VERSION, rubric
 
@@ -428,6 +435,7 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
         "confidence_assessment": confidence_assessment(assessment, review),
         "dimension_inputs": dimension_inputs(assessment),
         "system_map": get_system_map(assessment),
+        "project_context": project_context_assessment(assessment, review, goals),
         "plan": plan,
         "planning_status": planning_status,
         "findings": findings,
@@ -670,6 +678,7 @@ REVIEW_SCHEMA = _object(
         },
         "coverage": COVERAGE_SCHEMA,
         "plan": PLAN_SCHEMA,
+        "project_context": PROJECT_CONTEXT_SCHEMA,
         "methodology": METHODOLOGY_SCHEMA,
         "change_traces": {"type": "array", "maxItems": 10, "items": CHANGE_TRACE_SCHEMA},
         "challenge": CHALLENGE_SCHEMA,
@@ -698,6 +707,8 @@ REVIEW_SCHEMA = _object(
 def _validate_planning(review, evidence_ids):
     """Bind optional authored planning to captured evidence, without judging its quality."""
     coverage = review.get("coverage", {})
+    if "project_context" in review:
+        validate_project_context(review["project_context"], evidence_ids, review.get("plan"))
     for dimension, row in coverage.get("dimension_reviews", {}).items():
         if not set(row["evidence_ids"]) <= evidence_ids or (
             row["status"] in {"reviewed", "partial"} and not row["evidence_ids"]
@@ -871,7 +882,7 @@ class AssessmentService:
 
     @staticmethod
     def rubric():
-        return rubric()
+        return {**rubric(), "project_context": project_context_rubric()}
 
     def scan(self, root, reports=None, *, analysis_profile="standard", analyzers=None):
         root = self._root(root)
@@ -979,6 +990,7 @@ class AssessmentService:
             "scope_digest": assessment["scope_digest"],
             "rubric_version": assessment["rubric_version"],
             "complete": assessment["complete"],
+            "project_context": alignment["project_context"],
             "gap_count": len(assessment["gaps"]),
             "inventory": facts.get("inventory", {}),
             "static_analysis": {
@@ -1051,7 +1063,9 @@ class AssessmentService:
             "next_step": (
                 "Captured facts have no authored review yet. For an assessment request, inspect "
                 "system_map, dimension_inputs, the rubric and representative source workflows; "
-                "author cited ratings, coverage and a proportionate plan using review_template. "
+                "establish current scope/readiness and stated or provisional intended purpose, "
+                "then author cited ratings, coverage and a proportionately ranked plan using "
+                "review_template. Preserve explicit numeric targets. "
                 "For a whole-project review, complete the independent challenge or record its "
                 "unavailability, then submit_review and read the saved report. Give the user "
                 "the verdict, scores, important findings, improvement plan and limits inline, "
@@ -1059,7 +1073,8 @@ class AssessmentService:
                 "stop at capture scope and unscored facts."
                 if review is None
                 else "An authored review is saved. Read the full report for its diagnosis, "
-                "cited ratings, findings, coverage and plan; use evolve for goal alignment and "
+                "current scope/readiness, intended purpose, cited ratings, findings, coverage "
+                "and ranked plan; use evolve for goal alignment and "
                 "history/progress only where comparable. Present a substantive inline report "
                 "with evidence and limits, respecting the requested scope. Artifact links "
                 "support the report rather than replacing it."
@@ -1980,6 +1995,7 @@ class AssessmentService:
                 for dimension in DIMENSIONS
             },
             "findings": [],
+            "project_context": project_context_template(),
             "coverage": {
                 "schema_version": 1,
                 "scope": "whole_project",
@@ -2213,9 +2229,11 @@ class AssessmentService:
                 for dimension, rating in review["ratings"].items()
                 if (support := rating.get("burden_support"))
             },
-            "rubric": rubric(),
+            "rubric": self.rubric(),
+            "project_intent": (review.get("project_context") or {}).get("intended"),
             "targets": (goals or {}).get("targets"),
             "instructions": [
+                "Use current user-stated purpose as a constraint. Documented or inferred intent remains a provisional claim to challenge. Independently establish realized scope/readiness before seeing proposed current milestones or ranked priorities; do not assume commercial or platform scope is better.",
                 "Form your independent judgment first. Then inspect burden_review scopes and query their observation_ids from this snapshot; challenge recurrence, actual cost, applicability and contrary paths. These references contain no proposed scores. Do not declare burden_dimensions unless you reviewed that dimension's support.",
                 "Use a separate reviewer. Form an independent judgment from current captured evidence before seeing proposed grades, rationales, findings or plans.",
                 "Challenge missing debt, favorable counterevidence, source freshness, change traces and the proportionality of improvements. Query evidence and inspect source context where needed.",
@@ -2469,6 +2487,7 @@ class AssessmentService:
                 "assessment_method": alignment["assessment_method"],
                 "confidence_assessment": alignment["confidence_assessment"],
                 "system_map": alignment["system_map"],
+                "project_context": alignment["project_context"],
             }
         from .badges import badge_assets
         from .report_export import dimension_map_data
@@ -2542,6 +2561,82 @@ def _markdown_text(value):
     for character in ("\\", "`", "*", "_", "[", "]", "|"):
         text = text.replace(character, "\\" + character)
     return text
+
+
+def _project_context_markdown(report):
+    context = project_context_assessment(
+        report["assessment"], report.get("review"), report.get("goals")
+    )
+    lines = ["", "## Project maturity, purpose and focus", ""]
+    if context["status"] == "unestablished":
+        return lines + [
+            "Project scope, readiness and intended destination have not been established in this review."
+        ]
+    current, intended, alignment = (context[key] for key in ("current", "intended", "alignment"))
+    lines += [
+        "Current: "
+        + _markdown_text(current["milestone_label"])
+        + " · "
+        + _markdown_text(current["readiness_label"])
+        + "; declared confidence: "
+        + _markdown_text(current["confidence"])
+        + ".",
+        "",
+        _markdown_text(current["rationale"]),
+        "",
+        "Intended destination: "
+        + _markdown_text(intended["milestone_label"])
+        + "; "
+        + _markdown_text(intended["basis_label"])
+        + "; declared confidence: "
+        + _markdown_text(intended["confidence"])
+        + ".",
+        "",
+        _markdown_text(intended["statement"]),
+    ]
+    if intended["attribution"]:
+        lines.append("Attribution: " + _markdown_text(intended["attribution"]))
+    lines += [
+        "",
+        "Alignment: " + _markdown_text(alignment["direction_label"]),
+        "",
+        _markdown_text(alignment["rationale"]),
+    ]
+    if alignment["priorities"]:
+        lines += ["", "Ranked focus:", ""]
+        for rank, area in enumerate(alignment["priorities"], 1):
+            lines.append(
+                f"{rank}. "
+                + _markdown_text(area["dimension_label"])
+                + " — "
+                + _markdown_text(area["direction_label"])
+                + ": "
+                + _markdown_text(area["rationale"])
+            )
+            if area["initiative_ids"]:
+                lines.append(
+                    "   Plan initiatives: " + _markdown_text(", ".join(area["initiative_ids"]))
+                )
+    for title, values in (
+        ("Deferred work", alignment["deferred"]),
+        ("Alternative intentions", intended["alternatives"]),
+        ("Context limits", [*intended["limitations"], *context["gaps"]]),
+    ):
+        if values:
+            lines += ["", title + ":", "", *["- " + _markdown_text(value) for value in values]]
+    lines += [
+        "",
+        "Context evidence: "
+        + _markdown_text(
+            ", ".join(dict.fromkeys(current["evidence_ids"] + intended["evidence_ids"]))
+            or "Attributable user intent; no captured intent citation"
+        ),
+        "",
+        _markdown_text(context["profile_note"]),
+        "",
+        _markdown_text(context["caveat"]),
+    ]
+    return lines
 
 
 def _confidence_markdown(assessment, review):
@@ -2840,6 +2935,7 @@ def markdown_report(report):
         f"Snapshot: `{assessment['id']}`; rubric: {assessment['rubric_version']}",
         "",
         "Capability and burden are evidence-backed judgments; missing evidence is unknown.",
+        *_project_context_markdown(report),
         "",
         "| Dimension | Capability | Burden and evidence | Capability confidence |",
         "|---|---:|---:|---|",

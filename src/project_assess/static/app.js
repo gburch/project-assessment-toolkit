@@ -16,6 +16,7 @@ function clearVisuals() {
   dimensionMap = null;
   $("dimension-map").replaceChildren();
   $("badges").replaceChildren();
+  $("project-context").replaceChildren();
   $("download-report").removeAttribute("href");
 }
 
@@ -93,6 +94,50 @@ function node(tag, text, className) {
   if (text !== undefined) el.textContent = text;
   if (className) el.className = className;
   return el;
+}
+function renderProjectContext(report) {
+  const parent = $("project-context"), context = report.project_context;
+  parent.replaceChildren();
+  if (context?.status !== "recorded") {
+    parent.append(node("p", "No maturity or intended-purpose judgment is recorded for this review. Existing engineering scores are unchanged."));
+  } else {
+    const current = context.current, intended = context.intended;
+    const summary = node("div", undefined, "context-summary");
+    const present = node("article");
+    present.append(node("h3", "Current codebase"), node("p", `${current.milestone_label || "Unknown"} · ${current.readiness_label || "Unknown"}`, "context-milestone"), node("p", `Declared confidence: ${current.confidence}`, "secondary"), node("p", current.rationale), node("p", `Evidence: ${current.evidence_ids.join(", ") || "none recorded"}`, "evidence-meta"));
+    const destination = node("article");
+    destination.append(node("h3", "Intended destination"), node("p", intended.milestone_label || "Unknown", "context-milestone"), node("p", `Basis: ${intended.basis_label || "Unknown"}; declared confidence: ${intended.confidence}`, "secondary"), node("p", intended.statement));
+    if (intended.attribution) destination.append(node("p", `Attribution: ${intended.attribution}`));
+    destination.append(node("p", `Evidence: ${intended.evidence_ids.join(", ") || "no captured source citation"}`, "evidence-meta"));
+    summary.append(present, destination);
+    parent.append(summary);
+    const alignment = context.alignment;
+    parent.append(node("h3", "Fit and ranked focus"), node("p", `${alignment.direction_label || "Unknown"} · ${alignment.rationale}`));
+    if (alignment.priorities.length) {
+      const priorities = node("ol", undefined, "context-priorities");
+      for (const priority of alignment.priorities) {
+        const item = node("li");
+        item.append(node("strong", `${priority.dimension_label || "Unknown"} · ${priority.direction_label || "Unknown"}`), node("p", priority.rationale));
+        if (priority.initiative_ids.length) {
+          const links = node("p", "Plan initiatives: ", "evidence-meta");
+          priority.initiative_ids.forEach((id, index) => {
+            if (index) links.append(document.createTextNode(", "));
+            const link = node("a", id);
+            link.href = `#initiative-${encodeURIComponent(id)}`;
+            links.append(link);
+          });
+          item.append(links);
+        }
+        priorities.append(item);
+      }
+      parent.append(priorities);
+    } else parent.append(node("p", "No ranked focus areas are recorded."));
+    for (const [title, values] of [["Deferred work", alignment.deferred], ["Alternative goals", intended.alternatives], ["Intent limitations", intended.limitations]]) {
+      if (values.length) textList(parent, title, values);
+    }
+  }
+  if (context?.gaps?.length) textList(parent, "Context gaps", context.gaps);
+  parent.append(node("p", context?.profile_note || "Scope milestones are not quality grades or required growth steps. Existing numeric goals remain independent.", "secondary"));
 }
 function message(text, error = false) {
   $("error").hidden = !error;
@@ -496,6 +541,7 @@ function renderAlignment(alignment) {
     const list = node("ol", undefined, "plan-list");
     for (const initiative of plan.initiatives) {
       const item = node("li", undefined, "initiative");
+      if (initiative.id) item.id = `initiative-${initiative.id}`;
       item.append(node("h3", `${initiative.title} · ${initiative.priority}`), node("p", `Root cause: ${initiative.root_cause}`), node("p", `Full scope: ${initiative.scope}`));
       textList(item, "Intended dimension effects", Object.entries(initiative.dimension_impacts).map(([dim, effect]) => `${titles[dim] || dim}: ${effect}`));
       textList(item, "Acceptance for the full outcome", initiative.acceptance);
@@ -759,6 +805,7 @@ async function loadReport(id) {
     renderRatings(result);
     renderControls(result.goals);
     renderVisuals(result);
+    renderProjectContext(result);
     renderProgress(result.progress);
     renderFindings(result);
     renderAlignment(result.goal_alignment);
@@ -865,6 +912,8 @@ $("goal-form").addEventListener("submit", async (event) => {
     renderProgress(progress);
     renderHistory(history);
     state.report.goal_alignment = evolve.goal_alignment;
+    state.report.project_context = evolve.goal_alignment.project_context || state.report.project_context;
+    renderProjectContext(state.report);
     renderAlignment(evolve.goal_alignment);
     message("Goals saved. This starts a new baseline; it does not record engineering progress.");
   } catch (error) {

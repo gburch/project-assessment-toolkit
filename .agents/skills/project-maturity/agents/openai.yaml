@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project maturity"
+  short_description: "Establish current project scope and readiness"
+  default_prompt: "Use $project-maturity to establish this codebase’s current scope milestone and readiness from evidence, with confidence and limits."

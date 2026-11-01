@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from project_assess import report_export
+from project_assess.project_context import project_context_assessment, project_context_template
 from project_assess.rubric import DIMENSIONS
 from project_assess.service import AssessmentService
 
@@ -61,6 +62,97 @@ def test_model_uses_all_dimensions_and_separate_goals_and_confidence(report):
     assert security["burden_confidence"] == "low"
     assert not model["preview_targets"]
     assert report == original
+
+
+def contextual_report(report):
+    context = project_context_template()
+    source_id = next(e["id"] for e in report["assessment"]["evidence"] if e["kind"] == "python")
+    context["current"].update(
+        milestone="personal_utility",
+        readiness="prototype",
+        confidence="low",
+        rationale="A focused local workflow in this presentation fixture.",
+        evidence_ids=[source_id],
+    )
+    context["intended"].update(
+        milestone="personal_utility",
+        basis="user_stated",
+        confidence="medium",
+        statement="Keep this a focused local tool.",
+        attribution="Owner statement in the fixture",
+        alternatives=[],
+        limitations=["No deployment evidence is claimed."],
+    )
+    context["alignment"].update(
+        direction="maintain",
+        rationale="Fit the current bounded purpose.",
+        priorities=[
+            {
+                "dimension": "security",
+                "direction": "investigate",
+                "rationale": "Inspect the real local boundary.",
+                "initiative_ids": [],
+            },
+            {
+                "dimension": "maintainability",
+                "direction": "maintain",
+                "rationale": "Preserve the simple owner.",
+                "initiative_ids": [],
+            },
+        ],
+        deferred=["Multi-user platform machinery"],
+    )
+    report["review"]["project_context"] = context
+    report["project_context"] = project_context_assessment(
+        report["assessment"], report["review"], report["goals"]
+    )
+    return report
+
+
+def test_html_context_precedes_engineering_scores_without_changing_them(report):
+    before = deepcopy(report["review"]["ratings"])
+    contextual_report(report)
+    rendered = report_export.report_html(report)
+    assert rendered.index('id="project-context-heading"') < rendered.index(
+        'aria-label="Assessment badges"'
+    )
+    assert rendered.index('class="context-priorities"') < rendered.index('id="scores-heading"')
+    section = rendered.split('id="project-context-heading"', 1)[1].split("</section>", 1)[0]
+    assert section.index("Security") < section.index("Maintainability")
+    assert (
+        "Owner statement in the fixture" in section and "Multi-user platform machinery" in section
+    )
+    assert report["review"]["ratings"] == before
+    assert len(report_export.dimension_map_data(report)["dimensions"]) == len(DIMENSIONS)
+    report["review"].pop("project_context")
+    report.pop("project_context")
+    legacy = report_export.report_html(report)
+    assert "No maturity or intended-purpose judgment is recorded" in legacy
+    assert "Personal utility" not in legacy
+
+
+def test_html_context_is_text_and_cannot_inject_markup(report):
+    contextual_report(report)
+    attack = '<img src=x onerror=alert(1)></script><script>alert("context")</script>'
+    context = report["review"]["project_context"]
+    context["current"]["rationale"] = attack
+    context["intended"].update(
+        statement=attack, attribution=attack, alternatives=[attack], limitations=[attack]
+    )
+    context["alignment"]["rationale"] = attack
+    context["alignment"]["priorities"][0]["rationale"] = attack
+    context["alignment"]["deferred"] = [attack]
+    rendered = report_export.report_html(report)
+    assert attack not in rendered and "&lt;img src=x onerror=" in rendered
+    assert rendered.count("<script>") == rendered.count("</script>") == 1
+
+
+def test_html_context_uses_saved_judgment_instead_of_a_detached_projection(report):
+    contextual_report(report)
+    report["project_context"]["current"]["milestone_label"] = "Detached stage label"
+    rendered = report_export.report_html(report)
+    assert "Detached stage label" not in rendered
+    assert report["review"]["project_context"]["current"]["milestone"] == "personal_utility"
 
 
 def test_unknown_partial_and_legacy_values_do_not_become_zero(report):

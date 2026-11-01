@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project intent"
+  short_description: "Infer purpose and rank proportionate improvements"
+  default_prompt: "Use $project-intent to establish this project’s intended purpose, distinguish owner goals from inference, and rank improvements against its current position."

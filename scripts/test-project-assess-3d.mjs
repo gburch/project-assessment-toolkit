@@ -43,6 +43,22 @@ for dimension,rating in review['ratings'].items():
     rating.update(capability=capability,burden=burden,confidence='medium',
         burden_basis='source_estimate',burden_confidence='low',rationale=hostile,
         evidence_ids=[snapshot['evidence'][0]['id']],recommendations=[])
+context=review['project_context']
+context['current'].update(milestone='personal_app',readiness='prototype',
+    confidence='medium',rationale='Synthetic connected workflows, without runtime proof.',
+    evidence_ids=[snapshot['evidence'][0]['id']])
+context['intended'].update(milestone='personal_app',basis='user_stated',
+    confidence='high',statement='Synthetic personal application destination. <img src=x onerror=window.contextPwned=1>',
+    attribution='Synthetic owner statement for browser acceptance only.',
+    evidence_ids=[],alternatives=[],limitations=['No real adoption or execution evidence.'])
+context['alignment'].update(direction='rebalance',
+    rationale='Reduce demonstrated change friction before expanding verification.',
+    priorities=[
+        {'dimension':'maintainability','direction':'simplify',
+         'rationale':'Remove unnecessary change coupling first.','initiative_ids':[]},
+        {'dimension':'testing','direction':'rebalance',
+         'rationale':'Protect useful workflows with focused feedback next.','initiative_ids':[]}],
+    deferred=['Commercial tenancy and external extension contracts.'])
 saved=service.submit_review(snapshot['id'],review)
 targets={dimension:{'capability_min':2,'burden_max':2} for dimension in DIMENSIONS}
 targets['security']={'capability_min':2,'burden_max':3}
@@ -80,6 +96,21 @@ async function accessibility(page, name) {
 async function assertImages(page, selector) {
   await expect(page.locator(selector)).toHaveCount(9);
   await expect.poll(() => page.locator(selector).evaluateAll((images) => images.every((image) => image.complete && image.naturalWidth > 0))).toBe(true);
+}
+async function assertProjectContext(page) {
+  const section = page.locator('section[aria-labelledby="project-context-heading"]');
+  await expect(section.locator(".context-summary article").first()).toContainText("Personal application · Prototype");
+  await expect(section.locator(".context-summary article").last()).toContainText("Personal application");
+  await expect(section.locator(".context-summary article").last()).toContainText("User-stated");
+  await expect(section).toContainText("Synthetic owner statement for browser acceptance only.");
+  await expect(section).toContainText("Commercial tenancy and external extension contracts.");
+  const priorities = section.locator(".context-priorities li");
+  await expect(priorities).toHaveCount(2);
+  await expect(priorities.nth(0)).toContainText("Maintainability · Reduce unnecessary burden");
+  await expect(priorities.nth(1)).toContainText("Testing · Strengthen and simplify");
+  await expect(section).toContainText("<img src=x onerror=window.contextPwned=1>");
+  await expect(section.locator("img")).toHaveCount(0);
+  assert.equal(await page.evaluate(() => window.contextPwned), undefined);
 }
 async function assertMap(page) {
   const map = page.locator("#dimension-map");
@@ -142,6 +173,7 @@ try {
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error)));
   await page.goto(data.origin);
+  await assertProjectContext(page);
   await assertImages(page, "#badges img");
   await assertMap(page);
   const badgeDownload = page.waitForEvent("download");
@@ -167,8 +199,10 @@ try {
   const savedReport = await (await page.request.get(reportUrl)).json();
   assert.equal(savedReport.goals.revision, 2);
   assert.deepEqual(savedReport.review.ratings, reportBefore.review.ratings);
+  assert.deepEqual(savedReport.review.project_context, reportBefore.review.project_context);
   assert.deepEqual(savedReport.badges, reportBefore.badges);
   await page.reload();
+  await assertProjectContext(page);
   await expect(page.locator("#dimension-map")).toHaveAttribute("data-guide-count", "2");
   await expect(page.locator("#dimension-map")).toHaveAttribute("data-renderer", "webgl");
   await settle(page);
@@ -197,6 +231,7 @@ try {
   const standalone = await offline.newPage();
   standalone.on("pageerror", (error) => errors.push(String(error)));
   await standalone.goto(pathToFileURL(data.html).href);
+  await assertProjectContext(standalone);
   await assertImages(standalone, ".badges img");
   await assertMap(standalone);
   await expect(standalone.locator(".dm-dimension")).toHaveCount(8);
@@ -241,7 +276,7 @@ try {
   await accessibility(noWebgl, "live no-WebGL fallback accessibility");
   await fallback.close();
   assert.deepEqual(errors, []);
-  console.log("PAT 3D acceptance passed: actual WebGL, presets/orbit/keyboard, nine bound badges, unknown axes, goal preview/save separation, hostile content, offline file export, no-WebGL fallback, mobile themes/reduced motion and accessibility.");
+  console.log("PAT 3D acceptance passed: recorded maturity/intent and ranked focus, actual WebGL, presets/orbit/keyboard, nine bound badges, unknown axes, goal preview/save separation, hostile content, offline file export, no-WebGL fallback, mobile themes/reduced motion and accessibility.");
 } finally {
   await browser?.close();
   lines.close();

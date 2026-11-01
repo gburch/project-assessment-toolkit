@@ -20,6 +20,12 @@ Assess **security, testing, documentation, maintainability, delivery, operabilit
 
 PAT runs locally without an AI service. Scans collect facts; a person or optional agent supplies cited judgment.
 
+Recommendations also account for **current maturity and intended purpose**. PAT's
+`project-maturity` and `project-intent` skills establish the project's present
+scope/readiness, distinguish owner-stated goals from documented or inferred
+ambitions, and rank the work that fits that destination. A dependable personal
+utility can be complete; commercial or platform scope is not automatically better.
+
 ## From evidence to a next step
 
 | Step | What you get |
@@ -86,6 +92,7 @@ Export saved assessments as badges for your own README. See the [badge guide](do
 ## Optional tools and agents
 
 - [Documentation tools](docs/PROJECT_ASSESS.md#documentation-evidence-and-navigation): `doc-value` and `doc-value-nav` inspect documentation and navigation evidence.
+- [Maturity and intended purpose](docs/PROJECT_ASSESS.md#project-maturity-and-intended-purpose): bundled skills classify current position and intended destination, then align ranked recommendations without changing numeric goals.
 - [Test-value tools](docs/PROJECT_ASSESS.md#test-value-evidence): static inventory and explicitly requested runtime test evidence. Scanning never runs tests automatically.
 - [JavaScript/TypeScript syntax analysis](docs/PROJECT_ASSESS.md#doctor-and-evolve): `uv sync --extra analysis --locked` installs optional Tree-sitter parsers in PAT's environment. It provides source leads, without type checking or executing the project.
 - [Optional unused-code analysis](docs/PROJECT_ASSESS.md#doctor-and-evolve): install the separate `vulture` extra and select `scan ROOT --analyzer vulture`. `pat analyzers` lists availability; Vulture runs only when selected.
