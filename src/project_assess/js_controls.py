@@ -22,7 +22,6 @@ _FUNCTIONS = {
     "arrow_function",
     "method_definition",
 }
-_LOOPS = {"for_statement", "for_in_statement", "while_statement", "do_statement"}
 _MODULES = {
     "child_process",
     "fs",
@@ -91,6 +90,28 @@ def _scope(node):
             return current.id
         current = current.parent
     return None
+
+
+def _in_repeated_loop_position(node):
+    """Exclude once-only loop setup; outer repeated bodies still count."""
+    current = node
+    for _ in range(MAX_SCOPE_DEPTH):
+        parent = current.parent
+        if parent is None or parent.type in _FUNCTIONS:
+            return False
+        fields = (
+            ("body",)
+            if parent.type == "for_in_statement"
+            else ("condition", "increment", "body")
+            if parent.type == "for_statement"
+            else ("condition", "body")
+            if parent.type in {"while_statement", "do_statement"}
+            else ()
+        )
+        if any(current == parent.child_by_field_name(field) for field in fields):
+            return True
+        current = parent
+    return False
 
 
 def _bindings(pattern, raw):
@@ -327,14 +348,13 @@ def analyze_javascript_controls(path, raw, nodes, *, partial=False, node_limit=1
     def emit(
         kind, dimensions, node, *, name=None, resolution="syntax", category="mechanism", extra=None
     ):
-        owner, repeated, current = "<module>", False, node.parent
+        owner, current = "<module>", node.parent
         for _ in range(MAX_SCOPE_DEPTH):
             if current is None:
                 break
             if current.type in _FUNCTIONS:
                 owner = _callee(current.child_by_field_name("name"), raw) or "<anonymous>"
                 break
-            repeated |= current.type in _LOOPS
             current = current.parent
         counts[kind] += 1
         signal = {
@@ -348,7 +368,7 @@ def analyze_javascript_controls(path, raw, nodes, *, partial=False, node_limit=1
                 "scope_partial": _scope(node) is None,
                 "callee": name,
                 "resolution": resolution,
-                "in_loop": repeated,
+                "in_loop": _in_repeated_loop_position(node),
                 "category": category,
                 **(extra or {}),
             },
@@ -607,13 +627,7 @@ def analyze_javascript_controls(path, raw, nodes, *, partial=False, node_limit=1
             or tail in {"query", "execute"}
         )
         if io:
-            current, repeated = node.parent, False
-            for _ in range(MAX_SCOPE_DEPTH):
-                if current is None or current.type in _FUNCTIONS:
-                    break
-                repeated |= current.type in _LOOPS
-                current = current.parent
-            if repeated:
+            if _in_repeated_loop_position(node):
                 emit(
                     "io_in_loop",
                     ["performance"],

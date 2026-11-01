@@ -242,3 +242,44 @@ def test_disabled_tls_and_nonpositive_resource_settings_remain_visible():
     assert disabled[0]["context"]["category"] == "risk_candidate"
     assert result["coverage"]["signals_total"] == 102
     assert result["coverage"]["signals_omitted"] == 38
+
+
+def test_loop_setup_is_once_only_but_body_condition_and_increment_can_repeat():
+    source = """import {readdir, readFile} from "node:fs/promises";
+for (const entry of await readdir(root)) {
+  await readFile(entry);
+}
+for (await fetch(setup); await fetch(condition); await fetch(increment)) {
+  await fetch(body);
+}
+while (await fetch(whileCondition)) { await fetch(whileBody); }
+do { await fetch(doBody); } while (await fetch(doCondition));
+"""
+    result = inventory(source, "src/app.mjs")
+    io = [row for row in result["signals"] if row["kind"] == "io_in_loop"]
+    assert {row["context"]["callee"] for row in io} == {"fs/promises.readFile", "fetch"}
+    assert len(io) == 8
+    assert not any(row["locations"][0]["line"] == 2 for row in io)
+    assert sum(row["locations"][0]["line"] == 5 for row in io) == 2
+    assert all(row["context"]["in_loop"] for row in io)
+
+
+def test_nested_loop_iterable_and_initializer_can_repeat_in_an_outer_body():
+    source = """for (const outer of values) {
+  for (const inner of await fetch(items)) { consume(inner); }
+  for (await fetch(setup); condition; increment) { consume(); }
+  const deferred = () => { for (const item of fetch(later)) consume(item); };
+}
+"""
+    result = inventory(source, "src/app.mjs")
+    io = [row for row in result["signals"] if row["kind"] == "io_in_loop"]
+    assert [row["locations"][0]["line"] for row in io] == [2, 3]
+
+
+def test_once_only_timer_setup_context_is_not_marked_repeated():
+    result = inventory(
+        "for (let item = setTimeout(callback, 20); condition; item++) {}", "src/app.js"
+    )
+    timers = [row for row in result["signals"] if row["kind"] == "timer_schedule"]
+    assert len(timers) == 1
+    assert not timers[0]["context"]["in_loop"]
