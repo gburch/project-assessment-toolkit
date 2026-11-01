@@ -41,15 +41,6 @@ def _changed_inputs(root: Path, hashes: Any, reason: str) -> list[dict[str, Any]
     return [{"reason": reason, "paths": sorted(changed)}] if changed else []
 
 
-def _hash_for(root: Path, path: str, provided: dict[str, Any]) -> tuple[str | None, bool]:
-    expected = provided.get(path)
-    actual_path = root / path
-    actual = _digest(actual_path) if actual_path.is_file() else None
-    if expected is None:
-        return actual, False
-    return str(expected), actual == expected
-
-
 def _feature(source: str, kind: str, coordinate: Any, semantics: str) -> dict[str, Any]:
     return {
         "source": source,

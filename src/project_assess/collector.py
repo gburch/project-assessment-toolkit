@@ -2129,7 +2129,12 @@ def collect(
             "limits": generic_analysis["limits"],
         },
         "optional_analysis": {
-            name: {key: result[key] for key in ("analyzer", "configuration", "limits")}
+            name: {
+                "analyzer": {
+                    key: value for key, value in result["analyzer"].items() if key != "selection"
+                },
+                **{key: result[key] for key in ("configuration", "limits")},
+            }
             for name, result in optional_analyses.items()
         },
         "documentation": "doc-value.captured.v2",

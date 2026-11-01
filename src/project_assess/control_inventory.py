@@ -40,7 +40,6 @@ class ControlInventory:
             raise ValueError("Invalid control signal limit")
         self.limit = signal_limit
         self.files = {}
-        self.signals_seen = 0
         self.kind_counts = Counter()
         self._heap = []
         self._serial = 0
@@ -113,7 +112,6 @@ class ControlInventory:
             }
             if "confidence" in row:
                 row["producer_confidence"] = row.pop("confidence")
-            self.signals_seen += 1
             # Every file's first representative competes before its second.
             # Stable hashing avoids a lexical-prefix bias when the file count
             # itself exceeds the output budget. No source argument text is used.

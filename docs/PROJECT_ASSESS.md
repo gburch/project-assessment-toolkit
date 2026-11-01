@@ -179,9 +179,13 @@ follow, collapsed until opened.
 
 **Level map** plots every dimension by burden and capability on one chart; scores
 that coincide share a numbered marker, and repeated clicks step through them.
+On narrow screens, a wrapping key lists each cluster's dimensions and scores;
+its buttons select the same details without overlapping chart labels.
 **What moved** is the optional Three.js view: each snapshot of the project, up to
-twelve, is one level map stacked back in time, with a path per dimension. Ratings
-from a different rubric, or snapshots without a review, appear as empty layers.
+twelve, is one level map stacked back in time. Paths connect only comparable
+source changes. Evidence updates, goal baselines, incompatible scopes and missing
+comparison identity are labeled separately and break the path. Ratings from a
+different rubric, or snapshots without a review, appear as empty layers.
 Presets show the latest snapshot, capability over time and burden over time; drag
 to orbit. 3D does not start until requested, and the other views work without
 WebGL.
@@ -299,6 +303,10 @@ Exports omit private evidence content, rationale and local paths, but publish ra
 ## Doctor and Evolve
 
 `doctor ASSESSMENT_ID` groups captured static-analysis candidates into **reuse**, **quality** and **efficiency**, with source locations, evidence references and suggested verification. Its bounded sample shares space across evidence families; use `--limit 20` for a compact first pass and `evidence-query` for the larger captured index. The Python equivalent is `AssessmentService.doctor(assessment_id)`; the same read-only operation is available over MCP. It reads the saved snapshot without executing or editing the assessed project. Missing facts are reported as not collected; rescan when needed.
+
+Documentation maintenance leads share the candidate query and Doctor family budget.
+They retain captured source identities and collection limits; unresolved paths,
+examples and documented-command hints still require interpretation before a change.
 
 `evolve ASSESSMENT_ID` returns the saved diagnosis, coverage, findings, recommendations and authored plan alongside numeric goal alignment; doctor shares that orientation under `goal_alignment`. It preserves missing reviews/plans and unconfirmed or changed targets explicitly. `ready` means the bindings match, not that goals are met or a plan is validated. Plan the full intended outcome and acceptance evidence before choosing a first slice; an intermediate rubric step is a milestone. Keep unknown evidence and independently known gaps visible, preserve useful capability and respect the burden ceiling. Without selected goals, a scenario stays provisional and nothing is saved. The [Evolve guide](../.agents/skills/project-assess/references/evolve-review.md) gives the planning detail. Neither command changes scores, goals or source automatically.
 
