@@ -212,15 +212,18 @@ def contextual_report(report):
     return report
 
 
-def test_html_context_precedes_engineering_scores_without_changing_them(report):
+def test_html_leads_with_purpose_and_keeps_full_context_without_changing_scores(report):
     before = deepcopy(report["review"]["ratings"])
     contextual_report(report)
     rendered = report_export.report_html(report)
+    verdict = rendered.split('id="verdict-heading"', 1)[1].split("</section>", 1)[0]
+    assert "<dt>Today</dt>" in verdict and "<dt>Direction</dt>" in verdict
+    assert rendered.index('id="verdict-heading"') < rendered.index('id="map-heading"')
+    assert rendered.index('id="findings-heading"') < rendered.index('id="project-context-heading"')
     assert rendered.index('id="project-context-heading"') < rendered.index(
         'aria-label="Assessment badges"'
     )
-    assert rendered.index('class="context-priorities"') < rendered.index('id="scores-heading"')
-    section = rendered.split('id="project-context-heading"', 1)[1].split("</section>", 1)[0]
+    section = rendered.split('id="project-context-heading"', 1)[1].split("</details>", 1)[0]
     assert section.index("Security") < section.index("Maintainability")
     assert (
         "Owner statement in the fixture" in section and "Multi-user platform machinery" in section
@@ -461,3 +464,37 @@ def test_failed_publish_removes_staging_and_own_empty_reservation(report, tmp_pa
     with pytest.raises(OSError, match="interrupted publish"):
         report_export.export_report(report, state)
     assert not list((state / "exports").iterdir())
+
+
+def test_timeline_stacks_earlier_snapshots_and_keeps_unreviewed_ones_unknown(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("VALUE = 1\n")
+    service = AssessmentService(tmp_path / "state")
+    earlier = service.scan(project)
+    (project / "app.py").write_text("VALUE = 2\n")
+    latest = service.scan(project)
+    draft = service.review_template(latest["id"])
+    del draft["coverage"]
+    source_id = next(e["id"] for e in latest["evidence"] if e["kind"] == "python")
+    for rating in draft["ratings"].values():
+        rating.update(
+            capability=3,
+            burden=2,
+            confidence="medium",
+            burden_confidence="low",
+            burden_basis="source_estimate",
+            rationale="A source-supported judgment.",
+            recommendations=[],
+            evidence_ids=[source_id],
+        )
+    service.submit_review(latest["id"], draft)
+
+    timeline = report_export.dimension_map_data(service.get_report(latest["id"]))["timeline"]
+
+    assert [entry["assessment_id"] for entry in timeline] == [earlier["id"], latest["id"]]
+    assert timeline[0]["reviewed"] is False
+    assert timeline[0]["scores"]["security"] == [None, None]
+    assert timeline[1]["reviewed"] is True and timeline[1]["scores"]["security"] == [3, 2]
+    earlier_only = report_export.dimension_map_data(service.get_report(earlier["id"]))
+    assert [entry["assessment_id"] for entry in earlier_only["timeline"]] == [earlier["id"]]

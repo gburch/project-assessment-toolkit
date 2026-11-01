@@ -12,7 +12,7 @@ import stat
 import uuid
 from pathlib import Path
 
-from .badges import badge_assets, badge_data
+from .badges import MARK, badge_assets, badge_data
 from .collector import _open_directory
 from .confidence import confidence_assessment
 from .rubric import DIMENSIONS
@@ -22,10 +22,38 @@ _LABELS = {
     d: "Performance & Scalability" if d == "performance" else d.capitalize() for d in DIMENSIONS
 }
 _STYLE = """
-:root{color-scheme:light dark;--bg:#f5f4ef;--surface:#fffefa;--text:#202e34;--muted:#52656b;--line:#ccd6d5;--accent:#08615b;--accent-text:#fff;--focus:#08615b;--warn:#8c3927;font:16px/1.6 system-ui,-apple-system,sans-serif}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}main{max-width:1120px;margin:auto;padding:2rem}h1,h2,h3{line-height:1.25;overflow-wrap:anywhere}h1{font-size:2.2rem;letter-spacing:-.04em;margin:.25rem 0}h2{margin-top:0}section{margin:2rem 0 3rem}p,li,td,th,summary{overflow-wrap:anywhere}a{color:var(--accent)}.secondary{color:var(--muted)}.eyebrow{letter-spacing:.1em;text-transform:uppercase;color:var(--accent);font-size:.8rem}.badges{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center}.badges img{max-width:100%;height:auto}table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,td{text-align:left;vertical-align:top;padding:.65rem .4rem;border-bottom:1px solid var(--line)}.table-wrap{overflow-x:auto}details{margin:1rem 0}summary{cursor:pointer;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.85rem;padding:1rem;background:var(--surface);border:1px solid var(--line);border-radius:.5rem}code{overflow-wrap:anywhere}.context-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem 2rem}.context-summary article{min-width:0}.context-priorities li{padding:.3rem 0}.context-priorities p{margin:.3rem 0}.finding,.initiative{padding:1rem 0;border-bottom:1px solid var(--line)}button,input,select{font:inherit}button:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
-@media(prefers-color-scheme:dark){:root{--bg:#152126;--surface:#1c2c31;--text:#e8f1ee;--muted:#b1c6c3;--line:#405557;--accent:#8edbd0;--accent-text:#122e2a;--focus:#8edbd0;--warn:#ffbba7}}
-@media(max-width:540px){.context-summary{grid-template-columns:1fr}main{padding:1rem}h1{font-size:1.8rem}th,td{padding:.5rem .25rem;font-size:.88rem}.badges{display:grid;grid-template-columns:1fr}}
+:root{color-scheme:light dark;--bg:#faf8f3;--surface:#fff;--hover:#faf8f3;--well:#f0ede4;--plot:#f7f5ef;--text:#13223b;--text-soft:#3e4860;--muted:#5b6478;--line:#e7e2d6;--line-soft:#efebe1;--amber:#f2ae12;--amber-ink:#6e4a00;--cream:#fbebbf;--rust:#b4471f;--focus:#13223b;font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}a{color:var(--text);text-decoration-color:#e0b54a;text-underline-offset:3px}a:hover{text-decoration-color:var(--text)}
+h1,h2,h3{line-height:1.25;overflow-wrap:anywhere}p,li,td,th,summary,dd{overflow-wrap:anywhere}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.875em}
+button,input,select{font:inherit}button:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.bar{background:var(--surface);border-bottom:1px solid var(--line)}.bar-inner,main{max-width:1120px;margin:auto;padding-inline:1.5rem}.bar-inner{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem;min-height:4rem;padding-block:.6rem}
+.brand{display:inline-flex;align-items:center;gap:.6rem;font-weight:700;letter-spacing:.02em}.brand svg{width:34px;height:34px}.project{font-weight:600}.stamp{color:var(--muted);font-size:.875rem}.bar-actions{margin-left:auto;display:flex;gap:.5rem;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;min-height:2rem;padding:0 .8rem;border-radius:1rem;font-size:.8125rem;font-weight:600;text-decoration:none;background:var(--well);color:var(--text)}.chip-partial{background:var(--cream);color:var(--amber-ink)}
+main{padding-block:3rem 4rem;display:flex;flex-direction:column;gap:3.5rem}section{min-width:0}
+.verdict{display:flex;flex-direction:column;gap:1rem}.verdict h1{margin:0;font-size:clamp(1.75rem,4vw,2.25rem);font-weight:600;letter-spacing:-.01em;max-width:52rem}.lede{margin:0;font-size:1.0625rem;color:var(--text-soft);max-width:48rem}
+.purpose{display:flex;flex-wrap:wrap;gap:.5rem 2rem;margin:.25rem 0 0;font-size:.9375rem}.purpose div{display:flex;gap:.5rem;align-items:baseline}.purpose dt{color:var(--muted)}.purpose dd{margin:0;font-weight:600}
+.section-head{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:.5rem 1rem;margin-bottom:1rem}.section-head h2{margin:0;font-size:1.375rem;font-weight:600}.section-head p{margin:0;color:var(--muted);font-size:.875rem}
+.next-cards{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,28rem),1fr));gap:1rem;counter-reset:rank}
+.next-card{counter-increment:rank;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:1.25rem 1.4rem;display:flex;flex-direction:column;gap:.75rem}.next-card header{display:flex;align-items:center;gap:.6rem;font-size:.8125rem;font-weight:600;color:var(--muted)}.next-card header::before{content:counter(rank);width:1.65rem;height:1.65rem;border-radius:50%;background:var(--cream);color:#13223b;display:inline-flex;align-items:center;justify-content:center;font-weight:700}
+.next-card h3{margin:0;font-size:1.0625rem;font-weight:600}.next-card h3 a{text-decoration:none}.next-card h3 a:hover{text-decoration:underline}.next-card p{margin:0;font-size:.9375rem;color:var(--text-soft)}.label{color:var(--muted)}
+.tags{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:auto}.tag{font-size:.8125rem;padding:.15rem .65rem;border-radius:1rem;background:var(--well);color:var(--text-soft)}
+.list{background:var(--surface);border:1px solid var(--line);border-radius:14px}.finding{border-bottom:1px solid var(--line-soft)}.finding:last-child{border-bottom:0}
+.finding>summary{list-style:none;cursor:pointer;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.35rem 1.25rem;align-items:center;padding:1rem 1.4rem}.finding>summary::-webkit-details-marker{display:none}
+.finding h3{margin:0;font-size:1rem;font-weight:500}.finding .where{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8125rem;color:var(--muted)}.finding-tags{display:inline-flex;align-items:center;gap:.6rem;font-size:.8125rem;color:var(--muted);white-space:nowrap}
+.finding-body{padding:0 1.4rem 1.25rem;display:grid;gap:.75rem;max-width:52rem}.finding-body h4{margin:.25rem 0 0;font-size:.875rem}.finding-body p,.finding-body ul{margin:0}.paths{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8125rem;padding-left:1.1rem}
+.dot{display:inline-block;width:.65rem;height:.65rem;border-radius:50%;border:1.5px solid var(--text);background:var(--amber)}.dot-medium{background:linear-gradient(90deg,var(--amber) 50%,var(--surface) 50%)}.dot-low,.dot-unknown{background:var(--surface);border-style:dashed}
+.sev{font-weight:600;color:var(--text)}.sev-critical,.sev-high{color:var(--rust)}
+.more{border-top:1px solid var(--line);gap:0;display:flex;flex-direction:column}.more>details{border-bottom:1px solid var(--line)}.more>details>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:1rem;min-height:3.5rem}.more>details>summary::-webkit-details-marker{display:none}
+.more>details>summary::before{content:"";width:.45rem;height:.45rem;border-right:1.6px solid var(--muted);border-bottom:1.6px solid var(--muted);transform:rotate(-45deg);transition:transform .15s;flex:none;margin:0 .2rem}.more>details[open]>summary::before{transform:rotate(45deg)}
+.more>details>summary h2{margin:0;font-size:1.0625rem;font-weight:600}.more>details>summary span{margin-left:auto;color:var(--muted);font-size:.875rem;text-align:right}.more .body{padding:0 0 1.5rem 1.6rem;max-width:56rem}.more h3{font-size:1rem;margin:1.25rem 0 .4rem}
+.secondary{color:var(--muted)}.initiative{padding:1rem 0;border-bottom:1px solid var(--line-soft)}.initiative h3{margin-top:0}.initiative dl{display:grid;grid-template-columns:9rem minmax(0,1fr);gap:.4rem 1rem;margin:.5rem 0}.initiative dt{color:var(--muted)}.initiative dd{margin:0}
+.context-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem 2rem}.context-summary article{min-width:0}.context-priorities li{padding:.3rem 0}.context-priorities p{margin:.3rem 0}
+.badges{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center}.badges img{max-width:100%;height:auto}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,td{text-align:left;vertical-align:top;padding:.6rem .4rem;border-bottom:1px solid var(--line)}.table-wrap{overflow-x:auto}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.8125rem;padding:1rem;background:var(--surface);border:1px solid var(--line);border-radius:10px;max-height:24rem;overflow:auto}
+footer{color:var(--muted);font-size:.8125rem;margin:0}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1626;--surface:#16223a;--hover:#1a2843;--well:#22304b;--plot:#1a2640;--text:#eee9db;--text-soft:#cdd3de;--muted:#a9b2c4;--line:#2a3854;--line-soft:#24324d;--cream:#4a4026;--amber-ink:#f6d27a;--rust:#e07a55;--focus:#f2ae12}a{text-decoration-color:#f2ae12}.next-card header::before{color:#13223b;background:#f2ae12}}
+@media(max-width:640px){.bar-inner,main{padding-inline:1rem}main{padding-block:2rem 3rem;gap:2.5rem}.context-summary{grid-template-columns:1fr}.finding>summary{grid-template-columns:1fr;padding:1rem}.finding-body{padding:0 1rem 1rem}.more .body{padding-left:0}.initiative dl{grid-template-columns:1fr}.bar-actions{margin-left:0}}
 """
 
 
@@ -45,6 +73,12 @@ def dimension_map_data(report):
     targets = (report.get("goals") or {}).get("targets", {})
     confidence = confidence_assessment(assessment, review)
     entries = {entry["id"]: entry for entry in assessment.get("evidence", [])}
+    initiatives = {}
+    for item in (review.get("plan") or {}).get("initiatives", []):
+        for dimension, effect in (item.get("dimension_impacts") or {}).items():
+            initiatives.setdefault(dimension, []).append(
+                {"id": item.get("id"), "title": item.get("title", "Initiative"), "effect": effect}
+            )
     rows = []
     for dimension in DIMENSIONS:
         rating, target = ratings.get(dimension, {}), targets.get(dimension, {})
@@ -92,6 +126,7 @@ def dimension_map_data(report):
                 "burden_next_steps": list(readiness["next_steps"]),
                 "evidence_references": references[:5],
                 "evidence_reference_total": len(references),
+                "initiatives": initiatives.get(dimension, []),
             }
         )
     return {
@@ -102,7 +137,53 @@ def dimension_map_data(report):
         "preview_targets": False,
         "complete": assessment.get("complete") is True,
         "dimensions": rows,
+        "timeline": _timeline(report, rows),
     }
+
+
+def _timeline(report, rows):
+    """Snapshots oldest first; the shown one is always last and unknown never becomes zero."""
+    assessment = report["assessment"]
+
+    def entry(identity, created, revision, reviewed, scores):
+        revision = (
+            revision
+            if isinstance(revision, str) and re.fullmatch(r"[0-9a-fA-F]{7,64}", revision)
+            else None
+        )
+        return {
+            "assessment_id": identity,
+            "date": created[:10] if isinstance(created, str) else None,
+            "revision": revision[:7].lower() if revision else None,
+            "reviewed": reviewed,
+            "scores": scores,
+        }
+
+    earlier = [
+        entry(
+            item.get("assessment_id"),
+            item.get("created_at"),
+            item.get("revision"),
+            item.get("reviewed") is True,
+            {
+                dimension: [
+                    _score(((item.get("ratings") or {}).get(dimension) or {}).get(axis))
+                    for axis in ("capability", "burden")
+                ]
+                for dimension in DIMENSIONS
+            },
+        )
+        for item in report.get("timeline") or []
+        if isinstance(item, dict) and item.get("assessment_id") != assessment["id"]
+    ]
+    current = entry(
+        assessment["id"],
+        assessment.get("created_at"),
+        assessment.get("source", {}).get("revision"),
+        report.get("review") is not None,
+        {row["id"]: [row["capability"], row["burden"]] for row in rows},
+    )
+    return [*earlier[-11:], current]
 
 
 def _text(value):
@@ -134,53 +215,70 @@ def _value(value):
     return "Unknown" if value is None else f"{value} / 5"
 
 
+_SEVERITY = ("critical", "high", "medium", "low")
+
+
+def _first_sentence(text):
+    """Split an authored diagnosis into a headline and the remaining sentences."""
+    text = " ".join(str(text or "").split())
+    match = re.search(r"(?<=[.!?])\s+(?=[A-Z0-9])", text)
+    return (text[: match.start()], text[match.end() :]) if match else (text, "")
+
+
+def _plain(value):
+    return str(value).replace("_", " ")
+
+
+def _evidence_label(entry):
+    """Show project paths as written; files outside the project only by name."""
+    path = str(entry.get("path", ""))
+    return Path(path).name if path.startswith("/") else path
+
+
 def _context_html(context):
     """Present the shared authored context; this renderer assigns no milestones."""
-    lines = [
-        '<section aria-labelledby="project-context-heading"><h2 id="project-context-heading">Project maturity and intended purpose</h2>'
-    ]
+    lines = ['<details id="purpose"><summary><h2 id="project-context-heading">Purpose and fit</h2>']
     if context.get("status") != "recorded":
+        lines.append('<span>Not recorded</span></summary><div class="body">')
         lines.append(
             "<p>No maturity or intended-purpose judgment is recorded for this review. Existing engineering scores are unchanged.</p>"
         )
     else:
-        current, intended = context["current"], context["intended"]
+        current, intended, alignment = context["current"], context["intended"], context["alignment"]
+        lines.append(
+            "<span>"
+            + _text(intended.get("basis_label", "Unknown"))
+            + " · "
+            + _text(intended["confidence"])
+            + ' confidence</span></summary><div class="body">'
+        )
         lines += [
-            '<div class="context-summary"><article><h3>Current codebase</h3><p><strong>'
+            '<div class="context-summary"><article><h3>Today</h3><p><strong>'
             + _text(current.get("milestone_label", "Unknown"))
             + " · "
             + _text(current.get("readiness_label", "Unknown"))
-            + "</strong></p><p>Declared confidence: "
+            + "</strong> · "
             + _text(current["confidence"])
-            + "</p><p>"
+            + " confidence</p><p>"
             + _text(current["rationale"])
-            + '</p><p class="secondary">Evidence: '
-            + _text(", ".join(current["evidence_ids"]) or "none recorded")
-            + "</p></article><article><h3>Intended destination</h3><p><strong>"
+            + "</p></article><article><h3>Intended</h3><p><strong>"
             + _text(intended.get("milestone_label", "Unknown"))
-            + "</strong></p><p>Basis: "
+            + "</strong> · "
             + _text(intended.get("basis_label", "Unknown"))
-            + "; declared confidence: "
-            + _text(intended["confidence"])
             + "</p><p>"
             + _text(intended["statement"])
             + "</p>",
         ]
         if intended.get("attribution"):
-            lines.append("<p>Attribution: " + _text(intended["attribution"]) + "</p>")
+            lines.append('<p class="secondary">' + _text(intended["attribution"]) + "</p>")
+        lines.append("</article></div>")
         lines.append(
-            '<p class="secondary">Evidence: '
-            + _text(", ".join(intended["evidence_ids"]) or "no captured source citation")
-            + "</p></article></div>"
-        )
-        alignment = context["alignment"]
-        lines += [
-            "<h3>Fit and ranked focus</h3><p><strong>"
+            "<h3>"
             + _text(alignment.get("direction_label", "Unknown"))
-            + "</strong> — "
+            + "</h3><p>"
             + _text(alignment["rationale"])
             + "</p>"
-        ]
+        )
         if alignment["priorities"]:
             lines.append('<ol class="context-priorities">')
             for priority in alignment["priorities"]:
@@ -195,25 +293,19 @@ def _context_html(context):
                 )
                 if priority["initiative_ids"]:
                     lines.append(
-                        '<p class="secondary">Plan initiatives: '
-                        + ", ".join(
-                            '<a href="#initiative-'
-                            + _text(identity)
-                            + '">'
-                            + _text(identity)
-                            + "</a>"
-                            for identity in priority["initiative_ids"]
+                        '<p class="secondary">'
+                        + " · ".join(
+                            '<a href="#initiative-' + _text(i) + '">' + _text(i) + "</a>"
+                            for i in priority["initiative_ids"]
                         )
                         + "</p>"
                     )
                 lines.append("</li>")
             lines.append("</ol>")
-        else:
-            lines.append("<p>No ranked focus areas are recorded.</p>")
         for title, values in (
-            ("Deferred work", alignment["deferred"]),
+            ("Deferred on purpose", alignment["deferred"]),
             ("Alternative goals", intended["alternatives"]),
-            ("Intent limitations", intended["limitations"]),
+            ("Limits on purpose", intended["limitations"]),
         ):
             if values:
                 lines.append("<h3>" + title + "</h3>" + _list(values))
@@ -227,15 +319,279 @@ def _context_html(context):
                 "Scope milestones are not quality grades or required growth steps. Existing numeric goals remain independent.",
             )
         )
-        + "</p></section>"
+        + "</p></div></details>"
     )
+    return "\n".join(lines)
+
+
+def _verdict_html(report, context, plan):
+    review = report.get("review")
+    if plan and plan.get("diagnosis"):
+        headline, rest = _first_sentence(plan["diagnosis"])
+    elif review:
+        headline, rest = (
+            "Reviewed, without an improvement plan",
+            "Scores below are the saved judgment.",
+        )
+    else:
+        headline, rest = (
+            "Collected, not yet reviewed",
+            "Source facts are captured; no scores are judged.",
+        )
+    lines = [
+        '<section class="verdict" aria-labelledby="verdict-heading"><h1 id="verdict-heading">'
+        + _text(headline)
+        + "</h1>"
+    ]
+    if rest:
+        lines.append('<p class="lede">' + _text(rest) + "</p>")
+    if context.get("status") == "recorded":
+        current, intended = context["current"], context["intended"]
+        lines.append('<dl class="purpose">')
+        for title, value in (
+            (
+                "Today",
+                f"{current.get('milestone_label', 'Unknown')} · {current.get('readiness_label', 'Unknown')}",
+            ),
+            ("Intended", intended.get("milestone_label", "Unknown")),
+            ("Direction", context["alignment"].get("direction_label", "Unknown")),
+        ):
+            lines.append("<div><dt>" + title + "</dt><dd>" + _text(value) + "</dd></div>")
+        lines.append("</dl>")
+    lines.append("</section>")
+    return "\n".join(lines)
+
+
+def _next_html(plan):
+    items = (plan or {}).get("initiatives", [])
+    if not items:
+        return ""
+    lines = [
+        '<section aria-labelledby="next-heading"><div class="section-head"><h2 id="next-heading">Do next</h2>'
+        '<a href="#plan">Full plan</a></div><ol class="next-cards">'
+    ]
+    for item in items:
+        anchor = "#initiative-" + _text(item["id"]) if item.get("id") else "#plan"
+        lines.append(
+            '<li class="next-card"><header>'
+            + _text(_plain(item.get("priority", "Priority not set")).capitalize())
+            + '</header><h3><a href="'
+            + anchor
+            + '">'
+            + _text(item.get("title", "Initiative"))
+            + "</a></h3>"
+        )
+        if item.get("first_slice"):
+            lines.append(
+                '<p><span class="label">First step · </span>' + _text(item["first_slice"]) + "</p>"
+            )
+        impacts = [d for d in DIMENSIONS if d in (item.get("dimension_impacts") or {})]
+        if impacts:
+            lines.append(
+                '<div class="tags">'
+                + "".join('<span class="tag">' + _text(_LABELS[d]) + "</span>" for d in impacts)
+                + "</div>"
+            )
+        lines.append("</li>")
+    lines.append("</ol></section>")
+    return "\n".join(lines)
+
+
+def _findings_html(assessment, review):
+    findings = assessment.get("findings", []) + review.get("findings", [])
+    findings = sorted(
+        findings,
+        key=lambda f: _SEVERITY.index(f.get("severity")) if f.get("severity") in _SEVERITY else 9,
+    )
+    entries = {entry["id"]: entry for entry in assessment.get("evidence", [])}
+    counts = [
+        f"{sum(f.get('severity') == level for f in findings)} {level}"
+        for level in _SEVERITY
+        if any(f.get("severity") == level for f in findings)
+    ]
+    lines = [
+        '<section aria-labelledby="findings-heading"><div class="section-head"><h2 id="findings-heading">Findings</h2><p>'
+        + _text(" · ".join(counts) or "None recorded")
+        + "</p></div>"
+    ]
+    if not findings:
+        lines.append(
+            "<p>No findings were recorded. This is not proof of absent risks.</p></section>"
+        )
+        return "\n".join(lines)
+    lines.append('<div class="list">')
+    for finding in findings:
+        support = finding.get("support", {})
+        severity = finding.get("severity", "unknown")
+        confidence = _confidence(support.get("confidence"))
+        paths = [
+            _evidence_label(entries[i])
+            for i in dict.fromkeys(finding.get("evidence_ids", []))
+            if i in entries and entries[i].get("path")
+        ]
+        lines.append(
+            '<details class="finding"><summary><h3>'
+            + _text(finding.get("title", finding.get("message", "Finding")))
+            + '</h3><span class="finding-tags"><span class="sev sev-'
+            + _text(severity)
+            + '">'
+            + _text(severity.capitalize())
+            + '</span><span class="dot dot-'
+            + confidence
+            + '" aria-hidden="true"></span>'
+            + _text(confidence.capitalize())
+            + " confidence</span>"
+        )
+        if paths:
+            lines.append(
+                '<span class="where">'
+                + _text(paths[0])
+                + (_text(f"  +{len(paths) - 1} more") if len(paths) > 1 else "")
+                + "</span>"
+            )
+        lines.append('</summary><div class="finding-body">')
+        if support.get("rationale"):
+            lines.append("<p>" + _text(support["rationale"]) + "</p>")
+        if paths:
+            lines.append(
+                '<h4>Where</h4><ul class="paths">'
+                + "".join("<li>" + _text(p) + "</li>" for p in paths)
+                + "</ul>"
+            )
+        if support.get("counterevidence"):
+            lines.append("<h4>Keep intact</h4><p>" + _text(support["counterevidence"]) + "</p>")
+        if support.get("limitations"):
+            lines.append("<h4>Limits</h4>" + _list(support["limitations"]))
+        if support.get("scope"):
+            lines.append('<p class="secondary">Scope: ' + _text(_plain(support["scope"])) + "</p>")
+        lines.append("</div></details>")
+    lines.append("</div></section>")
+    return "\n".join(lines)
+
+
+def _plan_html(plan):
+    lines = [
+        '<details id="plan"><summary><h2 id="plan-heading">Improvement plan</h2><span>'
+        + ("Diagnosis, target state, done-checks" if plan else "Not saved")
+        + '</span></summary><div class="body">'
+    ]
+    if not plan:
+        lines.append(
+            "<p>No authored improvement plan is saved. Source leads and numeric targets do not supply a diagnosis.</p>"
+        )
+    else:
+        lines.append("<p>" + _text(plan.get("diagnosis", "")) + "</p>")
+        if plan.get("target_state"):
+            lines.append("<h3>Target state</h3><p>" + _text(plan["target_state"]) + "</p>")
+        for item in plan.get("initiatives", []):
+            lines.append(
+                '<article class="initiative"'
+                + (' id="initiative-' + _text(item["id"]) + '"' if item.get("id") else "")
+                + "><h3>"
+                + _text(item.get("title", "Initiative"))
+                + "</h3><dl>"
+            )
+            for label, key in (
+                ("Priority", "priority"),
+                ("Root cause", "root_cause"),
+                ("Scope", "scope"),
+                ("Burden effect", "burden_effect"),
+                ("First step", "first_slice"),
+            ):
+                if item.get(key):
+                    lines.append(
+                        "<dt>"
+                        + label
+                        + "</dt><dd>"
+                        + _text(_plain(item[key]) if key == "priority" else item[key])
+                        + "</dd>"
+                    )
+            impacts = item.get("dimension_impacts") or {}
+            for dimension in DIMENSIONS:
+                if dimension in impacts:
+                    lines.append(
+                        "<dt>"
+                        + _text(_LABELS[dimension])
+                        + "</dt><dd>"
+                        + _text(impacts[dimension])
+                        + "</dd>"
+                    )
+            if item.get("depends_on"):
+                lines.append(
+                    "<dt>Depends on</dt><dd>" + _text(", ".join(item["depends_on"])) + "</dd>"
+                )
+            lines.append("</dl>")
+            if item.get("acceptance"):
+                lines.append("<h4>Done when</h4>" + _list(item["acceptance"]))
+            lines.append("</article>")
+    lines.append("</div></details>")
+    return "\n".join(lines)
+
+
+def _coverage_html(report, model, confidence):
+    assessment = report["assessment"]
+    gaps = assessment.get("gaps", [])
+    lines = [
+        '<details id="coverage"><summary><h2 id="coverage-heading">Coverage and confidence</h2><span>'
+        + ("Complete" if model["complete"] else "Partial")
+        + _text(f" · {len(gaps)} gaps")
+        + '</span></summary><div class="body">',
+        "<p>"
+        + (
+            "Collection completed within its declared scope."
+            if model["complete"]
+            else "Collection is partial; scores are judged on the retained scope."
+        )
+        + " "
+        + (
+            "Targets are the saved goals."
+            if report.get("goals")
+            else "No goals are saved; target values remain unknown."
+        )
+        + "</p>",
+    ]
+    readiness = {
+        row["id"]: confidence["dimensions"][row["id"]]["burden"]["support"]["readiness"]
+        for row in model["dimensions"]
+    }
+    lines.append(
+        '<div class="table-wrap"><table><thead><tr><th scope="col">Dimension</th>'
+        '<th scope="col">Burden basis</th><th scope="col">Source</th><th scope="col">Experience</th>'
+        '<th scope="col">Recurrence</th></tr></thead><tbody>'
+    )
+    for row in model["dimensions"]:
+        item = readiness[row["id"]]
+        lines.append(
+            '<tr><th scope="row">'
+            + _text(row["label"])
+            + "</th><td>"
+            + _text(_plain(row["burden_basis"]))
+            + "</td><td>"
+            + str(len(item["source_evidence_ids"]))
+            + "</td><td>"
+            + str(len(item["experience_evidence_ids"]))
+            + "</td><td>"
+            + _text(_plain(item["recurrence"]))
+            + "</td></tr>"
+        )
+    lines.append("</tbody></table></div>")
+    caveats = list(dict.fromkeys(item["caveat"] for item in readiness.values()))
+    lines += ['<p class="secondary">' + _text(c) + "</p>" for c in caveats]
+    if gaps:
+        lines.append(
+            "<details><summary>"
+            + _text(f"{len(gaps)} collection gaps")
+            + "</summary>"
+            + _list(gaps[:200])
+            + ('<p class="secondary">More in report.json.</p>' if len(gaps) > 200 else "")
+            + "</details>"
+        )
+    lines.append("</div></details>")
     return "\n".join(lines)
 
 
 def report_html(report):
     """Render an offline document with no external resources or executable report text."""
-    from .service import markdown_report
-
     model = dimension_map_data(report)
     from .project_context import project_context_assessment
 
@@ -244,6 +600,7 @@ def report_html(report):
     )
     confidence = confidence_assessment(report["assessment"], report.get("review"))
     assessment, review = report["assessment"], report.get("review") or {}
+    plan = review.get("plan") or report.get("goal_alignment", {}).get("plan")
     badges = badge_assets(report)
     bundle = _asset_text("dimension-map.generated.js")
     if re.search(r"</script", bundle, re.I):
@@ -270,6 +627,8 @@ def report_html(report):
         data = base64.b64encode(badges[name + ".svg"].encode()).decode("ascii")
         return f'<img alt="{_text("PAT " + _LABELS.get(name, "snapshot"))}" src="data:image/svg+xml;base64,{data}">'
 
+    revision = assessment.get("source", {}).get("revision")
+    created = assessment.get("created_at")
     lines = [
         '<!doctype html><html lang="en"><head><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
@@ -279,51 +638,31 @@ def report_html(report):
         + _text(model["project"])
         + "</title><style>"
         + style
-        + "</style></head><body><main>",
-        '<header><p class="eyebrow">Project Assessment Toolkit</p><h1>'
+        + "</style></head><body>",
+        '<header class="bar"><div class="bar-inner"><span class="brand">'
+        '<svg viewBox="0 0 32 32" aria-hidden="true" focusable="false">'
+        + MARK.format(transform="translate(0 0)")
+        + '</svg>PAT</span><span class="project">'
         + _text(model["project"])
-        + "</h1>",
-        '<p class="secondary">Captured assessment '
-        + _text(model["assessment_id"])
-        + "; review "
-        + _text(model["review_id"] or "not saved")
-        + "; source "
-        + _text(assessment.get("source", {}).get("revision") or "revision unknown")
-        + "; rubric "
-        + _text(assessment.get("rubric_version", "unknown"))
-        + ".</p>",
-        '<p class="secondary">Captured '
-        + _text(assessment.get("created_at", "time unknown"))
-        + "; reviewed "
-        + _text(review.get("created_at", "not saved"))
-        + "; PAT "
-        + _text(assessment.get("tool_provenance", {}).get("version", "version unknown"))
-        + ".</p>",
-        "<p>Capability describes what works; burden describes the cost of keeping it working. "
-        "Higher capability and lower burden are preferable. Useful capability above a minimum has no penalty.</p>",
-        "<p>"
+        + "</span>"
+        + ('<code class="stamp">' + _text(str(revision)[:7]) + "</code>" if revision else "")
+        + ('<span class="stamp">' + _text(str(created)[:10]) + "</span>" if created else "")
+        + '<span class="bar-actions">'
         + (
-            "A saved review is shown."
-            if report.get("review")
-            else "Collection only: no authored review is saved."
-        )
-        + (
-            " Collection completed within its declared scope."
+            ""
             if model["complete"]
-            else " Collection is partial; inspect the retained scope and gaps."
+            else '<a class="chip chip-partial" href="#coverage">'
+            + _text(f"Partial scan · {len(assessment.get('gaps', []))} gaps")
+            + "</a>"
         )
-        + "</p>",
-        "</header>",
-        _context_html(context),
-        '<section aria-label="Assessment badges"><div class="badges">'
-        + "".join(badge_image(d) for d in ("summary", *DIMENSIONS))
-        + "</div></section>",
-        '<section aria-labelledby="map-heading"><h2 id="map-heading">Explore capability and burden</h2>'
-        '<div id="dimension-map"></div><noscript><p>Interactive exploration needs JavaScript. The scorecard and report below remain available.</p></noscript></section>',
-        '<section aria-labelledby="scores-heading"><h2 id="scores-heading">Scorecard</h2><div class="table-wrap"><table>'
-        "<caption>Current values and saved goals; confidence is declared independently for each axis.</caption>"
-        '<thead><tr><th scope="col">Dimension</th><th scope="col">Capability</th><th scope="col">Burden</th>'
-        '<th scope="col">Confidence C / B</th><th scope="col">Goal min C / max B</th></tr></thead><tbody>',
+        + ("" if report.get("review") else '<span class="chip">Unreviewed</span>')
+        + '<a class="chip" href="#downloads">Downloads</a></span></div></header><main>',
+        _verdict_html(report, context, plan),
+        _next_html(plan),
+        '<section aria-labelledby="map-heading"><div class="section-head"><h2 id="map-heading">Dimensions</h2></div>'
+        '<div id="dimension-map"></div><noscript><div class="table-wrap"><table>'
+        '<thead><tr><th scope="col">Dimension</th><th scope="col">Capability</th><th scope="col">Upkeep burden</th>'
+        '<th scope="col">Target: capability ≥ · burden ≤</th><th scope="col">Why</th></tr></thead><tbody>',
     ]
     for row in model["dimensions"]:
         lines.append(
@@ -331,161 +670,57 @@ def report_html(report):
             + _text(row["label"])
             + "</th><td>"
             + _value(row["capability"])
+            + " · "
+            + _text(row["capability_confidence"])
             + "</td><td>"
             + _value(row["burden"])
-            + "</td><td>"
-            + _text(row["capability_confidence"])
-            + " / "
+            + " · "
             + _text(row["burden_confidence"])
             + "</td><td>"
             + _value(row["capability_min"])
-            + " / "
+            + " · "
             + _value(row["burden_max"])
+            + "</td><td>"
+            + _text(row["rationale"])
             + "</td></tr>"
         )
-    lines += ["</tbody></table></div>"]
-    for row in model["dimensions"]:
-        lines.append(
-            '<details id="dimension-'
-            + row["id"]
-            + '"><summary>'
-            + _text(row["label"])
-            + " rationale and recommendations</summary><p>"
-            + _text(row["rationale"])
-            + "</p>"
-        )
-        lines.append(
-            "<p>Burden basis: "
-            + _text(row["burden_basis"])
-            + ". Evidence: "
-            + _text(", ".join(row["evidence_ids"]) or "none recorded")
-            + ".</p>"
-        )
-        readiness = confidence["dimensions"][row["id"]]["burden"]["support"]["readiness"]
-        lines.append(
-            "<p>Burden evidence: "
-            + _text(
-                "; ".join(
-                    f"{label}: {len(readiness[key])}"
-                    for label, key in (
-                        ("source", "source_evidence_ids"),
-                        ("attributed experience", "experience_evidence_ids"),
-                        ("matched cost reports", "matched_cost_evidence_ids"),
-                        ("partial elapsed reports", "partial_elapsed_evidence_ids"),
-                    )
-                )
-            )
-            + ".</p><p>Declared trace activities: "
-            + _text(
-                "; ".join(f"{key}: {value}" for key, value in readiness["trace_activities"].items())
-            )
-            + "; recurrence: "
-            + _text(readiness["recurrence"])
-            + "; challenge: "
-            + _text(readiness["challenge"])
-            + ".</p>"
-        )
-        if readiness["next_steps"]:
-            lines.append("<p>Next evidence:</p>" + _list(readiness["next_steps"]))
-        lines.append('<p class="secondary">' + _text(readiness["caveat"]) + "</p>")
-        lines.append(_list(row["recommendations"]) + "</details>")
     lines += [
-        '</section><section aria-labelledby="findings-heading"><h2 id="findings-heading">Findings</h2>'
+        "</tbody></table></div></noscript></section>",
+        _findings_html(assessment, review),
+        '<section class="more" aria-label="Plan, context and evidence">',
+        _plan_html(plan),
+        _context_html(context),
+        _coverage_html(report, model, confidence),
+        '<details id="downloads"><summary><h2>Downloads</h2><span>report.md · report.json · badges</span></summary>'
+        '<div class="body"><p><a href="report.md">report.md</a> · <a href="report.json">report.json</a> '
+        '<span class="secondary">beside this file in the export folder</span></p>'
+        '<div class="badges" aria-label="Assessment badges">'
+        + "".join(badge_image(d) for d in ("summary", *DIMENSIONS))
+        + "</div></div></details>",
+        '<details id="about"><summary><h2>About this snapshot</h2><span>Rubric '
+        + _text(assessment.get("rubric_version", "unknown"))
+        + " · PAT "
+        + _text(assessment.get("tool_provenance", {}).get("version", "unknown"))
+        + '</span></summary><div class="body"><dl class="purpose">',
     ]
-    findings = assessment.get("findings", []) + review.get("findings", [])
-    for finding in findings:
-        support = finding.get("support", {})
-        lines.append(
-            '<article class="finding"><h3>'
-            + _text(finding.get("severity", "unknown").capitalize())
-            + ": "
-            + _text(finding.get("title", finding.get("message", "Finding")))
-            + "</h3>"
-        )
-        if support:
-            lines.append(
-                "<p>"
-                + _text(support.get("rationale", ""))
-                + '</p><p class="secondary">Declared finding confidence: '
-                + _text(support.get("confidence", "unknown"))
-                + "; scope: "
-                + _text(support.get("scope", "unknown"))
-                + ".</p>"
-            )
-            lines.append(
-                "<p>Counterevidence: "
-                + _text(support.get("counterevidence", "Not recorded"))
-                + "</p>"
-                + _list(support.get("limitations", []))
-            )
-        lines.append(
-            '<p class="secondary">Evidence: '
-            + _text(", ".join(finding.get("evidence_ids", [])) or "none recorded")
-            + ".</p></article>"
-        )
-    if not findings:
-        lines.append("<p>No findings were recorded. This is not proof of absent risks.</p>")
-    plan = review.get("plan") or report.get("goal_alignment", {}).get("plan")
+    for title, value in (
+        ("Assessment", model["assessment_id"]),
+        ("Review", model["review_id"] or "Not saved"),
+        ("Source", revision or "Revision unknown"),
+        ("Captured", created or "Time unknown"),
+        ("Reviewed", review.get("created_at", "Not saved")),
+    ):
+        lines.append("<div><dt>" + title + "</dt><dd><code>" + _text(value) + "</code></dd></div>")
     lines += [
-        '</section><section aria-labelledby="plan-heading"><h2 id="plan-heading">Diagnosis and improvement plan</h2>'
-    ]
-    if plan:
-        lines += [
-            "<p>"
-            + _text(plan.get("diagnosis", ""))
-            + "</p><p>Target state: "
-            + _text(plan.get("target_state", ""))
-            + "</p>"
-        ]
-        for item in plan.get("initiatives", []):
-            lines.append(
-                '<article class="initiative"'
-                + (' id="initiative-' + _text(item["id"]) + '"' if item.get("id") else "")
-                + "><h3>"
-                + _text(item.get("title", "Initiative"))
-                + "</h3>"
-            )
-            for label, key in (
-                ("Priority", "priority"),
-                ("Root cause", "root_cause"),
-                ("Scope", "scope"),
-                ("Burden effect", "burden_effect"),
-                ("First slice", "first_slice"),
-            ):
-                lines.append(
-                    "<p><strong>"
-                    + label
-                    + ":</strong> "
-                    + _text(item.get(key, "Not recorded"))
-                    + "</p>"
-                )
-            lines.append(
-                "<p>Acceptance evidence:</p>" + _list(item.get("acceptance", [])) + "</article>"
-            )
-    else:
-        lines.append(
-            "<p>No authored improvement plan is saved. Source leads and numeric targets do not supply a diagnosis.</p>"
-        )
-    lines += [
-        '</section><section aria-labelledby="coverage-heading"><h2 id="coverage-heading">Coverage, confidence and progress</h2>',
-        "<p>Assessment and review are frozen records. Source binding verifies captured identity, not runtime effectiveness or the truth of a judgment. "
-        "Badges show the same saved ratings; finding severity is separate from confidence.</p>",
-        "<p>"
-        + (
-            "Saved goals are shown in the scorecard."
-            if report.get("goals")
-            else "No goals are saved; target values remain unknown."
-        )
-        + "</p>",
-        "<details><summary>Complete assessment, evidence scope and progress</summary><pre>"
-        + _text(markdown_report(report))
-        + "</pre></details>",
+        "</dl><p>Assessment and review are frozen records. Source binding verifies captured identity, "
+        "not runtime effectiveness or the truth of a judgment. Finding severity is separate from confidence.</p>",
         "<details><summary>Three.js license</summary><pre>"
         + _text(_asset_text("THREE-LICENSE.txt"))
-        + "</pre></details>",
-        "</section></main><script>" + script + "</script></body></html>",
+        + "</pre></details></div></details></section>",
+        "<footer>Static snapshot of source and supplied evidence. Runtime behaviour may differ.</footer>",
+        "</main><script>" + script + "</script></body></html>",
     ]
-    return "\n".join(lines)
+    return "\n".join(line for line in lines if line)
 
 
 def _write_at(directory, name, payload):

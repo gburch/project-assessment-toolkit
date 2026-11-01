@@ -1000,6 +1000,45 @@ class AssessmentService:
         ).fetchone()
         return json.loads(row[0]) if row else None
 
+    def _timeline(self, db, assessment, limit=12):
+        """Recent snapshots up to this one, oldest first, with their latest saved ratings.
+
+        Ratings from another rubric version are withheld rather than compared.
+        """
+        rows = db.execute(
+            "SELECT data FROM assessments WHERE project_id=? AND "
+            "seq<=(SELECT seq FROM assessments WHERE id=?) ORDER BY seq DESC LIMIT ?",
+            (assessment["project_id"], assessment["id"], limit),
+        ).fetchall()
+        timeline = []
+        for (data,) in reversed(rows):
+            snapshot = json.loads(data)
+            try:
+                self._authorize_assessment(db, snapshot)
+            except PermissionError:
+                continue
+            review = self._review(db, snapshot["id"])
+            comparable = review is not None and (
+                snapshot.get("rubric_version") == assessment.get("rubric_version")
+            )
+            ratings = review.get("ratings", {}) if comparable else {}
+            timeline.append(
+                {
+                    "assessment_id": snapshot["id"],
+                    "created_at": snapshot.get("created_at"),
+                    "revision": snapshot.get("source", {}).get("revision"),
+                    "reviewed": comparable,
+                    "ratings": {
+                        dimension: {
+                            axis: ratings.get(dimension, {}).get(axis)
+                            for axis in ("capability", "burden")
+                        }
+                        for dimension in DIMENSIONS
+                    },
+                }
+            )
+        return timeline
+
     @staticmethod
     def _goals(db, project_id):
         row = db.execute(
@@ -2597,6 +2636,7 @@ class AssessmentService:
                 "confidence_assessment": alignment["confidence_assessment"],
                 "system_map": alignment["system_map"],
                 "project_context": alignment["project_context"],
+                "timeline": self._timeline(db, assessment),
             }
         from .badges import badge_assets
         from .report_export import dimension_map_data

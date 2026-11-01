@@ -28,12 +28,12 @@ utility can be complete; commercial or platform scope is not automatically bette
 
 ## What a report looks like
 
-Explore capability, upkeep burden and selected goals together, then inspect the
-evidence and ranked improvement plan. **This preview uses synthetic data, not an
+Each report leads with a verdict and ranked next steps, then shows every dimension
+against its target. Evidence and caveats stay one click down. **This preview uses synthetic data, not an
 assessment of a real project.** Click either screenshot to view it at full size.
 
 <p align="center">
-  <a href=".github/assets/report-overview.png"><img src=".github/assets/report-overview.png" width="1120" alt="PAT synthetic example report: all eight named dimensions with separate capability and burden tracks, target markers, confidence and directional gaps; the selected testing detail preserves capability 4/5 while reducing burden 4/5 toward its ceiling of 2/5."></a>
+  <a href=".github/assets/report-overview.png"><img src=".github/assets/report-overview.png" width="1120" alt="PAT synthetic example report: a one-sentence verdict, four ranked next steps and all eight dimensions drawn as level vials, with shaded target zones, arrows for gaps and an empty vial for unknown performance capability; the selected Testing row shows its burden gap, rationale and linked initiatives."></a>
 </p>
 
 The example is a **working personal application** whose owner wants dependable
@@ -57,7 +57,7 @@ unknown rather than becoming a zero.
 <summary>See example findings and the improvement plan</summary>
 
 <p align="center">
-  <a href=".github/assets/report-details.png"><img src=".github/assets/report-details.png" width="1120" alt="PAT example findings and improvement plan, including architecture coupling, testing feedback burden, confidence, counterevidence, limitations, preserved guarantees, acceptance evidence and a first implementation slice."></a>
+  <a href=".github/assets/report-details.png"><img src=".github/assets/report-details.png" width="1120" alt="PAT example findings and improvement plan: each finding shows severity, confidence, files, what to keep intact and limits; each initiative shows root cause, scope, first step, per-dimension effect and done-when checks."></a>
 </p>
 
 Findings carry evidence references, confidence, counterevidence and limits.
