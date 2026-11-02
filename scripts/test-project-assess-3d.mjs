@@ -201,6 +201,34 @@ async function assertLevelMap(page) {
   await map.getByRole("button", { name: "Dimensions", exact: true }).click();
   await map.locator('.dm-dimension[data-dimension="extensibility"]').click();
 }
+async function assertBackfillLayers(page, assessmentId) {
+  // Git backfills arrive unrated; a later hindsight review is labelled as such.
+  const result = await page.evaluate(async (id) => {
+    const report = await (await fetch(`/api/report?assessment_id=${encodeURIComponent(id)}`)).json();
+    const current = report.dimension_map.timeline.at(-1);
+    const unknown = Object.fromEntries(Object.keys(current.scores).map((key) => [key, [null, null]]));
+    const host = document.createElement("div");
+    document.body.append(host);
+    const map = globalThis.PATDimensionMap.createDimensionMap(host, { ...report.dimension_map, timeline: [
+      { date: "2026-08-31", revision: "abc1234", origin: "git-commit", reviewed: false, hindsight: false, scores: unknown },
+      { date: "2026-09-30", revision: "def5678", origin: "git-commit", reviewed: true, hindsight: true, scores: current.scores,
+        comparison: { comparable: true, event: "source_change" } },
+      current,
+    ] });
+    [...host.querySelectorAll("button")].find((button) => button.textContent === "What moved").click();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const labels = [...host.querySelectorAll(".dm-label-layer, .dm-label-layer-current")].map((node) => node.textContent);
+    const note = host.querySelector(".dm-stage-note")?.textContent;
+    const count = host.dataset.snapshotCount;
+    map.dispose();
+    host.remove();
+    return { labels, note, count };
+  }, assessmentId);
+  assert.equal(result.count, "3");
+  assert.deepEqual(result.labels.slice(0, 2), ["2026-08-31 · commit abc1234 · not reviewed", "2026-09-30 · commit def5678 · source change · judged in hindsight"]);
+  assert(!result.labels[2].includes("commit") && !result.labels[2].includes("hindsight"), "the current scan layer is not a backfill");
+  assert.match(result.note, /their scores stay unknown/);
+}
 async function assertMap(page) {
   const map = page.locator("#dimension-map");
   await expect(map).toHaveAttribute("data-renderer", "webgl");
@@ -392,6 +420,7 @@ try {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await explore3d(page);
   await assertMap(page);
+  await assertBackfillLayers(page, data.assessment_id);
   const badgeDownload = page.waitForEvent("download");
   await page.locator("#badges a").first().click();
   const badge = await badgeDownload;
@@ -524,7 +553,7 @@ try {
   await accessibility(noWebgl, "live no-WebGL fallback accessibility");
   await fallback.close();
   assert.deepEqual(errors, []);
-  console.log("PAT comparison/3D acceptance passed: aligned independent scores/goals/confidence, true zero and partial unknown axes, no-goals state, lazy WebGL, presets/orbit/keyboard, nine bound badges, goal preview/save separation, hostile content, offline export, no-WebGL comparison, mobile themes/reduced motion and accessibility.");
+  console.log("PAT comparison/3D acceptance passed: aligned independent scores/goals/confidence, true zero and partial unknown axes, no-goals state, lazy WebGL, presets/orbit/keyboard, nine bound badges, goal preview/save separation, hostile content, Git backfill and hindsight layers, offline export, no-WebGL comparison, mobile themes/reduced motion and accessibility.");
 } finally {
   await browser?.close();
   lines.close();

@@ -166,7 +166,9 @@ def _timeline(report, rows):
             "assessment_id": identity,
             "date": created[:10] if isinstance(created, str) else None,
             "revision": revision[:7].lower() if revision else None,
+            "origin": "git-commit" if metadata.get("origin") == "git-commit" else "scan",
             "reviewed": reviewed,
+            "hindsight": reviewed and metadata.get("hindsight") is True,
             "scores": scores,
             **{
                 key: metadata.get(key)
@@ -189,7 +191,7 @@ def _timeline(report, rows):
     earlier = [
         entry(
             item.get("assessment_id"),
-            item.get("created_at"),
+            item.get("as_of") or item.get("created_at"),
             item.get("revision"),
             item.get("reviewed") is True,
             {
@@ -204,6 +206,7 @@ def _timeline(report, rows):
         for item in report.get("timeline") or []
         if isinstance(item, dict) and item.get("assessment_id") != assessment["id"]
     ]
+    origin = assessment.get("source", {}).get("origin") or {}
     current_metadata = next(
         (
             item
@@ -214,12 +217,14 @@ def _timeline(report, rows):
     )
     current = entry(
         assessment["id"],
-        assessment.get("created_at"),
+        origin.get("as_of") or assessment.get("created_at"),
         assessment.get("source", {}).get("revision"),
         report.get("review") is not None,
         {row["id"]: [row["capability"], row["burden"]] for row in rows},
         {
             **current_metadata,
+            "origin": origin.get("kind"),
+            "hindsight": "hindsight" in (report.get("review") or {}),
             "review_id": (report.get("review") or {}).get("id"),
             "rubric_version": assessment.get("rubric_version"),
             "scope_digest": assessment.get("scope_digest"),

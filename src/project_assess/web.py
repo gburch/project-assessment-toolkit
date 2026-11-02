@@ -191,6 +191,7 @@ def create_server(service, port=0):
             if parsed.query or parsed.path not in {
                 "/api/targets",
                 "/api/scan",
+                "/api/backfill",
                 "/api/review",
                 "/api/challenge-template",
             }:
@@ -247,6 +248,24 @@ def create_server(service, port=0):
                     service.submit_review(**document)
                     if parsed.path == "/api/review"
                     else service.challenge_template(**document)
+                )
+            elif parsed.path == "/api/backfill":
+                fields = {"project_id", "months", "tags", "revisions", "analysis_profile"}
+                if not isinstance(document.get("project_id"), str) or document.keys() - fields:
+                    raise ValueError("Backfill requires project_id and one commit selection")
+                project = next(
+                    (p for p in service.list_projects() if p["id"] == document["project_id"]),
+                    None,
+                )
+                if project is None:
+                    self._error(404, "Project not found")
+                    return
+                result = service.backfill(
+                    project["root"],
+                    months=document.get("months"),
+                    tags=document.get("tags"),
+                    revisions=document.get("revisions"),
+                    analysis_profile=document.get("analysis_profile", "standard"),
                 )
             else:
                 identity_fields = document.keys() - {"analysis_profile", "analyzers"}

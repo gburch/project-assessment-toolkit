@@ -61,6 +61,7 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 names = {tool.name for tool in discovered.tools}
                 assert {
                     "scan_project",
+                    "backfill_history",
                     "get_report",
                     "export_report",
                     "get_badge",
@@ -99,6 +100,15 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 )
                 denied = await session.call_tool("scan_project", {"root": str(tmp_path)})
                 assert denied.is_error
+                assert not next(
+                    tool.annotations.read_only_hint
+                    for tool in discovered.tools
+                    if tool.name == "backfill_history"
+                )
+                outside = await session.call_tool(
+                    "backfill_history", {"root": str(tmp_path), "months": 3}
+                )
+                assert outside.is_error
                 captured = await session.call_tool(
                     "scan_project", {"root": str(root), "reports": [str(supplied)]}
                 )

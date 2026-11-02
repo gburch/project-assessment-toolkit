@@ -17,7 +17,7 @@ const output = path.join(repo, ".artifacts");
 await mkdir(output, { recursive: true });
 const fixture = await mkdtemp(path.join(output, "project-assess-browser-"));
 const python = String.raw`
-import json, sys
+import json, os, subprocess, sys
 from pathlib import Path
 from threading import Thread
 from project_assess.service import AssessmentService
@@ -79,6 +79,16 @@ initial = service.scan(root)
 second_root = base / 'second-project'
 second_root.mkdir()
 (second_root / 'app.py').write_text('value = 1')
+def commit_second(message, date):
+    command = ['git', '-C', str(second_root), '-c', 'user.name=PAT fixture',
+        '-c', 'user.email=fixture@example.invalid']
+    subprocess.run([*command, 'add', '-A'], check=True, capture_output=True)
+    subprocess.run([*command, 'commit', '-qm', message], check=True, capture_output=True,
+        env={**os.environ, 'GIT_AUTHOR_DATE': date, 'GIT_COMMITTER_DATE': date})
+subprocess.run(['git', '-C', str(second_root), 'init', '-q'], check=True, capture_output=True)
+commit_second('first', '2026-09-10T12:00:00+00:00')
+(second_root / 'app.py').write_text('value = 2')
+commit_second('second', '2026-10-10T12:00:00+00:00')
 second = service.scan(second_root)
 service.set_targets(second['project_id'], None, 0, profile='internal-service')
 first_root = base / 'ui-first-project'
@@ -181,6 +191,33 @@ async function holdResponse(page, pattern, errorResponse = false) {
       await page.unroute(pattern, handler);
     }
   };
+}
+async function checkGitBackfill(page, origin) {
+  const projects = await (await page.request.get(`${origin}/api/projects`)).json();
+  const second = projects.find((project) => project.name === "second-project");
+  await page.selectOption("#project", second.id);
+  await expect(page.locator("#source")).toContainText(second.root);
+  const map = page.locator("#dimension-map");
+  await expect(map).toHaveAttribute("data-snapshot-count", "1");
+  await page.selectOption("#backfill-mode", "revisions");
+  await expect(page.locator("#backfill-count")).toBeHidden();
+  await page.getByRole("textbox", { name: "Revisions" }).fill("HEAD~1");
+  const posted = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/backfill" && request.method() === "POST");
+  await page.click("#backfill");
+  assert.deepEqual((await posted).postDataJSON(), { project_id: second.id, analysis_profile: "standard", revisions: ["HEAD~1"] });
+  await expect(page.locator("#status")).toContainText("Captured 1 earlier commit. Their ratings stay unknown until reviewed.");
+  await expect(map).toHaveAttribute("data-snapshot-count", "2");
+  await expect(page.locator("#history")).toContainText("Git backfill · source as of 2026-09-10");
+  const latest = (await (await page.request.get(`${origin}/api/projects`)).json()).find((project) => project.id === second.id);
+  assert.equal(latest.latest_assessment_id, second.latest_assessment_id, "backfilled history must not displace the latest scan");
+  const report = await (await page.request.get(`${origin}/api/report?assessment_id=${second.latest_assessment_id}`)).json();
+  const [earlier] = report.dimension_map.timeline;
+  assert.equal(earlier.origin, "git-commit");
+  assert.equal(earlier.reviewed, false);
+  assert.deepEqual(earlier.scores.security, [null, null], "backfilled layers keep unknown scores");
+  await page.click("#backfill");
+  await expect(page.locator("#status")).toContainText("Captured 0 earlier commits, 1 already saved.");
+  await page.selectOption("#backfill-mode", "months");
 }
 async function checkProjectSwitches(page, origin) {
   const projects = await (await page.request.get(`${origin}/api/projects`)).json();
@@ -1094,6 +1131,10 @@ try {
   await checkLegacyTargets(page, origin, frameworkProfile);
   await checkLegacyTargets(page, origin, frameworkProfile, "performance");
   await checkProjectSwitches(page, origin);
+  await checkGitBackfill(page, origin);
+  const projectsAfterBackfill = await (await page.request.get(`${origin}/api/projects`)).json();
+  await page.selectOption("#project", projectsAfterBackfill.find((project) => project.name.startsWith("fixture-")).id);
+  await expect(page.locator("#profile")).toBeEnabled();
   const accessibility = await new AxeBuilder({ page }).analyze();
   assert.deepEqual(accessibility.violations.map((v) => ({ id: v.id, impact: v.impact, targets: v.nodes.map((node) => node.target) })), [], "desktop accessibility");
   await page.screenshot({ path: path.join(output, "project-assess-desktop.png"), fullPage: true });
@@ -1124,7 +1165,7 @@ try {
   assert.deepEqual(mobileAccessibility.violations.map((v) => ({ id: v.id, impact: v.impact, targets: v.nodes.map((node) => node.target) })), [], "mobile accessibility");
   await page.screenshot({ path: path.join(output, "project-assess-mobile.png"), fullPage: true });
   assert.deepEqual(errors, [], "browser should not report JavaScript errors");
-  console.log("PAT browser acceptance passed: first scan/review, required Deep analyzers, reversible Standard selection and unavailable Joern, shared roadmap/coverage/urgent findings, filtered evidence/pagination/source identity, stale responses, goals/progress, hostile content, keyboard/mobile/accessibility, badge text bounds.");
+  console.log("PAT browser acceptance passed: first scan/review, required Deep analyzers, reversible Standard selection and unavailable Joern, shared roadmap/coverage/urgent findings, filtered evidence/pagination/source identity, stale responses, goals/progress, Git backfill, hostile content, keyboard/mobile/accessibility, badge text bounds.");
 } finally {
   await browser?.close();
   lines.close();

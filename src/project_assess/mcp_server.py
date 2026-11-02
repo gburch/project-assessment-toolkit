@@ -74,6 +74,23 @@ def create_mcp(service):
         """Read source within allowed roots and save an immutable local facts snapshot."""
         return service.scan(root, reports, analysis_profile=analysis_profile, analyzers=analyzers)
 
+    @server.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    def backfill_history(
+        root: str,
+        months: int | None = None,
+        tags: int | None = None,
+        revisions: list[str] | None = None,
+        analysis_profile: str = "standard",
+    ) -> dict[str, Any]:
+        """Save facts-only snapshots of earlier commits (choose one: month-ends over the last N months, the newest N tags, or listed revisions; at most 12). Reads Git objects into private state; never checks out or writes the project. Ratings stay unknown until reviewed; reviews of backfills are labelled hindsight."""
+        return service.backfill(
+            root,
+            months=months,
+            tags=tags,
+            revisions=revisions,
+            analysis_profile=analysis_profile,
+        )
+
     @server.tool(annotations={"readOnlyHint": True})
     def list_analyzers() -> dict[str, Any]:
         """List trusted optional analyzers; scans never install tools or load target plugins."""
