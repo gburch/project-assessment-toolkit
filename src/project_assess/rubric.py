@@ -160,6 +160,7 @@ _ANCHORS = {
                 "examples": [
                     "Tests coupled to private implementation details or cosmetic snapshots.",
                     "Historical coverage gates or mandatory documentation for trivial internal edits.",
+                    "Premature benchmark gates or timing thresholds that cause repeated reruns and threshold maintenance without protecting a current user need.",
                 ],
                 "guardrails": (
                     "Preserve security, durable-data and actual compatibility guarantees. "
@@ -301,14 +302,37 @@ _ANCHORS = {
                     "A local utility need not scale horizontally. Source patterns are risk leads, "
                     "not measured bottlenecks. Missing workload or execution evidence stays explicit; "
                     "load tests and target execution require separate authorization. Raw latency or "
-                    "memory consumption is not upkeep burden."
+                    "memory consumption is not upkeep burden. Representative occasional or advisory "
+                    "measurements can supply evidence; a benchmark suite or blocking CI gate is not required."
                 ),
                 "reporting": (
                     "State workload assumptions, inspected paths, source-supported controls and "
                     "measurement gaps. Recommend the smallest useful measurement or change; account "
                     "for tuning, cache invalidation, capacity management and operating upkeep separately."
                 ),
-            }
+            },
+            "benchmark_proportionality": {
+                "purpose": "Keep performance assurance useful without making ordinary change brittle.",
+                "questions": [
+                    "Which current user requirement or credible workload risk justifies measurement or a blocking performance gate?",
+                    "Do thresholds leave margin for ordinary workload and runner variance, or merely freeze a recent best run?",
+                    "Do failures identify meaningful regressions, or cause recurrent reruns, baseline edits and tuning without user value?",
+                    "Would existing observations, an occasional measurement or an advisory check provide sufficient assurance?",
+                ],
+                "guardrails": (
+                    "A missing benchmark suite alone is not a defect. Timing assertions are leads, "
+                    "not proof of flakiness or insufficient headroom; inspect objectives, variance, "
+                    "required gates and change experience. Preserve demonstrated performance needs. "
+                    "No universal tolerance percentage or benchmark quota applies."
+                ),
+                "reporting": (
+                    "State the protected outcome and the smallest proportionate evidence or control. "
+                    "Attribute supported rerun and threshold-maintenance cost to performance and "
+                    "relevant testing, delivery or maintainability burden without double-counting. "
+                    "An unmet target may remain an explicit gap when more assurance is not worth "
+                    "its upkeep; surface the goal tradeoff without changing saved goals."
+                ),
+            },
         },
         "capability": [
             "Observed intended workloads fail basic response or resource expectations without effective controls.",

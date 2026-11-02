@@ -10,7 +10,7 @@ from collections import Counter, defaultdict, deque
 from .generic_analysis import source_area, source_language
 from .static_analysis import source_role
 
-VERSION = "1"
+VERSION = "2"
 DIMENSIONS = ("security", "delivery", "operability", "extensibility", "performance")
 MAX_SIGNALS = 8000
 _CAVEAT = (

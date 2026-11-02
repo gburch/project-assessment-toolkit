@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import re
 from collections import Counter, defaultdict
 
 from .static_analysis import source_role
 
-VERSION = "1"
+VERSION = "2"
 DIMENSIONS = ("security", "delivery", "operability", "extensibility", "performance")
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 _SCOPES = (*_FUNCTIONS, ast.ClassDef)
@@ -44,6 +45,12 @@ _GATES = {
     "assert_authorized",
 }
 _IO = _HTTP | _PROCESSES | {"builtins.open", "urllib.request.urlopen"}
+_TIMING_NAME = re.compile(r"(?:elapsed|duration|latency)(?:_?(?:time|seconds?|secs?|ms|ns))?", re.I)
+_CLOCKS = {
+    f"time.{name}{suffix}"
+    for name in ("perf_counter", "monotonic", "time", "process_time")
+    for suffix in ("", "_ns")
+}
 _CAVEAT = "Observed syntax and conservative name binding only; controls may be bypassed, intentional or ineffective. Runtime, complete call resolution and absence claims are unsupported."
 
 
@@ -215,6 +222,20 @@ def analyze_python_controls(path, tree, node_limit=200_000, signal_limit=64):
 
     buckets, counts = defaultdict(list), Counter()
 
+    def timing_operand(node, scope):
+        if isinstance(node, (ast.Name, ast.Attribute)) and _TIMING_NAME.fullmatch(
+            _name(node).rsplit(".", 1)[-1]
+        ):
+            return "timing_name"
+        if (
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.Sub)
+            and isinstance(node.left, ast.Call)
+            and resolve(node.left.func, scope) in _CLOCKS
+        ):
+            return "clock_difference"
+        return None
+
     def emit(kind, dimensions, node, scope, loop, handler, category="mechanism", **details):
         target = node.func if isinstance(node, ast.Call) else node
         resolved = resolve(target, scope)
@@ -254,6 +275,45 @@ def analyze_python_controls(path, tree, node_limit=200_000, signal_limit=64):
             bucket.remove(max(bucket, key=lambda row: row[0]))
 
     for node, scope, loop, handler in rows:
+        comparison = None
+        if isinstance(node, ast.Assert) and isinstance(node.test, ast.Compare):
+            test = node.test
+            if len(test.ops) == 1 and isinstance(
+                test.ops[0], (ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Eq, ast.NotEq)
+            ):
+                comparison = (test.left, test.comparators[0], type(test.ops[0]).__name__)
+        elif (
+            isinstance(node, ast.Call)
+            and _name(node.func)
+            in {
+                "self.assertLess",
+                "self.assertLessEqual",
+                "self.assertGreater",
+                "self.assertGreaterEqual",
+            }
+            and len(node.args) >= 2
+        ):
+            comparison = (*node.args[:2], _name(node.func).rsplit(".", 1)[-1])
+        if comparison:
+            left, right, operator = comparison
+            basis = timing_operand(left, scope) or timing_operand(right, scope)
+            if basis:
+                threshold = right if timing_operand(left, scope) else left
+                emit(
+                    "performance.timing_threshold_hint",
+                    ["performance"],
+                    node,
+                    scope,
+                    loop,
+                    handler,
+                    "name_hint",
+                    measurement_basis=basis,
+                    comparison=operator,
+                    threshold_shape=_value(threshold),
+                    headroom="unestablished",
+                    variance="unestablished",
+                    gating="unestablished",
+                )
         if isinstance(node, ast.ClassDef):
             bases = [resolve(base, scope) for base in node.bases]
             known = sorted(

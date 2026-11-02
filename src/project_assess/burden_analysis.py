@@ -14,7 +14,7 @@ from collections import Counter, defaultdict, deque
 
 from .rubric import DIMENSIONS
 
-VERSION = "2"
+VERSION = "3"
 MAX_LEADS = 200
 MAX_SELECTOR_CANDIDATES = 64
 MAX_EXPRESSION_NODES = 4000
@@ -577,6 +577,15 @@ def summarize_burden(assessment, *, limit=80):
             traversal_partial |= stats.get("status") == "partial"
             for signal in bounded(stats.get("signals", [])):
                 name = signal.get("kind", "")
+                if name in {"performance.timing_threshold_hint", "timing_threshold_hint"}:
+                    emit(
+                        "performance.timing_threshold_hint",
+                        ["performance", "testing", "maintainability", "delivery"],
+                        signal.get("locations", []),
+                        signal.get("context", {}),
+                        analysis_id=entry["id"],
+                    )
+                    continue
                 if name in _CHANGE_MECHANISMS:
                     emit(
                         name,

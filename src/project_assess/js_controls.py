@@ -50,6 +50,7 @@ _OPTIONS = {
     "rejectUnauthorized",
 }
 _CAVEAT = "Syntax inventory only: names, options and boundaries do not establish control effectiveness, exposure, workload cost or safe changes."
+_TIMING_NAME = re.compile(r"(?:elapsed|duration|latency)(?:_?(?:time|seconds?|secs?|ms|ns))?", re.I)
 
 
 def _text(node, raw, bound=256):
@@ -78,6 +79,82 @@ def _literal(node, raw):
         value = _text(node, raw, 256)
         if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0] and "\\" not in value:
             return value[1:-1]
+    return None
+
+
+def _timing_assertion(node, raw):
+    """Direct assertion shapes only; no value tracking, threshold judgment or gate inference."""
+    target = node.child_by_field_name("function")
+    arguments = node.child_by_field_name("arguments")
+    args = arguments.named_children if arguments else []
+    name = _callee(target, raw)
+    comparison = None
+    if name in {"assert", "assert.ok", "console.assert"} and args:
+        test = args[0]
+        if test.type == "binary_expression":
+            op = _text(test.child_by_field_name("operator"), raw)
+            if op in {"<", "<=", ">", ">=", "===", "==", "!==", "!="}:
+                comparison = (
+                    test.child_by_field_name("left"),
+                    test.child_by_field_name("right"),
+                    op,
+                )
+    elif target and target.type == "member_expression" and args:
+        receiver = target.child_by_field_name("object")
+        matcher = _text(target.child_by_field_name("property"), raw)
+        if (
+            receiver
+            and receiver.type == "call_expression"
+            and _callee(receiver.child_by_field_name("function"), raw) == "expect"
+            and matcher
+            in {
+                "toBeLessThan",
+                "toBeLessThanOrEqual",
+                "toBeGreaterThan",
+                "toBeGreaterThanOrEqual",
+                "toBe",
+                "toEqual",
+            }
+        ):
+            expected = receiver.child_by_field_name("arguments")
+            if expected and expected.named_children:
+                comparison = (expected.named_children[0], args[0], matcher)
+    if comparison is None:
+        return None
+
+    def timing_value(value):
+        name = _callee(value, raw)
+        if name and _TIMING_NAME.fullmatch(name.rsplit(".", 1)[-1]):
+            return "timing_name"
+        if (
+            value
+            and value.type == "binary_expression"
+            and _text(value.child_by_field_name("operator"), raw) == "-"
+        ):
+            left = value.child_by_field_name("left")
+            if (
+                left
+                and left.type == "call_expression"
+                and _callee(left.child_by_field_name("function"), raw)
+                in {"performance.now", "Date.now"}
+            ):
+                return "clock_difference_syntax"
+        return None
+
+    left, right, operator = comparison
+    basis = timing_value(left) or timing_value(right)
+    if basis:
+        threshold = right if timing_value(left) else left
+        return {
+            "measurement_basis": basis,
+            "comparison": operator,
+            "threshold_shape": "numeric_literal"
+            if threshold and threshold.type == "number"
+            else "expression",
+            "headroom": "unestablished",
+            "variance": "unestablished",
+            "gating": "unestablished",
+        }
     return None
 
 
@@ -437,6 +514,9 @@ def analyze_javascript_controls(path, raw, nodes, *, partial=False, node_limit=1
             )
         if node.type not in {"call_expression", "new_expression"}:
             continue
+        timing = _timing_assertion(node, raw) if node.type == "call_expression" else None
+        if timing:
+            emit("timing_threshold_hint", ["performance"], node, category="name_hint", extra=timing)
         target = node.child_by_field_name("function") or node.child_by_field_name("constructor")
         name, resolution = resolve(_callee(target, raw), node)
         if not name:

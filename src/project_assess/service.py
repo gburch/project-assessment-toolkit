@@ -227,7 +227,7 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
         "delivery": "Show source-linked evidence for the required build and release boundaries in scope, including applicable failure and recovery paths, without assuming a green run proves delivery.",
         "operability": "Demonstrate the needed detection and recovery scenarios in scope and verify that operators can use the evidence and recovery steps; retain explicit gaps for unverified scenarios.",
         "extensibility": "Demonstrate the actual variations and supported authors in scope through adequate seams, including compatibility and failure behavior; a plugin framework is not required by the score.",
-        "performance": "State the intended workload and resource objectives, inspect query and concurrency controls, and obtain source-linked measurements for the selected level; retain explicit capacity gaps and account for tuning and operating upkeep separately.",
+        "performance": "Establish user-relevant workload and resource needs before adding assurance. Existing or occasional source-linked measurements can support the selected level; a benchmark suite or blocking CI gate is not required. Retain capacity gaps, inspect threshold margin and variance, and weigh rerun and baseline-maintenance cost before recommending more machinery or a goal tradeoff.",
     }
     dimensions = {}
     for dimension in DIMENSIONS:
@@ -259,7 +259,7 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
         elif capability:
             action = "rebalance" if burden else "strengthen"
             next_capability = min(rating["capability"] + 1, target["capability_min"])
-            next_step = f"Plan for the full capability minimum {target_capability}: {target_anchor} Preserve required behavior and safeguards; keep upkeep within burden ceiling {target['burden_max']}. Choose a first implementation slice after identifying the required system changes and acceptance evidence."
+            next_step = f"Plan for the full capability minimum {target_capability}: {target_anchor} Preserve required behavior and safeguards; keep upkeep within burden ceiling {target['burden_max']}. Weigh user value and required system changes against added upkeep before choosing an implementation slice and acceptance evidence. If assurance would be disproportionate, explain the remaining gap and an owner-reviewed goal tradeoff rather than adding machinery solely for the score."
             if burden:
                 next_step += " Reduce demonstrated upkeep while closing that gap; surface any tradeoff that prevents meeting both targets."
             verification = proofs[dimension]

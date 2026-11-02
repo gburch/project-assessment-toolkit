@@ -32,6 +32,12 @@ For performance, follow an important data/request path and the work of maintaini
 queries, bounds, caches, locks or tuning. Implemented controls do not prove current
 recovery success or workload headroom.
 
+Measurement evidence does not require permanent benchmark machinery. Establish a
+user-relevant workload or risk first; existing observations or occasional advisory
+measurements may suffice. Inspect timing gates for ordinary variance, margin and
+rerun/baseline upkeep. Syntax alone cannot prove flakiness, and an unmet capability
+target does not justify disproportionate assurance work.
+
 Deep also reads bounded local first-parent Git metadata. It retains commit/date
 and currently captured paths, not authors, messages, patches or target code.
 Co-change is historical navigation, not required edits, elapsed effort or recurring

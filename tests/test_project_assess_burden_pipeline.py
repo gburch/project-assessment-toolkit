@@ -7,6 +7,47 @@ from project_assess.collector import collect
 from project_assess.service import AssessmentService
 
 
+@pytest.mark.parametrize(
+    "suffix,body",
+    [
+        ("py", "assert elapsed < 0.1\n"),
+        ("ts", "expect(durationMs).toBeLessThan(100);\n"),
+    ],
+)
+def test_timing_leads_reach_cross_dimension_burden_with_source_identity(tmp_path, suffix, body):
+    if suffix == "ts":
+        from project_assess.javascript_analysis import javascript_analyzer_identity
+
+        if not javascript_analyzer_identity()["available"]:
+            pytest.skip("Optional analysis extra unavailable")
+    root = tmp_path / "project"
+    root.mkdir()
+    source = root / f"test_speed.{suffix}"
+    source.write_text(body)
+    captured = collect(root)
+    assert captured == collect(root)
+    assert source.read_text() == body
+    aggregate = next(row for row in captured["evidence"] if row["kind"] == "burden-analysis")
+    lead = next(
+        row
+        for row in aggregate["stats"]["leads"]
+        if row["kind"] == "performance.timing_threshold_hint"
+    )
+    assert lead["dimensions"] == ["performance", "testing", "maintainability", "delivery"]
+    assert (
+        lead["locations"][0]["source_digest"]
+        == "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest()
+    )
+    assert lead["cost_status"] == "not_established"
+    assert lead["metrics"]["headroom"] == "unestablished"
+    service = AssessmentService(tmp_path / "state")
+    scan = service.scan(root)
+    for dimension in ("performance", "testing", "maintainability", "delivery"):
+        queried = service.query_evidence(scan["id"], view="burden", dimension=dimension)
+        assert any(row["kind"] == "performance.timing_threshold_hint" for row in queried["items"])
+        assert service.review_template(scan["id"])["ratings"][dimension]["burden"] is None
+
+
 def test_burden_collection_is_deterministic_bound_and_inert(tmp_path):
     root = tmp_path / "project"
     root.mkdir()

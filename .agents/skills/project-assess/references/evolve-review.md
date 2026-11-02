@@ -10,6 +10,8 @@ Describe the complete intended target state and rank initiatives by risk, value,
 
 Each initiative must state the actual scope and acceptance evidence needed to reach its intended outcome. Identify its expected added, removed and retained upkeep against the selected burden ceiling. Then choose a first implementation slice that tests the approach without pretending to complete the full initiative. If both capability and burden miss their goals, plan both improvements and surface a genuine tradeoff. Retain useful capability above the minimum; a high score is not a reason to prune it.
 
+For performance, first establish the user-relevant workload or risk that needs assurance. A numeric gap does not require a benchmark suite or blocking timing gate: existing observations or occasional advisory measurements may suffice. Inspect ordinary variance, threshold margin, required reruns and baseline maintenance before proposing a gate; do not freeze a best-run number or invent a universal tolerance. Preserve useful regression protection. When added assurance would impose disproportionate upkeep, explain the remaining gap and recommend no performance change or an owner-reviewed goal tradeoff rather than machinery to satisfy the score. Saved goals remain unchanged.
+
 ## Optional structured review fields
 
 Keep the template's existing identity, eight ratings and findings. Add these fields to the review JSON when reporting coverage and a roadmap; all evidence IDs must belong to that snapshot. Empty initiative lists are valid when no change is justified. Numeric ratings still require independent evidence-backed judgment.
