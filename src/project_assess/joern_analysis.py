@@ -20,9 +20,12 @@ import time
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
+from .joern_bindings import MAX_BYTES as BINDING_BYTES
+from .joern_bindings import MAX_NODES as BINDING_NODES
+from .joern_bindings import BindingCountercheck
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "4"
+VERSION = "5"
 QUERY_VERSION = "3"
 JOERN_VERSION = "4.0.669"
 QUERY_PATH = Path(__file__).parent / "resources" / "joern.sc"
@@ -698,6 +701,8 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
     methods, calls, candidates, modeled = [], [], [], set()
     omissions = Counter()
     gaps = set()
+    binding_checks = Counter()
+    countercheck = BindingCountercheck(sources, lambda: _clock() >= stop)
 
     def text(value):
         return clean(str(value).replace(str(workspace), "<analysis>"))[:1024]
@@ -837,6 +842,14 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
         ):
             omissions["generated_or_unvalidated_binding"] += 1
             continue
+        checked = countercheck.check(path, line, symbol, kind)
+        binding_checks[checked] += 1
+        if checked != "source_unread":
+            if checked.endswith("unknown") or checked == "source_syntax_unavailable_or_bounded":
+                gaps.add(
+                    "Joern unread-binding source qualification is incomplete; unsupported or ambiguous bindings are not cleanup leads"
+                )
+            continue
         candidate = {
             "kind": "unused_symbol",
             "lens": "quality",
@@ -855,6 +868,7 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
                 "signature_status": row["signature_status"],
                 "basis": row["basis"],
                 "source_digest": sources[path]["digest"],
+                "source_countercheck": "no_read_found_in_bounded_captured_syntax",
             },
             "role": sources[path]["role"],
             "roles": [sources[path]["role"]],
@@ -906,7 +920,16 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
         if aggregate.get("count_is_lower_bound") or aggregate.get("omitted"):
             gaps.add(f"Joern {status} aggregate method-call edges are bounded lower limits")
         edge_sets.append(edges)
-    return methods, calls, candidates, modeled, omissions, gaps, *edge_sets
+    return (
+        methods,
+        calls,
+        candidates,
+        modeled,
+        omissions,
+        gaps,
+        *edge_sets,
+        dict(sorted(binding_checks.items())),
+    )
 
 
 def _method_sampling_metadata(value, stage, sources):
@@ -1330,6 +1353,7 @@ def analyze_joern(
                             model_gaps,
                             module_edges,
                             inferred_module_edges,
+                            binding_checks,
                         ) = _normalize(raw, stage, batch, workspace, clean, stop)
                         method_sampling = _method_sampling_metadata(
                             raw.get("methods"), stage, batch
@@ -1384,6 +1408,13 @@ def analyze_joern(
                             ):
                                 raise ValueError("Invalid call classification counts")
                             counts["calls"]["classifications"] = classifications
+                        counts["unread_bindings"]["source_countercheck"] = {
+                            "counts": binding_checks,
+                            "max_bytes_per_file": BINDING_BYTES,
+                            "max_nodes_per_file": BINDING_NODES,
+                            "basis": "Captured Python AST or installed JavaScript/TypeScript syntax with lexical binding scopes; source contradictions and unknown contracts suppress cleanup leads",
+                            "change_safety": "unverified",
+                        }
                         unread = raw.get("unread_bindings", {})
                         if "suppressed" in unread:
                             suppressed = unread["suppressed"]

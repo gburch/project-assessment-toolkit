@@ -1,7 +1,9 @@
-"""Inert path labels and declared-source matching for supplied reports."""
+"""Pure review bindings, inert report paths and declared-source matching."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from pathlib import PurePosixPath
 
@@ -69,3 +71,46 @@ def match_source_identity(source, manifest, revision, redact=lambda value: value
         "source_unverified_files": statuses.count("unverified"),
         "source_mismatched_files": statuses.count("mismatch"),
     }
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _normalized_ratings(ratings):
+    """Use the same burden defaults for storage and challenge identity."""
+    result = json.loads(canonical(ratings))
+    for rating in result.values():
+        if rating["burden"] is None:
+            rating["burden_basis"] = "unknown"
+            rating["burden_confidence"] = "low"
+        else:
+            if rating.get("burden_basis", "unknown") == "unknown":
+                rating["burden_basis"] = "source_estimate"
+            rating.setdefault("burden_confidence", "low")
+    return result
+
+
+def _draft_digest(assessment, review):
+    draft = {
+        key: value
+        for key, value in review.items()
+        if key
+        not in {
+            "challenge",
+            "id",
+            "created_at",
+            "provenance",
+            "schema_version",
+            "support_verification",
+        }
+    }
+    draft["ratings"] = _normalized_ratings(draft["ratings"])
+    bound = {
+        "assessment_id": assessment["id"],
+        "source": assessment["source"],
+        "scope_digest": assessment["scope_digest"],
+        "rubric_version": assessment["rubric_version"],
+        "draft": draft,
+    }
+    return hashlib.sha256(canonical(bound).encode()).hexdigest()

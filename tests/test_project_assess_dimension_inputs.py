@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from project_assess.collector import collect
 from project_assess.dimension_inputs import dimension_inputs
 from project_assess.rubric import DIMENSIONS
@@ -128,3 +130,100 @@ def test_non_ci_configuration_remains_available_for_boundary_review():
     assert result["providers"]["source"]["evidence_ids"] == ["policy"]
     assert "source" in result["dimensions"]["security"]["provider_ids"]
     assert "source" in result["dimensions"]["operability"]["provider_ids"]
+
+
+def test_deep_docs_and_dead_code_are_shared_development_inputs_without_extra_commands(tmp_path):
+    (tmp_path / "app.py").write_text(
+        "raise RuntimeError('never execute')\ndef answer():\n    return 1\n    print('dead')\n"
+    )
+    (tmp_path / "AGENTS.md").write_text("# Development\nRun `npm run retired-check`.\n")
+    (tmp_path / "package.json").write_text('{"scripts":{"check":"never execute"}}\n')
+    result = dimension_inputs(collect(tmp_path, analysis_profile="deep"))
+    assert result["collection_scope"]["analysis_profile"] == "deep"
+    for provider in ("dead_code", "documentation"):
+        row = result["providers"][provider]
+        assert row["required_in_deep"]
+        assert row["collection_status"] in {"collected", "partial"}
+        assert row["evidence_ids"]
+    for dimension in result["dimensions"].values():
+        assert {"dead_code", "documentation", "guidance"} <= set(dimension["provider_ids"])
+    documentation = result["providers"]["documentation"]["analysis"][0]
+    assert documentation["coverage"]["analyzedDocuments"] == 1
+    assert documentation["coverage"]["analysisProfile"] == "deep"
+    assert (tmp_path / "app.py").read_text().startswith("raise RuntimeError")
+
+
+def test_missing_or_unavailable_required_deep_analysis_stays_explicit():
+    assessment = {
+        "facts": {"collection": {"analysis_profile": "deep"}},
+        "evidence": [{"id": "swift", "kind": "source", "path": "App.swift"}],
+    }
+    result = dimension_inputs(assessment)
+    for provider in ("documentation", "dead_code"):
+        assert result["providers"][provider]["collection_status"] == "not_collected"
+        assert result["providers"][provider]["gaps"]
+    assessment["evidence"].append(
+        {
+            "id": "missing-tool",
+            "kind": "analyzer-analysis",
+            "path": "<joern-analysis>",
+            "stats": {"status": "unavailable", "gaps": ["Trusted tool is unavailable"]},
+        }
+    )
+    provider = dimension_inputs(assessment)["providers"]["dead_code"]
+    assert provider["collection_status"] == "partial"
+    assert provider["analysis"][0]["status"] == "unavailable"
+    assert "Trusted tool is unavailable" in provider["gaps"]
+
+
+@pytest.mark.parametrize(
+    "stats",
+    [
+        {"scope": {"capturedDocuments": 2, "analyzedDocuments": 1}},
+        {"scope": {"richOmittedDocuments": 1}},
+        {"scope": {"linksTruncated": True}},
+        {"scope": {"maintenanceLeadsOmitted": 1}},
+        {"referenceEvidence": {"scope": {"omittedCallers": 1}}},
+        {"referenceEvidence": {"scope": {"commandReferencesOmitted": 1}}},
+        {"referenceEvidence": {"scope": {"referenceCounts": {"path": {"omitted_matches": 1}}}}},
+        {"driftEvidence": {"scope": {"pathReferencesOmitted": 1}}},
+        {"driftEvidence": {"scope": {"authorityClaimsOmitted": 1}}},
+        {"sections": {"windows": {"truncated": True}}},
+        {"sections": {"progress": {"passage": {"uncomparedPairs": 1}}}},
+        {"sections": {"skippedInputs": [{"path": "large.md"}]}},
+    ],
+)
+def test_required_documentation_status_uses_structured_omissions(stats):
+    from project_assess.review_plan import build_review_plan
+
+    assessment = {
+        "facts": {"collection": {"analysis_profile": "deep"}},
+        "evidence": [
+            {"id": "docs", "kind": "documentation-analysis", "path": "<docs>", "stats": stats}
+        ],
+    }
+    provider = dimension_inputs(assessment)["providers"]["documentation"]
+    assert provider["collection_status"] == provider["analysis"][0]["status"] == "partial"
+    for pack in build_review_plan(assessment)["dimensions"].values():
+        check = next(
+            row for row in pack["required_checks"] if row["topic"] == "documentation_drift"
+        )
+        assert check["status"] == "partial" and check["evidence_ids"] == ["docs"]
+
+
+def test_semantic_freshness_gap_is_not_an_invented_collection_omission():
+    assessment = {
+        "evidence": [
+            {
+                "id": "docs",
+                "kind": "documentation-analysis",
+                "stats": {
+                    "scope": {"capturedDocuments": 1, "analyzedDocuments": 1},
+                    "gaps": ["Semantic freshness is not established by syntax checks"],
+                },
+            }
+        ]
+    }
+    provider = dimension_inputs(assessment)["providers"]["documentation"]
+    assert provider["collection_status"] == provider["analysis"][0]["status"] == "collected"
+    assert provider["gaps"]

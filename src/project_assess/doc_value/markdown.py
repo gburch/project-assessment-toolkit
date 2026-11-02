@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from pathlib import PurePosixPath
 
 DOC_DIR_NAMES = {
     "doc",
@@ -35,6 +36,28 @@ DOC_DIR_NAMES = {
 }
 
 
+def is_agent_guidance(path):
+    """Recognize conventional instruction paths without reading or trusting them."""
+    path = PurePosixPath(path)
+    parts = tuple(part.casefold() for part in path.parts)
+    name = parts[-1] if parts else ""
+    if name in {"agents.md", "claude.md", "gemini.md", "skill.md"}:
+        return True
+    for index, part in enumerate(parts[:-1]):
+        tail = parts[index + 1 :]
+        if part in {".agents", ".claude"} and tail[0] in {"skills", "rules"}:
+            return name.endswith(".md")
+        if part == ".cursor" and tail[0] == "rules":
+            return name.endswith((".md", ".mdc"))
+        if part == ".github" and (
+            tail == ("copilot-instructions.md",)
+            or tail[0] == "instructions"
+            and name.endswith(".instructions.md")
+        ):
+            return True
+    return False
+
+
 def documentation_role(path, text, root):
     """Pure path/text role hints shared by captured and standalone documentation analysis."""
     rel = path.relative_to(root).as_posix().lower()
@@ -53,8 +76,12 @@ def documentation_role(path, text, root):
         return "history", ["path resembles historical or review record"]
     if any(x in name for x in ("license", "security", "privacy", "contract", "policy")):
         return "required_record", ["name resembles required policy/record"]
-    if name in {"agents.md", "readme.md", "skill.md"} or any(
-        x in rel for x in ("guide", "runbook", "architecture", "development", ".agents/skills/")
+    if (
+        is_agent_guidance(path)
+        or name == "readme.md"
+        or any(
+            x in rel for x in ("guide", "runbook", "architecture", "development", ".agents/skills/")
+        )
     ):
         return "guidance", ["name/path resembles navigational guidance"]
     if re.search(r"(?im)^#{1,3}\s+(?:how|usage|run|install|development|commands?)\b", text):

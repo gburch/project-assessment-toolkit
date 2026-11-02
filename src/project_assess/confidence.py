@@ -13,6 +13,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .report_identity import _draft_digest
 from .rubric import DIMENSIONS
 from .source_context import read_context
 
@@ -143,8 +144,6 @@ def _burden_challenge_matches(assessment, review, dimension):
         and challenger.casefold() != "unassigned"
     ):
         return False
-    from .service import _draft_digest
-
     try:
         return challenge.get("draft_digest") == _draft_digest(assessment, review)
     except (KeyError, TypeError, ValueError):
@@ -374,10 +373,8 @@ def burden_support_assessment(assessment, review, dimension):
     ):
         gaps.append("A distinct declared reviewer must challenge this dimension's burden support.")
     else:
-        # Reuse the service's canonical draft binding; a completed label alone
+        # Reuse the canonical draft binding; a completed label alone
         # cannot turn an old or unrelated challenge into current support.
-        from .service import _draft_digest
-
         if challenge.get("draft_digest") != _draft_digest(assessment, review):
             gaps.append("The burden challenge is not bound to this current draft and snapshot.")
     if not gaps:

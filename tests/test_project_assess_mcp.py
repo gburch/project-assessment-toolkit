@@ -134,6 +134,16 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 )
                 assert not deep.is_error
                 assert deep.structured_content["collection_scope"]["analysis_profile"] == "deep"
+                assert deep.structured_content["collection_scope"]["automatic_analyzers"] == [
+                    "joern",
+                    "vulture",
+                ]
+                assert deep.structured_content["dimension_inputs"]["providers"]["dead_code"][
+                    "required_in_deep"
+                ]
+                assert deep.structured_content["dimension_inputs"]["providers"]["documentation"][
+                    "required_in_deep"
+                ]
                 # Restore standard analysis as latest for the following review scenario.
                 current = await session.call_tool(
                     "scan_project", {"root": str(root), "reports": [str(supplied)]}

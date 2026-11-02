@@ -15,6 +15,7 @@ from pathlib import Path
 from .badges import MARK, badge_assets, badge_data
 from .collector import _open_directory
 from .confidence import confidence_assessment
+from .report_markdown import markdown_report
 from .rubric import DIMENSIONS
 
 _STATIC = Path(__file__).with_name("static")
@@ -145,20 +146,46 @@ def _timeline(report, rows):
     """Snapshots oldest first; the shown one is always last and unknown never becomes zero."""
     assessment = report["assessment"]
 
-    def entry(identity, created, revision, reviewed, scores, origin=None, hindsight=False):
+    def entry(identity, created, revision, reviewed, scores, metadata):
         revision = (
             revision
             if isinstance(revision, str) and re.fullmatch(r"[0-9a-fA-F]{7,64}", revision)
             else None
         )
+        transition = metadata.get("comparison") or {}
+        event = transition.get("event")
+        if event not in {
+            "initial",
+            "source_change",
+            "evidence_update",
+            "goal_baseline",
+            "not_comparable",
+        }:
+            event = "unknown"
         return {
             "assessment_id": identity,
             "date": created[:10] if isinstance(created, str) else None,
             "revision": revision[:7].lower() if revision else None,
-            "origin": "git-commit" if origin == "git-commit" else "scan",
+            "origin": "git-commit" if metadata.get("origin") == "git-commit" else "scan",
             "reviewed": reviewed,
-            "hindsight": reviewed and hindsight,
+            "hindsight": reviewed and metadata.get("hindsight") is True,
             "scores": scores,
+            **{
+                key: metadata.get(key)
+                for key in (
+                    "review_id",
+                    "rubric_version",
+                    "scope_digest",
+                    "manifest_digest",
+                    "goal_revision",
+                )
+            },
+            "complete": metadata.get("complete") is True,
+            "comparison": {
+                "comparable": transition.get("comparable") is True
+                and event in {"source_change", "evidence_update", "goal_baseline"},
+                "event": event,
+            },
         }
 
     earlier = [
@@ -174,21 +201,36 @@ def _timeline(report, rows):
                 ]
                 for dimension in DIMENSIONS
             },
-            item.get("origin"),
-            item.get("hindsight") is True,
+            item,
         )
         for item in report.get("timeline") or []
         if isinstance(item, dict) and item.get("assessment_id") != assessment["id"]
     ]
     origin = assessment.get("source", {}).get("origin") or {}
+    current_metadata = next(
+        (
+            item
+            for item in report.get("timeline") or []
+            if isinstance(item, dict) and item.get("assessment_id") == assessment["id"]
+        ),
+        {},
+    )
     current = entry(
         assessment["id"],
         origin.get("as_of") or assessment.get("created_at"),
         assessment.get("source", {}).get("revision"),
         report.get("review") is not None,
         {row["id"]: [row["capability"], row["burden"]] for row in rows},
-        origin.get("kind"),
-        "hindsight" in (report.get("review") or {}),
+        {
+            **current_metadata,
+            "origin": origin.get("kind"),
+            "hindsight": "hindsight" in (report.get("review") or {}),
+            "review_id": (report.get("review") or {}).get("id"),
+            "rubric_version": assessment.get("rubric_version"),
+            "scope_digest": assessment.get("scope_digest"),
+            "manifest_digest": assessment.get("source", {}).get("manifest_digest"),
+            "complete": assessment.get("complete") is True,
+        },
     )
     return [*earlier[-11:], current]
 
@@ -759,8 +801,6 @@ def _remove_at(parent, name):
 
 def export_report(report, state_dir, *, forbidden_roots=()):
     """Write a fresh private bundle under configured state, without target writes."""
-    from .service import markdown_report
-
     assessment = report["assessment"]
     assessment_id = assessment["id"]
     if not isinstance(assessment_id, str) or not re.fullmatch(r"a_[0-9a-f]{1,64}", assessment_id):

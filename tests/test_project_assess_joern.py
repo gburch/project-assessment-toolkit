@@ -14,7 +14,7 @@ import pytest
 from project_assess import joern_analysis as analysis
 
 
-def source(path="src/app.py", text="def call(context):\n    unused = value()\n    return run()\n"):
+def source(path="src/app.py", text="def _call(context):\n    unused = value()\n    return run()\n"):
     return {
         "path": path,
         "text": text,
@@ -182,7 +182,7 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("metadata launched Java"))
     info = analysis.joern_info()
     assert info["available"] and info["version"] == "4.0.669"
-    assert info["adapter_version"] == "4"
+    assert info["adapter_version"] == "5"
     assert info["query_version"] == "3" and info["dataflow"] == "not_run"
     assert qualified["root"] not in json.dumps(info)
     deep = analysis.joern_limits("deep")
@@ -1103,3 +1103,315 @@ def test_ast_compatibility_preserves_escaped_surrogates_and_unicode_values(tmp_p
     result, receipt, _, _ = transport_ast(tmp_path, payload)
     assert json.loads(result) == expected
     assert receipt["numeric_keys"] == 1 and receipt["unexpected_interfaces"] == 0
+
+
+@pytest.mark.parametrize(
+    ("text", "line", "symbol", "kind", "expected"),
+    [
+        (
+            "def _f():\n    value = work()\n    return value\n",
+            2,
+            "value",
+            "local",
+            "source_read_or_capture",
+        ),
+        (
+            "def _f():\n    from errors import Failure\n    try: work()\n    except Failure: return\n",
+            2,
+            "Failure",
+            "local",
+            "source_read_or_capture",
+        ),
+        (
+            "def _f():\n    reader = work()\n    def read(stream=reader): return stream.read()\n    return read\n",
+            2,
+            "reader",
+            "local",
+            "source_read_or_capture",
+        ),
+        (
+            "def install():\n    @server.tool()\n    def read(): return result()\n",
+            3,
+            "read",
+            "local",
+            "decorated_function_binding",
+        ),
+        (
+            "def _gate(approval):\n    raise RuntimeError('unavailable')\n",
+            1,
+            "approval",
+            "parameter",
+            "raising_stub_signature",
+        ),
+        (
+            "def _f():\n    _receipt = work()\n    return True\n",
+            2,
+            "_receipt",
+            "local",
+            "intentional_discard_hint",
+        ),
+        (
+            "def _request(hostname, deadline):\n    return hostname\n",
+            1,
+            "deadline",
+            "parameter",
+            "source_unread",
+        ),
+        (
+            "def _f():\n    value = work()\ndef other():\n    value = other_work()\n    return value\n",
+            2,
+            "value",
+            "local",
+            "source_unread",
+        ),
+        (
+            "def _f():\n    value = work()\n    def inner(value): return value\n    return inner\n",
+            2,
+            "value",
+            "local",
+            "source_unread",
+        ),
+    ],
+)
+def test_python_source_countercheck_preserves_reads_and_contracts(
+    text, line, symbol, kind, expected
+):
+    from project_assess.joern_bindings import BindingCountercheck
+
+    check = BindingCountercheck({"src/f.py": {"text": text}}, lambda: False)
+    assert check.check("src/f.py", line, symbol, kind) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "line", "symbol", "kind", "expected"),
+    [
+        (
+            "for (const listener of listeners) listener();",
+            1,
+            "listener",
+            "local",
+            "source_read_or_capture",
+        ),
+        (
+            "for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }",
+            1,
+            "chunk",
+            "local",
+            "source_read_or_capture",
+        ),
+        (
+            "function view(props: Props) { return <X x={props.value}/>; }",
+            1,
+            "props",
+            "parameter",
+            "source_read_or_capture",
+        ),
+        (
+            "function view() { const supplied = value(); return rows.map(row => supplied[row]); }",
+            1,
+            "supplied",
+            "local",
+            "source_read_or_capture",
+        ),
+        (
+            "function view() { const value = work(); }\nfunction other() { const value = otherWork(); return value; }",
+            1,
+            "value",
+            "local",
+            "source_unread",
+        ),
+        (
+            "function view() { const value = work(); return rows.map(value => value); }",
+            1,
+            "value",
+            "local",
+            "source_unread",
+        ),
+        (
+            "function view({ apps, ...props }: Props) { return apps.map(app => props.value); }",
+            1,
+            "props",
+            "local",
+            "source_read_or_capture",
+        ),
+        (
+            "for (const [key, entry] of values) consume(entry);",
+            1,
+            "entry",
+            "local",
+            "source_read_or_capture",
+        ),
+        (
+            "function view(capability = false) { return rows.map(row => capability && row); }",
+            1,
+            "capability",
+            "local",
+            "source_read_or_capture",
+        ),
+    ],
+)
+def test_javascript_source_countercheck_uses_binding_scopes(text, line, symbol, kind, expected):
+    from project_assess.javascript_analysis import javascript_analyzer_identity
+    from project_assess.joern_bindings import BindingCountercheck
+
+    if not javascript_analyzer_identity()["available"]:
+        pytest.skip("optional trusted JavaScript parser not installed")
+    check = BindingCountercheck({"src/view.tsx": {"text": text}}, lambda: False)
+    assert check.check("src/view.tsx", line, symbol, kind) == expected
+
+
+def test_unavailable_or_bounded_source_qualification_is_unknown(monkeypatch):
+    from project_assess import javascript_analysis
+    from project_assess.joern_bindings import BindingCountercheck
+
+    monkeypatch.setattr(
+        javascript_analysis, "javascript_analyzer_identity", lambda: {"available": False}
+    )
+    sources = {"view.ts": {"text": "const unused = 1;"}, "broken.py": {"text": "def broken(:"}}
+    check = BindingCountercheck(sources, lambda: False)
+    assert check.check("view.ts", 1, "unused", "local") == "source_syntax_unavailable_or_bounded"
+    assert check.check("broken.py", 1, "unused", "local") == "source_syntax_unavailable_or_bounded"
+    expired = BindingCountercheck({"f.py": {"text": "unused = 1"}}, lambda: True)
+    assert expired.check("f.py", 1, "unused", "local") == "source_syntax_unavailable_or_bounded"
+
+
+def test_source_contradiction_suppresses_joern_lead_with_receipt(qualified, monkeypatch):
+    def run(argv, *, output=None, **kwargs):
+        if output:
+            raw = raw_result("src/app.py")
+            raw["unread_bindings"]["rows"] = [raw["unread_bindings"]["rows"][1]]
+            output.write_text(json.dumps(raw))
+        return "complete"
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern(
+        [source(text="def call(context):\n    unused = value()\n    return unused\n")],
+        snapshot=qualified,
+    )
+    assert result["candidate_index"] == []
+    check = result["coverage"]["batches"][0]["model_sections"]["unread_bindings"][
+        "source_countercheck"
+    ]
+    assert check["counts"] == {"source_read_or_capture": 1}
+    assert check["change_safety"] == "unverified"
+
+
+def test_unparsed_source_leads_are_not_retained_as_cleanup(qualified, monkeypatch):
+    monkeypatch.setattr(analysis, "_run", fake_run)
+    result = analysis.analyze_joern(
+        [source(text="def call(context):\n    unused = value(\n")], snapshot=qualified
+    )
+    assert result["candidate_index"] == []
+    assert any("source qualification is incomplete" in gap for gap in result["gaps"])
+
+
+def test_binding_countercheck_node_and_byte_limits_do_not_create_dead_leads(monkeypatch):
+    from project_assess import joern_bindings
+
+    sources = {"f.py": {"text": "def _f(value):\n    return 1\n"}}
+    monkeypatch.setattr(joern_bindings, "MAX_NODES", 2)
+    assert (
+        joern_bindings.BindingCountercheck(sources, lambda: False).check(
+            "f.py", 1, "value", "parameter"
+        )
+        == "source_syntax_unavailable_or_bounded"
+    )
+    monkeypatch.setattr(joern_bindings, "MAX_BYTES", 2)
+    assert (
+        joern_bindings.BindingCountercheck(sources, lambda: False).check(
+            "f.py", 1, "value", "parameter"
+        )
+        == "source_syntax_unavailable_or_bounded"
+    )
+
+
+def test_original_public_parameter_contract_cannot_be_overruled_by_producer():
+    from project_assess.joern_bindings import BindingCountercheck
+
+    check = BindingCountercheck(
+        {"public.py": {"text": "def callback(context):\n    return True\n"}}, lambda: False
+    )
+    assert (
+        check.check("public.py", 1, "context", "parameter") == "public_signature_contract_unknown"
+    )
+
+
+def test_nested_javascript_read_resolution_work_is_bounded(monkeypatch):
+    from project_assess import joern_bindings
+    from project_assess.javascript_analysis import _parser, _walk, javascript_analyzer_identity
+
+    if not javascript_analyzer_identity()["available"]:
+        pytest.skip("optional trusted JavaScript parser not installed")
+    depth = 24
+    opening = "function _f(deadline) {" + "function _nested(){" * depth
+    many_names = ",".join(f"different{i}" for i in range(100))
+    text = opening + f"consume({many_names});" + "}" * (depth + 1)
+    tree = _parser("f.js").parse(text.encode())
+    assert not tree.root_node.has_error
+    assert len(list(_walk(tree.root_node, 3001))) < 3000
+    monkeypatch.setattr(joern_bindings, "MAX_NODES", 3000)
+    check = joern_bindings.BindingCountercheck({"f.js": {"text": text}}, lambda: False)
+    assert check.check("f.js", 1, "deadline", "parameter") == "source_syntax_unavailable_or_bounded"
+
+    # Repeated references resolve through the cache instead of rescanning the
+    # whole lexical chain, preserving a valid no-read hint within the same bound.
+    repeated = opening + "consume(" + ",".join(["same"] * 100) + ");" + "}" * (depth + 1)
+    cached = joern_bindings.BindingCountercheck({"f.js": {"text": repeated}}, lambda: False)
+    assert cached.check("f.js", 1, "deadline", "parameter") == "source_unread"
+
+
+def test_deadline_expiring_after_parse_cannot_qualify_unread_binding(monkeypatch):
+    from project_assess import joern_bindings
+
+    entered = False
+    finish = joern_bindings._Bindings.finish
+
+    def expires_in_resolution(index, expired):
+        nonlocal entered
+        entered = True
+        return finish(index, expired)
+
+    monkeypatch.setattr(joern_bindings._Bindings, "finish", expires_in_resolution)
+    check = joern_bindings.BindingCountercheck(
+        {"f.py": {"text": "def _f(deadline):\n    return result()\n"}}, lambda: entered
+    )
+    assert check.check("f.py", 1, "deadline", "parameter") == "source_syntax_unavailable_or_bounded"
+
+
+def test_mismatched_binding_kind_lookup_does_not_walk_unrelated_declarations():
+    from project_assess.joern_bindings import _Bindings
+
+    index = _Bindings()
+    for number in range(2000):
+        index.declare(0, f"unrelated{number}", number + 2, "local")
+    index.declare(0, "read_parameter", 1, "parameter")
+    index.reads.append((0, "read_parameter"))
+    assert index.finish(lambda: False) is index
+
+    class NoFullWalk(dict):
+        def items(self):
+            pytest.fail("candidate fallback walked every source declaration")
+
+    index.locations = NoFullWalk(index.locations)
+    assert index.check(1, "read_parameter", "local") == "source_read_or_capture"
+    assert index.check(1, "unknown", "local") == "source_binding_scope_unknown"
+
+
+@pytest.mark.parametrize(
+    ("member", "expected"),
+    [
+        ("        def get(self): return value\n", "source_read_or_capture"),
+        ("        get = lambda self: value\n", "source_read_or_capture"),
+        ("        def get(self, value): return value\n", "source_unread"),
+    ],
+)
+def test_python_method_closures_skip_class_namespace(member, expected):
+    from project_assess.joern_bindings import BindingCountercheck
+
+    text = (
+        "def _outer(value):\n    class Local:\n        value = 2\n"
+        + member
+        + "    return Local()\n"
+    )
+    check = BindingCountercheck({"f.py": {"text": text}}, lambda: False)
+    assert check.check("f.py", 1, "value", "parameter") == expected

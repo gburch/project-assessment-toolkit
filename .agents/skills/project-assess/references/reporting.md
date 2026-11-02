@@ -71,6 +71,7 @@ Organize the response so the user can assess the judgment without opening files:
   and what can be deferred. Preserve explicitly selected numerical goals and
   label inferred-purpose recommendations provisional. Avoid inventing exact
   score gains, time savings or a deletion quota.
+- **Deep development inputs:** explain material dead-code and guidance-drift findings, or the inspected counterevidence and remaining gaps. Include the effect of agent instructions, commands and competing sources of truth on valuable changes; do not reduce these inputs to optional files or raw counts.
 - **Coverage and confidence:** identify source/tool versions, review freshness,
   analyzed and inspected scope, omissions, actually selected optional analyzers,
   imported versus executed evidence, and the challenge result. Explain which

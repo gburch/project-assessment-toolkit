@@ -211,7 +211,8 @@ async function assertBackfillLayers(page, assessmentId) {
     document.body.append(host);
     const map = globalThis.PATDimensionMap.createDimensionMap(host, { ...report.dimension_map, timeline: [
       { date: "2026-08-31", revision: "abc1234", origin: "git-commit", reviewed: false, hindsight: false, scores: unknown },
-      { date: "2026-09-30", revision: "def5678", origin: "git-commit", reviewed: true, hindsight: true, scores: current.scores },
+      { date: "2026-09-30", revision: "def5678", origin: "git-commit", reviewed: true, hindsight: true, scores: current.scores,
+        comparison: { comparable: true, event: "source_change" } },
       current,
     ] });
     [...host.querySelectorAll("button")].find((button) => button.textContent === "What moved").click();
@@ -224,7 +225,7 @@ async function assertBackfillLayers(page, assessmentId) {
     return { labels, note, count };
   }, assessmentId);
   assert.equal(result.count, "3");
-  assert.deepEqual(result.labels.slice(0, 2), ["2026-08-31 · commit abc1234 · not reviewed", "2026-09-30 · commit def5678 · judged in hindsight"]);
+  assert.deepEqual(result.labels.slice(0, 2), ["2026-08-31 · commit abc1234 · not reviewed", "2026-09-30 · commit def5678 · source change · judged in hindsight"]);
   assert(!result.labels[2].includes("commit") && !result.labels[2].includes("hindsight"), "the current scan layer is not a backfill");
   assert.match(result.note, /their scores stay unknown/);
 }
@@ -302,6 +303,93 @@ async function assertMap(page) {
   for (const axis of ["left", "top"]) assert(Math.abs(restoredProjection[axis] - exploredProjection[axis]) < 0.5,
     "switching comparison and 3D must preserve the explored camera projection");
   await expect(map.getByRole("button", { name: "Angle", exact: true })).toHaveAttribute("aria-pressed", "true");
+}
+
+async function replaceSyntheticMap(page, model) {
+  await page.evaluate((next) => {
+    window.acceptanceMap?.dispose();
+    window.acceptanceMap = PATDimensionMap.createDimensionMap(document.getElementById("dimension-map"), next);
+  }, model);
+}
+
+async function assertCrowdedLevelMap(page, model) {
+  // Reproduce the real self-report's three adjacent clusters, including its long label.
+  const capability = { security: 3, testing: 4, documentation: 3, maintainability: 3,
+    delivery: 3, operability: 2, extensibility: 2, performance: 2 };
+  const dimensions = model.dimensions.map((row) => ({ ...row, capability: capability[row.id], burden: 2,
+    capability_min: row.id === "performance" ? 3 : capability[row.id], burden_max: 2 }));
+  await replaceSyntheticMap(page, { ...model, dimensions, timeline: [{ reviewed: true, date: "2026-11-01",
+    comparison: { comparable: false, event: "initial" },
+    scores: Object.fromEntries(dimensions.map((row) => [row.id, [row.capability, row.burden]])) }] });
+  const map = page.locator("#dimension-map");
+  await map.getByRole("button", { name: "Level map", exact: true }).click();
+  await expect(map.locator(".dm-cluster")).toHaveCount(3);
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const colorScheme of ["light", "dark"]) {
+      await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+      const choices = map.locator(".dm-level-key-choices button");
+      await expect(choices).toHaveCount(8);
+      for (const row of dimensions) await expect(choices.filter({ hasText: row.label })).toBeVisible();
+      const bounds = await choices.evaluateAll((buttons) => buttons.map((button) => {
+        const box = button.getBoundingClientRect();
+        return { text: button.textContent, left: box.left, right: box.right, top: box.top, bottom: box.bottom,
+          unclipped: button.scrollWidth <= button.clientWidth && button.scrollHeight <= button.clientHeight };
+      }));
+      for (const box of bounds) {
+        assert(box.left >= 0 && box.right <= width && box.unclipped, `${box.text} must remain fully readable at ${width}px`);
+      }
+      for (let i = 0; i < bounds.length; i++) for (let j = i + 1; j < bounds.length; j++) {
+        const a = bounds[i], b = bounds[j];
+        assert(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top,
+          `${a.text} and ${b.text} must not overlap at ${width}px`);
+      }
+      await expect.poll(() => overflow(page)).toBe(false);
+      const performance = choices.filter({ hasText: "Performance & Scalability" });
+      await performance.focus();
+      await page.keyboard.press("Enter");
+      await expect(map).toHaveAttribute("data-selected-dimension", "performance");
+      await expect(performance).toBeFocused();
+      await expect(map.locator(".dm-gap-summary")).toContainText("capability +1");
+      await expect(map.locator(".dm-level-key-group").filter({ hasText: "Performance & Scalability" })).toContainText("Capability 2 · Burden 2");
+      await accessibility(page, `crowded level map ${width}px ${colorScheme} accessibility`);
+    }
+  }
+  await map.locator("..").screenshot({ path: path.join(output, "pat-crowded-level-map-mobile.png") });
+  await explore3d(page);
+  await expect(map).toHaveAttribute("data-renderer", "webgl");
+  await expect(map).toHaveAttribute("data-trail-count", "0");
+  await expect.poll(() => overflow(page)).toBe(false);
+}
+
+async function assertHistoryComparisons(page, model) {
+  const dimensions = model.dimensions;
+  const scores = Object.fromEntries(dimensions.map((row) => [row.id, [row.capability, row.burden]]));
+  const events = ["initial", "source_change", "evidence_update", "goal_baseline", "not_comparable", "unknown", null];
+  const timeline = events.map((event, index) => ({ reviewed: true, date: `2026-10-${20 + index}`, scores,
+    ...(event ? { comparison: { comparable: ["source_change", "evidence_update", "goal_baseline"].includes(event), event } } : {}) }));
+  await replaceSyntheticMap(page, { ...model, timeline });
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await explore3d(page);
+  const map = page.locator("#dimension-map");
+  await expect(map).toHaveAttribute("data-renderer", "webgl");
+  await expect(map).toHaveAttribute("data-snapshot-count", "7");
+  // One allowed transition for each of the seven known dimensions, rather than six trails each.
+  await expect(map).toHaveAttribute("data-trail-count", "7");
+  await expect(map.locator(".dm-label-layer, .dm-label-layer-current")).toHaveText([
+    "2026-10-20 · initial assessment", "2026-10-21 · source change", "2026-10-22 · evidence update",
+    "2026-10-23 · new goal baseline", "2026-10-24 · not comparable", "2026-10-25 · comparison unknown",
+    "2026-10-26 · comparison unknown",
+  ]);
+  await expect(map.locator(".dm-stage-note")).toContainText("Trails connect comparable source changes only");
+  // Missing metadata, incompatible comparisons and a review gap must not reconnect points.
+  timeline[1].comparison.comparable = false;
+  timeline[2].reviewed = false;
+  timeline[3].comparison = { comparable: true, event: "source_change" };
+  await page.evaluate((next) => window.acceptanceMap.update(next), { ...model, timeline });
+  await expect(map).toHaveAttribute("data-trail-count", "0");
+  await expect(map.locator(".dm-label-layer").nth(2)).toHaveText("2026-10-22 · not reviewed");
+  await accessibility(page, "history comparison labels accessibility");
 }
 
 let browser;
@@ -426,6 +514,8 @@ try {
   await expect(noGoalsMap.locator(".dm-axis-burden .dm-current")).toHaveCount(8);
   await expect.poll(() => overflow(standalone)).toBe(false);
   await accessibility(standalone, "offline no-goals comparison accessibility");
+  await assertCrowdedLevelMap(standalone, reportBefore.dimension_map);
+  await assertHistoryComparisons(standalone, reportBefore.dimension_map);
   await offline.close();
 
   const fallback = await browser.newContext({ viewport: { width: 320, height: 780 } });

@@ -82,8 +82,19 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
   clusters.setAttribute("role", "group");
   clusters.setAttribute("aria-label", "Dimensions by capability and burden");
   plot.append(plotSvg, clusters);
+  const levelLegend = element("div", undefined, "dm-level-legend");
+  levelLegend.setAttribute("role", "group");
+  levelLegend.setAttribute("aria-label", "Level map dimension key");
+  levelLegend.addEventListener("click", (event) => {
+    const button = event.target.closest?.("button[data-dimension]");
+    if (!button || !levelLegend.contains(button)) return;
+    const id = button.dataset.dimension;
+    select(id, true);
+    // Selection rebuilds the plot; keep keyboard navigation in the visible key.
+    [...levelLegend.querySelectorAll("button")].find((item) => item.dataset.dimension === id)?.focus();
+  }, { signal });
   const unplotted = element("p", undefined, "dm-note");
-  levelMap.append(plot, unplotted);
+  levelMap.append(plot, levelLegend, unplotted);
 
   const spatial = element("div", undefined, "dm-spatial");
   const toolbar = element("div", undefined, "dm-toolbar");
@@ -147,6 +158,7 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
   function renderLevelMap() {
     plotSvg.replaceChildren();
     clusters.replaceChildren();
+    levelLegend.replaceChildren();
     plotSvg.append(svg("rect", { x: X0, y: Y0, width: SIZE, height: SIZE, rx: 14, class: "dm-plot-ground" }));
     const row = selectedRow();
     if (row && hasGoal(row)) {
@@ -191,7 +203,7 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
       button.style.top = percent(y / 580);
       button.style.setProperty("--size", `${26 + members.length * 6}px`);
       button.setAttribute("aria-pressed", String(members.some((item) => item.id === selectedId)));
-      button.setAttribute("aria-label", `${members.map((item) => item.label).join(", ")}: capability ${capability}, burden ${burden}`);
+      button.setAttribute("aria-label", `${members.map((item) => item.label).join(", ")}: capability ${capability}, burden ${burden}; ${members.length} ${members.length === 1 ? "dimension" : "dimensions"}`);
       button.addEventListener("click", () => {
         // Repeated clicks step through dimensions that share one position.
         const at = members.findIndex((item) => item.id === selectedId);
@@ -203,6 +215,18 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
       names.style.left = percent(x / 600);
       names.style.top = percent(y / 580);
       clusters.append(button, names);
+      const group = element("div", undefined, "dm-level-key-group");
+      group.append(element("p", `Capability ${capability} · Burden ${burden}`, "dm-level-key-score"));
+      const choices = element("div", undefined, "dm-level-key-choices");
+      for (const item of members) {
+        const choice = element("button", item.label);
+        choice.type = "button";
+        choice.dataset.dimension = item.id;
+        choice.setAttribute("aria-pressed", String(item.id === selectedId));
+        choices.append(choice);
+      }
+      group.append(choices);
+      levelLegend.append(group);
     }
     const missing = dimensions.filter((item) => !score(item.capability) || !score(item.burden));
     unplotted.textContent = missing.length ? `Not plotted: ${missing.map((item) => item.label).join(", ")} (unknown score)` : "";
@@ -289,6 +313,16 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
     overlay.replaceChildren();
   }
   function track(resource) { graphics.dynamic.push(resource); return resource; }
+  function historyLabel(snapshot) {
+    if (!snapshot.reviewed) return "not reviewed";
+    const comparison = snapshot.comparison;
+    if (!comparison || comparison.event === "unknown") return "comparison unknown";
+    if (comparison.event === "initial") return "initial assessment";
+    if (comparison.event === "goal_baseline") return "new goal baseline";
+    if (comparison.event === "evidence_update") return "evidence update";
+    if (comparison.comparable !== true) return "not comparable";
+    return comparison.event === "source_change" ? "source change" : "comparison unknown";
+  }
   function line(points, material) {
     const result = new THREE.Line(track(new THREE.BufferGeometry().setFromPoints(points)), material);
     if (material.isLineDashedMaterial) result.computeLineDistances();
@@ -306,8 +340,9 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
   function layerLabel(snapshot) {
     const parts = [snapshot.date || "Date unknown"];
     if (snapshot.origin === "git-commit") parts.push(snapshot.revision ? `commit ${snapshot.revision}` : "from Git");
-    parts.push(!snapshot.reviewed ? "not reviewed" : snapshot.hindsight ? "judged in hindsight" : "");
-    return parts.filter(Boolean).join(" · ");
+    parts.push(historyLabel(snapshot));
+    if (snapshot.reviewed && snapshot.hindsight) parts.push("judged in hindsight");
+    return parts.join(" · ");
   }
   function rebuild() {
     if (!graphics) return;
@@ -315,6 +350,7 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
     const { marks, sphere, materials, pickable } = graphics;
     const row = selectedRow();
     const latest = timeline.length - 1;
+    let trailCount = 0;
     timeline.forEach((snapshot, layer) => {
       const z = layerZ(layer), current = layer === latest;
       const plane = new THREE.Mesh(track(new THREE.PlaneGeometry(SCORE_MAX, SCORE_MAX)), current ? materials.surface : materials.ghost);
@@ -352,11 +388,15 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
         mark.userData.dimension = item.id;
         marks.add(mark);
         pickable.push(mark);
-        if (previous) tube(previous, at, selected ? materials.trail : materials.faintTrail);
+        if (previous && snapshot.comparison?.comparable === true && snapshot.comparison.event === "source_change") {
+          tube(previous, at, selected ? materials.trail : materials.faintTrail);
+          trailCount++;
+        }
         previous = at;
         if (selected && layer === latest) label(`${item.label} · C${capability} · B${burden}`, at.clone().add(new THREE.Vector3(0, 0.55, 0)), "selected");
       });
     });
+    container.dataset.trailCount = String(trailCount);
     requestRender();
   }
   function releaseGraphics() {
@@ -449,7 +489,10 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
     const missing = dimensions.length - rows().length;
     const parts = [];
     if (timeline.length < 2) parts.push("One scan so far; earlier scans or Git backfills stack behind it.");
-    else if (timeline.some((snapshot) => !snapshot.reviewed)) parts.push("Unreviewed layers have no positions; their scores stay unknown.");
+    else {
+      parts.push("Trails connect comparable source changes only. Evidence updates, new goal baselines and unknown or incompatible comparisons show separate snapshots.");
+      if (timeline.some((snapshot) => !snapshot.reviewed)) parts.push("Unreviewed layers have no positions; their scores stay unknown.");
+    }
     if (missing) parts.push(`${missing} unknown ${missing === 1 ? "score is" : "scores are"} not positioned at zero.`);
     return parts.join(" ");
   }
@@ -655,7 +698,7 @@ export function createDimensionMap(container, initialModel, { onSelect } = {}) {
       signalController.abort();
       releaseGraphics();
       container.replaceChildren();
-      for (const name of ["renderer", "mode", "currentCount", "goalCount", "guideCount", "selectedDimension", "snapshotCount"]) delete container.dataset[name];
+      for (const name of ["renderer", "mode", "currentCount", "goalCount", "guideCount", "selectedDimension", "snapshotCount", "trailCount"]) delete container.dataset[name];
     },
   };
 }

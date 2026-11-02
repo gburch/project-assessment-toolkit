@@ -25,7 +25,9 @@ def parser():
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("skills", help="Locate the bundled general assessment skills")
     commands.add_parser("info", help="Read this installation's tool and instruction provenance")
-    commands.add_parser("analyzers", help="List trusted optional analyzers and availability")
+    commands.add_parser(
+        "analyzers", help="List trusted analyzers, availability and default profiles"
+    )
     scan = commands.add_parser("scan", help="Capture deterministic source facts")
     scan.add_argument("root")
     scan.add_argument("--brief", action="store_true", help="Return a compact, queryable handoff")
@@ -33,7 +35,7 @@ def parser():
         "--analysis-profile",
         choices=("standard", "deep"),
         default="standard",
-        help="Select recorded collection/work budgets; independent of goal profiles",
+        help="Deep includes dead-code and documentation drift review inputs and requests configured trusted analyzers; independent of goals",
     )
     scan.add_argument(
         "--analyzer",
@@ -41,7 +43,7 @@ def parser():
         action="append",
         choices=registered_analyzer_names(),
         default=[],
-        help="Opt into an installed trusted analyzer on captured source",
+        help="Include an installed trusted analyzer; Deep already requests Vulture and Joern",
     )
     scan.add_argument(
         "--report",

@@ -28,7 +28,11 @@ _PROVIDERS = {
     ),
     "documentation": (
         ("documentation-analysis",),
-        "Documentation duplication and local link/anchor checks.",
+        "Documentation drift, literal command/path and authority relationships, duplication and link/anchor leads; inspect their effect on development and the intended source of truth.",
+    ),
+    "dead_code": (
+        ("static-analysis", "javascript-analysis", "analyzer-analysis"),
+        "Native and selected analyzer unused, unreferenced and unreachable-code leads; inspect actual reads, effects, registrations and supported contracts before judging disuse.",
     ),
     "guidance": (
         ("documentation",),
@@ -179,6 +183,40 @@ def _coverage(value):
     return result
 
 
+def _analysis_partial(entry):
+    stats = entry.get("stats", {})
+    if stats.get("status") in {"partial", "unavailable", "unsupported", "not_collected"}:
+        return True
+    if entry.get("kind") != "documentation-analysis":
+        return False
+    scope = stats.get("scope", {})
+    references = stats.get("referenceEvidence", {}).get("scope", {})
+    drift = stats.get("driftEvidence", {}).get("scope", {})
+    sections = stats.get("sections", {})
+    progress = sections.get("progress", {})
+    counts = [
+        scope.get("richOmittedDocuments", 0),
+        scope.get("maintenanceLeadsOmitted", 0),
+        references.get("omittedCallers", 0),
+        references.get("commandReferencesOmitted", 0),
+        *(row.get("omitted_matches", 0) for row in references.get("referenceCounts", {}).values()),
+        drift.get("pathReferencesOmitted", 0),
+        drift.get("authorityClaimsOmitted", 0),
+        progress.get("passage", {}).get("uncomparedPairs", 0),
+        progress.get("section", {}).get("uncomparedPairs", 0),
+    ]
+    captured, analyzed = scope.get("capturedDocuments"), scope.get("analyzedDocuments")
+    return (
+        type(captured) is int
+        and type(analyzed) is int
+        and captured > analyzed
+        or any(type(value) is int and value > 0 for value in counts)
+        or scope.get("linksTruncated") is True
+        or sections.get("windows", {}).get("truncated") is True
+        or bool(sections.get("skippedInputs"))
+    )
+
+
 def dimension_inputs(assessment):
     """Describe available inputs and missing analysis, independently of authored grades."""
     by_kind = defaultdict(list)
@@ -208,13 +246,42 @@ def dimension_inputs(assessment):
             "analysis": [
                 {
                     "evidence_id": entry["id"],
-                    "status": entry.get("stats", {}).get("status", "unestablished"),
-                    "coverage": _coverage(entry.get("stats", {}).get("coverage", {})),
+                    "status": entry.get("stats", {}).get(
+                        "status",
+                        "partial"
+                        if _analysis_partial(entry)
+                        else "collected"
+                        if entry["kind"] == "documentation-analysis"
+                        else "unestablished",
+                    ),
+                    "coverage": _coverage(
+                        entry.get("stats", {}).get(
+                            "coverage", entry.get("stats", {}).get("scope", {})
+                        )
+                    ),
                 }
                 for entry in entries
                 if entry["kind"].endswith("-analysis")
             ][:5],
         }
+        if name in {"documentation", "dead_code"}:
+            providers[name]["required_in_deep"] = True
+            providers[name]["collection_status"] = (
+                "not_collected"
+                if not entries
+                else "partial"
+                if any(_analysis_partial(entry) for entry in entries)
+                else "collected"
+            )
+            providers[name]["gaps"] = list(
+                dict.fromkeys(
+                    gap for entry in entries for gap in entry.get("stats", {}).get("gaps", [])
+                )
+            )[:3]
+            if not entries:
+                providers[name]["gaps"].append(
+                    "No supporting analysis was collected; absence of evidence is not a clean result."
+                )
         if name == "tests":
             providers[name]["retained_definition_kinds"] = dict(
                 sorted(
@@ -240,12 +307,23 @@ def dimension_inputs(assessment):
                 "supported_text_complete",
                 "deadline_exceeded",
                 "completeness_scope",
+                "analysis_profile",
             )
         },
         "providers": providers,
         "dimensions": {
             dimension: {
-                "provider_ids": [*_DIMENSION_PROVIDERS[dimension], "burden"],
+                "provider_ids": list(
+                    dict.fromkeys(
+                        [
+                            *_DIMENSION_PROVIDERS[dimension],
+                            "documentation",
+                            "guidance",
+                            "dead_code",
+                            "burden",
+                        ]
+                    )
+                ),
                 "limitations": list(_GAPS[dimension]),
                 "control_coverage": facts.get("control_analysis", {})
                 .get("coverage", {})

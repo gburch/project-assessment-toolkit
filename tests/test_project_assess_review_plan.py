@@ -276,8 +276,10 @@ def test_analysis_limits_are_dimension_specific_and_independent_of_source_captur
     } == {"docs"}
     assert {
         row["evidence_id"] for row in dimension_coverage(captured, "operability")["analysis_limits"]
-    } == {"controls"}
-    assert dimension_coverage(captured, "performance")["analysis_limits"] == []
+    } == {"controls", "docs"}
+    assert {
+        row["evidence_id"] for row in dimension_coverage(captured, "performance")["analysis_limits"]
+    } == {"docs"}
     assert dimension_coverage(captured, "operability")["collection_blockers"] == []
 
 
@@ -488,3 +490,82 @@ def test_actual_collector_controls_preserve_specialized_mechanisms_amid_large_sh
         signal.update(location)
     actual = build_review_plan(flattened, limit=8)
     assert actual == plan
+
+
+def test_deep_plans_prioritize_agent_guidance_and_cited_dead_code_amid_noise():
+    entries = [source(f"src/area{i:02}/owner.py", f"owner-{i}") for i in range(60)]
+    entries += [
+        source(f"docs/guide{i:02}.md", f"guide-{i}", kind="documentation", role="unknown")
+        for i in range(60)
+    ]
+    agents = source("AGENTS.md", "agents", kind="documentation", role="unknown")
+    skill = source(".agents/skills/change/SKILL.md", "skill", kind="documentation", role="unknown")
+    dead = source("src/late/unused_owner.py", "dead")
+    entries += [
+        agents,
+        skill,
+        dead,
+        {
+            "id": "drift",
+            "kind": "documentation-analysis",
+            "stats": {
+                "maintenanceLeads": [
+                    {
+                        "kind": "competing_authority_targets_hint",
+                        "locations": [
+                            {"path": agents["path"], "line": 12},
+                            {"path": skill["path"], "line": 8},
+                        ],
+                    }
+                ]
+            },
+        },
+        {
+            "id": "native",
+            "kind": "static-analysis",
+            "stats": {
+                "candidate_index": [
+                    {
+                        "kind": "unused_symbol",
+                        "locations": [{"path": dead["path"], "line": 7}],
+                        "source_evidence_ids": [dead["id"]],
+                        "metrics": {"source_digest": dead["digest"]},
+                    },
+                    {
+                        "kind": "unreachable_statement",
+                        "locations": [{"path": "src/area00/owner.py", "line": 50}],
+                        "source_evidence_ids": ["different-source"],
+                    },
+                ]
+            },
+        },
+    ]
+    captured = snapshot(entries, analysis_profile="deep")
+    before = deepcopy(captured)
+    plan = build_review_plan(captured, limit=6)
+    for pack in plan["dimensions"].values():
+        tasks = {row["evidence_id"]: row for row in pack["source_tasks"]}
+        assert {"agents", "skill", "dead"} <= tasks.keys()
+        assert tasks["agents"]["line"] == 12
+        assert tasks["dead"]["line"] == 7
+        assert "dead_code_candidate" in tasks["dead"]["selection_reasons"]
+        assert tasks["dead"]["binding_states"] == ["review_lead_not_disuse_proof"]
+        assert not any("unreachable_statement" in row["signal_kinds"] for row in tasks.values())
+        assert {row["topic"] for row in pack["required_checks"]} == {
+            "dead_code",
+            "documentation_drift",
+        }
+        assert all(row["status"] == "collected" for row in pack["required_checks"])
+    assert plan["version"] == "3"
+    assert captured == before
+
+
+def test_deep_missing_required_inputs_remain_queryable_unknowns():
+    captured = snapshot([source("src/Main.swift", "swift", kind="source")], analysis_profile="deep")
+    plan = build_review_plan(captured)
+    for pack in plan["dimensions"].values():
+        assert all(row["status"] == "not_collected" for row in pack["required_checks"])
+        assert all(row["gaps"] for row in pack["required_checks"])
+        assert pack["coverage"]["syntax_gaps"]
+    standard = build_review_plan(snapshot(captured["evidence"]))
+    assert all("required_checks" not in pack for pack in standard["dimensions"].values())
