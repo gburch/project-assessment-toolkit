@@ -152,6 +152,7 @@ _GAPS = {
     "performance": [
         "I/O-loop, query, paging/batching, timeout, cache and admission hints do not establish bottlenecks or complete dynamic behavior.",
         "Capacity and latency need applicable workload observations; imported observations remain supplied claims even with matching source identity.",
+        "Timing-threshold syntax does not establish tightness, flakiness or required gating; inspect user needs, ordinary variance, headroom and recurring upkeep before recommending benchmarks.",
     ],
 }
 

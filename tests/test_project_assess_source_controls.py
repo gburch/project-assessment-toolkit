@@ -16,6 +16,50 @@ def signals(result, kind):
     return [row for row in result["signals"] if row["kind"] == kind]
 
 
+def test_timing_assertions_are_review_leads_without_claiming_margin_or_flakiness():
+    result = scan("""import time as clock
+def test_speed(self):
+    assert elapsed < .1, "private assertion message"
+    assert clock.perf_counter() - started < limit
+    self.assertLess(result.duration_ms, limit)
+    assert limit > latency
+    assert count < 2
+    assert timeout < 2
+    assert opaque_measurement() < 2
+    assert elapsed is None
+    assert duration in allowed_values
+""")
+    rows = signals(result, "performance.timing_threshold_hint")
+    assert [row["locations"][0]["line"] for row in rows] == [3, 4, 5, 6]
+    assert rows[1]["context"]["measurement_basis"] == "clock_difference"
+    assert rows[0]["context"]["threshold_shape"] == "positive_literal"
+    assert "private assertion message" not in json.dumps(result)
+    assert all(row["confidence"] == "low" for row in rows)
+    assert all(row["dimensions"] == ["performance"] for row in rows)
+    assert all(
+        row["context"][key] == "unestablished"
+        for row in rows
+        for key in ("headroom", "variance", "gating")
+    )
+    assert not signals(
+        scan("""import time as clock
+def test_speed(clock):
+    assert clock.perf_counter() - started < 1
+"""),
+        "performance.timing_threshold_hint",
+    )
+
+
+def test_timing_lead_retention_is_bounded_and_deterministic():
+    source = "\n".join(f"assert elapsed < {i + 1}" for i in range(20))
+    result = scan(source, signal_limit=3)
+    assert result == scan(source, signal_limit=3)
+    assert result["coverage"]["signals_found"] == 20
+    assert len(result["signals"]) == 3
+    assert result["coverage"]["signals_omitted"] == 17
+    assert result["status"] == "partial"
+
+
 def test_security_alias_binding_and_conservative_shadowing():
     result = scan("""import subprocess as process
 from pickle import loads as decode

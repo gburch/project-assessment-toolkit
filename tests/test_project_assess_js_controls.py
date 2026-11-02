@@ -18,6 +18,34 @@ def inventory(source, path="src/app.ts"):
     return javascript.analyze_javascript(path, source)["controls"]
 
 
+def test_timing_assertion_hints_preserve_unknown_variance_margin_and_gate():
+    result = inventory("""expect(durationMs).toBeLessThan(100);
+assert(elapsed <= budget, "private assertion message");
+console.assert(performance.now() - started < 100);
+expect(count).toBeLessThan(2);
+assert(timeout < 2);
+expect(opaqueMeasurement()).toBeLessThan(2);
+""")
+    rows = [row for row in result["signals"] if row["kind"] == "timing_threshold_hint"]
+    assert [row["locations"][0]["line"] for row in rows] == [1, 2, 3]
+    assert rows[2]["context"]["measurement_basis"] == "clock_difference_syntax"
+    assert rows[0]["context"]["threshold_shape"] == "numeric_literal"
+    assert "private assertion message" not in json.dumps(result)
+    assert all(row["confidence"] == "hint" for row in rows)
+    assert all(row["dimensions"] == ["performance"] for row in rows)
+    assert all(
+        row["context"][key] == "unestablished"
+        for row in rows
+        for key in ("headroom", "variance", "gating")
+    )
+    source = "\n".join(f"expect(elapsed).toBeLessThan({i});" for i in range(80))
+    bounded = inventory(source)
+    assert bounded == inventory(source)
+    assert bounded["coverage"]["signals_omitted"] == 16
+    assert len(bounded["signals"]) == 64
+    assert bounded["status"] == "partial"
+
+
 def test_shared_typescript_controls_reuse_one_parse_and_do_not_retain_payload(monkeypatch):
     original, calls = javascript._parser, []
 

@@ -95,6 +95,44 @@ def test_saved_goals_without_review_need_evidence_not_zero_scores(project):
     assert rows(service) == before
 
 
+def test_performance_gap_can_retain_a_no_change_plan_without_retargeting(project):
+    service, _, snapshot = project
+    goals = save_goals(service, snapshot)
+    review = service.review_template(snapshot["id"])
+    review["coverage"]["scope"] = "focused"
+    source_id = next(row["id"] for row in snapshot["evidence"] if row["path"] == "app.py")
+    review["ratings"]["performance"].update(
+        capability=2,
+        burden=1,
+        confidence="medium",
+        burden_basis="source_estimate",
+        burden_confidence="low",
+        evidence_ids=[source_id],
+        rationale="Source bounds are deliberate; representative workload evidence is absent.",
+        recommendations=["Retain the explicit evidence gap; no benchmark gate is justified."],
+    )
+    review["plan"] = {
+        "schema_version": 1,
+        "goal_revision": goals["revision"],
+        "diagnosis": "No reported slowness or demonstrated workload risk warrants new machinery.",
+        "target_state": "Keep the useful local workflow with light upkeep and explicit uncertainty.",
+        "initiatives": [],
+    }
+    saved = service.submit_review(snapshot["id"], review)
+    before = rows(service)
+
+    alignment = service.evolve(snapshot["id"])["goal_alignment"]
+
+    performance = alignment["dimensions"]["performance"]
+    assert alignment["review_id"] == saved["id"]
+    assert alignment["plan"] == review["plan"]
+    assert performance["current"] == {"capability": 2, "burden": 1}
+    assert performance["capability_gap"] == 1 and performance["burden_gap"] == 0
+    assert performance["target"] == {"capability_min": 3, "burden_max": 2}
+    assert performance["recommendations"] == review["ratings"]["performance"]["recommendations"]
+    assert rows(service) == before
+
+
 def test_alignment_routes_independent_axes_without_penalizing_excess_capability(project):
     service, _, snapshot = project
     scores = {

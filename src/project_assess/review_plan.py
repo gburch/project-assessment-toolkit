@@ -80,6 +80,8 @@ _QUESTIONS = {
     "performance": [
         "Trace an important request or data path through queries, materialization, locks, bounds and caches.",
         "Identify upkeep when changing workload shape or limits; distinguish optimization maintenance from measured capacity or latency.",
+        "Before recommending benchmarks, establish a current user need or credible workload risk; existing observations or occasional advisory measurements may suffice.",
+        "Inspect timing thresholds against representative variance and useful headroom, required gates, reruns and baseline-edit churn; syntax alone cannot establish flakiness or excessive burden.",
     ],
 }
 _PATH_HINTS = {

@@ -503,7 +503,7 @@ wheels = [
 
 [[package]]
 name = "pat-assess"
-version = "0.15.1"
+version = "0.15.2"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },
