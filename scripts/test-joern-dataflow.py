@@ -118,6 +118,90 @@ def fixture_checks(result):
     return checks
 
 
+def synthetic_source(name, text):
+    return {
+        "path": "src/" + name + ".py",
+        "text": text,
+        "digest": digest(text.encode()),
+        "evidence_id": "e-" + name,
+        "role": "production",
+    }
+
+
+def bounded_query_probes(output):
+    """Query over 64 independent endpoints and overflow one sink's path detail."""
+    receipts = []
+    # Separate reads keep this an endpoint check rather than a 64-step test:
+    # Joern can chain repeated reads of the same parameter through prior calls.
+    text = "".join(
+        f"def cohort_{index}(payload_{index}):\n    print(payload_{index})\n\n"
+        for index in range(70)
+    )
+    sources = [synthetic_source("cohort", text)]
+    (output / "cohort-sources.json").write_text(json.dumps(sources, indent=2) + "\n")
+    result, seconds = run_case("cohort", sources, output)
+    flow = result.get("dataflow_analysis", {})
+    batches = flow.get("batches", [])
+    queries = batches[0].get("queries", {}) if len(batches) == 1 else {}
+    retained_endpoints = {
+        (row["sink"]["line"], row["source"]["name"])
+        for row in flow.get("paths", [])
+        if row["kind"] == "parameter_to_operation"
+        and row["source"]["name"].startswith("payload_")
+        and "cohort" in row["sink"]["method"]
+    }
+    receipts.append({
+        "case": "cohort", "seconds": seconds,
+        "checks": {
+            "dataflow_complete": flow.get("status") == "complete",
+            "more_than_sixty_four_sinks": queries.get("sinks_total", 0) > 64,
+            "all_sinks_queried": queries.get("sinks_queried") == queries.get("sinks_total")
+            and queries.get("sinks_omitted") == 0,
+            "all_seventy_operation_endpoints_retained": retained_endpoints
+            == {(2 + 3 * index, f"payload_{index}") for index in range(70)},
+            "no_path_detail_truncation": queries.get("paths_truncated") == 0,
+        },
+    })
+    print(json.dumps(receipts[-1]), flush=True)
+
+    names = [f"value_{index}" for index in range(70)]
+    text = "from fanin_service import emit\n\n" + "".join(
+        f"def caller_{index}({name}, unrelated_{index}):\n    emit({name})\n\n"
+        for index, name in enumerate(names)
+    )
+    sources = [
+        synthetic_source("fanin", text),
+        synthetic_source("fanin_service", 'def emit(value):\n    print(value)\n    return "handled"\n'),
+    ]
+    (output / "fanin-sources.json").write_text(json.dumps(sources, indent=2) + "\n")
+    result, seconds = run_case("fanin", sources, output)
+    flow = result.get("dataflow_analysis", {})
+    batches = flow.get("batches", [])
+    batch = batches[0] if len(batches) == 1 else {}
+    paths = [
+        row for row in flow.get("paths", [])
+        if row["kind"] == "parameter_to_operation" and "emit" in row["sink"]["method"]
+    ]
+    receipts.append({
+        "case": "fanin", "seconds": seconds,
+        "checks": {
+            "overfull_sink_is_partial": flow.get("status") == "partial",
+            "sink_truncation_reported": batch.get("queries", {}).get("paths_truncated", 0) > 0,
+            "path_count_is_lower_bound": batch.get("paths", {}).get("count_is_lower_bound") is True,
+            "sixty_four_paths_retained_for_single_sink": len(paths) == 64
+            and len({(row["sink"]["path"], row["sink"]["line"]) for row in paths}) == 1,
+            "only_reaching_value_parameters_retained": bool(paths)
+            and all(row["source"]["name"] in {*names, "value"} for row in paths),
+            "cross_file_caller_paths_retained": any(
+                row["source"]["name"] in names and row["interprocedural"]
+                and len({step["path"] for step in row["steps"]}) > 1 for row in paths
+            ),
+        },
+    })
+    print(json.dumps(receipts[-1]), flush=True)
+    return receipts
+
+
 def recovery_probe(output):
     """Fail a private trusted query after its checkpoint; never alter production code."""
     production_path = adapter.QUERY_PATH
@@ -209,6 +293,7 @@ def main():
             },
         }
     )
+    receipts.extend(bounded_query_probes(output))
     if not args.skip_large:
         # Distinct reaching definitions exceed the old 4,000-definition ceiling.
         # The text is input to static analysis only, never executed.

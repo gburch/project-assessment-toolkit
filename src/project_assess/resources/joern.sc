@@ -1,7 +1,7 @@
 import io.shiftleft.semanticcpg.language.*
 import io.shiftleft.codepropertygraph.generated.nodes.*
 import io.joern.dataflowengineoss.language.*
-import io.joern.dataflowengineoss.queryengine.{EngineContext, EngineConfig}
+import io.joern.dataflowengineoss.queryengine.{Engine, EngineContext, EngineConfig}
 import io.joern.dataflowengineoss.layers.dataflows.{OssDataFlow, OssDataFlowOptions}
 import io.joern.dataflowengineoss.passes.reachingdef.{ReachingDefProblem, ReachingDefTransferFunction}
 import io.shiftleft.semanticcpg.layers.LayerCreatorContext
@@ -22,7 +22,7 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
     "Unread bindings are review leads only; preserve initializer effects and callback, override and public signature contracts.",
     "Deep dataflow describes modeled parameter influence, not external taint, feasible execution, dead-method proof or target-code execution."
   )
-  val result = Obj("schema_version" -> 1, "query_version" -> "5", "dataflow" -> "not_run",
+  val result = Obj("schema_version" -> 1, "query_version" -> "6", "dataflow" -> "not_run",
     "errors" -> errors, "gaps" -> gaps, "caveats" -> caveats)
   def writeResult(value: Value, name: String = out): Unit = {
     val destination = Paths.get(name)
@@ -625,45 +625,59 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
         }
         val parameterIds = parameters.iterator.map(_.id).toSet
         dataflow("source_parameter_count") = parameters.size
-        var sinksTotal = 0L
-        var sinksQueried = 0L
-        var pathsTruncated = 0L
-        methods.foreach { method =>
-          // METHOD_RETURN also receives synthetic dependencies from assignments
-          // that never reach a returned value. Query actual return statements.
+        val parameterNodes: List[CfgNode] = parameters.toList.distinct
+        // Parameter nodes are already their own Joern starting points. Calling
+        // reachableByFlows for each sink repeats generic source/usage expansion
+        // across every graph method, creates an executor and materializes all
+        // returned paths before its Iterator can be limited. Use the qualified
+        // engine directly, preserving source visibility and path semantics.
+        val sinks = methods.flatMap { method =>
           val returns = method.ast.isReturn.filter(node => owner(node).exists(_.id == method.id))
             .map(node => ("parameter_to_return", node: CfgNode)).toVector
           val operations = method.ast.isCall.filter(call => owner(call).exists(_.id == method.id) &&
               operationNames(call.name))
             .flatMap(_.argument.filter(_.argumentIndex > 0)).map(node => ("parameter_to_operation", node: CfgNode))
             .toVector
-          val sinks = (returns ++ operations).sortBy { case (kind, node) =>
+          (returns ++ operations).sortBy { case (kind, node) =>
             (node.lineNumber.getOrElse(Int.MaxValue), kind, node.code) }
-          sinksTotal += sinks.size
-          if (!skippedIds(method.id)) sinks.foreach { case (kind, sink) =>
-            sinksQueried += 1
-            // Cap paths for a single endpoint, never the number of methods
-            // considered; over-limit/unknown paths stay visible in coverage.
-            val paths = Iterator.single(sink).reachableByFlows(parameters).take(pathsPerSink + 1).toVector
-            if (paths.size > pathsPerSink) pathsTruncated += 1
-            paths.take(pathsPerSink).foreach { path =>
-              val elements = path.elements.toVector
-              val mapped = elements.take(stepLimit + 1).map(flowNode)
-              if (elements.size > stepLimit || mapped.exists(_.isEmpty) || mapped.size < 2) pathsTruncated += 1
-              else {
-                val steps = mapped.flatten
-                val source = steps.head
-                val endpoint = steps.last
-                // A source must actually be a captured parameter selected
-                // above; no unknown/imported value is silently classified.
-                if (!parameterIds(elements.head.id) || elements.last.id != sink.id) pathsTruncated += 1
-                else rows.add(Obj("kind" -> kind, "source" -> source, "sink" -> endpoint,
-                  "steps" -> Arr.from(steps),
-                  "interprocedural" -> Bool(steps.map(_("method").str).distinct.size > 1)))
-              }
+            .map { case (kind, node) => (kind, node, skippedIds(method.id)) }
+        }
+        val sinksTotal = sinks.size.toLong
+        var sinksQueried = 0L
+        var pathsTruncated = 0L
+        val engine = new Engine(summon[EngineContext])
+        try sinks.filterNot(_._3).foreach { case (kind, sink, _) =>
+          // Keep the original per-endpoint query shape and peak-memory scope;
+          // share the executor without generic source/usage expansion.
+          val entries = engine.backwards(List(sink), parameterNodes)
+          sinksQueried += 1
+          val paths = entries.iterator.filter { entry =>
+            entry.path.headOption.forall(first => first.visible || parameterIds(first.node.id))
+          }.map { entry =>
+            val visible = entry.path.filter(element => element.visible || parameterIds(element.node.id))
+              .map(_.node)
+            visible.headOption.map(first => first +: visible.sliding(2).collect {
+              case Seq(a, b) if a != b => b
+            }.toVector).getOrElse(Vector.empty)
+          }.distinct.take(pathsPerSink + 1).toVector
+          if (paths.size > pathsPerSink) pathsTruncated += 1
+          paths.take(pathsPerSink).foreach { path =>
+            val elements = path
+            val mapped = elements.take(stepLimit + 1).map(flowNode)
+            if (elements.size > stepLimit || mapped.exists(_.isEmpty) || mapped.size < 2) pathsTruncated += 1
+            else {
+              val steps = mapped.flatten
+              val source = steps.head
+              val endpoint = steps.last
+              // A source must actually be a captured parameter selected
+              // above; no unknown/imported value is silently classified.
+              if (!parameterIds(elements.head.id) || elements.last.id != sink.id) pathsTruncated += 1
+              else rows.add(Obj("kind" -> kind, "source" -> source, "sink" -> endpoint,
+                "steps" -> Arr.from(steps),
+                "interprocedural" -> Bool(steps.map(_("method").str).distinct.size > 1)))
             }
           }
-        }
+        } finally engine.shutdown()
         val output = rows.output
         val incomplete = skippedIds.nonEmpty || pathsTruncated > 0 || output("omitted").num > 0
         output("count_is_lower_bound") = Bool(pathsTruncated > 0)

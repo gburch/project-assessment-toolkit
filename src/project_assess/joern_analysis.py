@@ -26,8 +26,8 @@ from .joern_bindings import BindingCountercheck
 from .joern_dataflow import normalize_dataflow
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "8"
-QUERY_VERSION = "5"
+VERSION = "9"
+QUERY_VERSION = "6"
 JOERN_VERSION = "4.0.669"
 QUERY_PATH = Path(__file__).parent / "resources" / "joern.sc"
 MAX_INPUT_RECORDS = 20_000

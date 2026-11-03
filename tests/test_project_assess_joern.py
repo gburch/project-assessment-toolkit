@@ -58,7 +58,7 @@ def raw_result(path):
 
     return {
         "schema_version": 1,
-        "query_version": "5",
+        "query_version": "6",
         "dataflow": "not_run",
         "errors": [],
         "gaps": [],
@@ -212,8 +212,8 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("metadata launched Java"))
     info = analysis.joern_info()
     assert info["available"] and info["version"] == "4.0.669"
-    assert info["adapter_version"] == "8"
-    assert info["query_version"] == "5" and info["dataflow"] == "deep_profile"
+    assert info["adapter_version"] == "9"
+    assert info["query_version"] == "6" and info["dataflow"] == "deep_profile"
     assert qualified["root"] not in json.dumps(info)
     deep = analysis.joern_limits("deep")
     assert deep["seconds"] == 7200 and deep["heap_gib"] == 8
@@ -855,9 +855,9 @@ def test_process_runner_enforces_timeout_and_discards_sensitive_logs(tmp_path, c
 @pytest.mark.parametrize(
     "payload",
     [
-        '{"schema_version":1,"query_version":"5","schema_version":1}',
-        '{"schema_version":true,"query_version":"5","dataflow":"not_run"}',
-        '{"schema_version":1,"query_version":"5","dataflow":"run"}',
+        '{"schema_version":1,"query_version":"6","schema_version":1}',
+        '{"schema_version":true,"query_version":"6","dataflow":"not_run"}',
+        '{"schema_version":1,"query_version":"6","dataflow":"run"}',
     ],
 )
 def test_unqualified_or_ambiguous_query_output_is_rejected(tmp_path, payload):
