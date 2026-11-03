@@ -22,10 +22,10 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
     "Unread bindings are review leads only; preserve initializer effects and callback, override and public signature contracts.",
     "Deep dataflow describes modeled parameter influence, not external taint, feasible execution, dead-method proof or target-code execution."
   )
-  val result = Obj("schema_version" -> 1, "query_version" -> "4", "dataflow" -> "not_run",
+  val result = Obj("schema_version" -> 1, "query_version" -> "5", "dataflow" -> "not_run",
     "errors" -> errors, "gaps" -> gaps, "caveats" -> caveats)
-  def writeResult(value: Value): Unit = {
-    val destination = Paths.get(out)
+  def writeResult(value: Value, name: String = out): Unit = {
+    val destination = Paths.get(name)
     val temporary = Files.createTempFile(destination.toAbsolutePath.getParent, ".pat-query-", ".json")
     try {
       Files.writeString(temporary, ujson.write(value))
@@ -542,7 +542,11 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
       checkpoint("dataflow") = Str("error")
       checkpoint("dataflow_analysis") = Obj("status" -> "error")
       checkpoint("errors").arr += Obj("section" -> "dataflow_analysis", "error" -> "InterruptedDataflow")
+      // Keep a separate immutable base: finally may replace the primary output
+      // with incomplete state even after a fatal JVM error and nonzero exit.
+      writeResult(checkpoint, out + ".base.json")
       writeResult(checkpoint)
+      // PAT_DATAFLOW_CHECKPOINT_COMPLETE
       val maxDefinitions = 50000
       val maxCallDepth = 8
       val stepLimit = 64

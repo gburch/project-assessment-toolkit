@@ -186,6 +186,9 @@ def normalize_dataflow(raw, *, stage, sources, clean):
                 raise ValueError("Inconsistent dataflow procedure scope")
             path = {
                 "kind": row["kind"],
+                "basis": "joern_default_semantics_with_modeled_callees",
+                "confidence": "low",
+                "source_identity": "captured_snapshot",
                 "source": start,
                 "sink": end,
                 "steps": steps,

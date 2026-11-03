@@ -58,7 +58,7 @@ def raw_result(path):
 
     return {
         "schema_version": 1,
-        "query_version": "4",
+        "query_version": "5",
         "dataflow": "not_run",
         "errors": [],
         "gaps": [],
@@ -212,8 +212,8 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("metadata launched Java"))
     info = analysis.joern_info()
     assert info["available"] and info["version"] == "4.0.669"
-    assert info["adapter_version"] == "6"
-    assert info["query_version"] == "4" and info["dataflow"] == "deep_profile"
+    assert info["adapter_version"] == "7"
+    assert info["query_version"] == "5" and info["dataflow"] == "deep_profile"
     assert qualified["root"] not in json.dumps(info)
     deep = analysis.joern_limits("deep")
     assert deep["seconds"] == 7200 and deep["heap_gib"] == 8
@@ -747,9 +747,9 @@ def test_process_runner_enforces_timeout_and_discards_sensitive_logs(tmp_path, c
 @pytest.mark.parametrize(
     "payload",
     [
-        '{"schema_version":1,"query_version":"4","schema_version":1}',
-        '{"schema_version":true,"query_version":"4","dataflow":"not_run"}',
-        '{"schema_version":1,"query_version":"4","dataflow":"run"}',
+        '{"schema_version":1,"query_version":"5","schema_version":1}',
+        '{"schema_version":true,"query_version":"5","dataflow":"not_run"}',
+        '{"schema_version":1,"query_version":"5","dataflow":"run"}',
     ],
 )
 def test_unqualified_or_ambiguous_query_output_is_rejected(tmp_path, payload):
@@ -1456,7 +1456,8 @@ def test_interrupted_deep_dataflow_recovers_only_qualified_base_checkpoint(quali
             raw["metadata"]["overlays"].remove("dataflowOss")
             raw["dataflow_analysis"] = {"status": "error"}
             raw["errors"] = [{"section": "dataflow_analysis", "error": "InterruptedDataflow"}]
-            output.write_text(json.dumps(raw))
+            Path(str(output) + ".base.json").write_text(json.dumps(raw))
+            output.unlink()
             return "timeout"
         return status
 
@@ -1505,6 +1506,121 @@ def test_interrupted_process_cannot_promote_an_unqualified_result(
     assert result["coverage"]["modeled_files"] == 0
     assert result["topology"]["methods"] == []
     assert result["summary"]["methods"] is None
+
+
+@pytest.mark.parametrize("failure", ["tool_failed", "timeout"])
+@pytest.mark.parametrize("primary", ["partial", "error", "not_run", "malformed", "missing"])
+def test_immutable_base_survives_failed_dataflow_final_output(
+    qualified, monkeypatch, failure, primary
+):
+    def run(argv, *, output=None, **kwargs):
+        status = fake_run(argv, output=output, **kwargs)
+        if output:
+            raw = json.loads(output.read_text())
+            base = json.loads(output.read_text())
+            base.update(checkpoint="base_before_dataflow", dataflow="error")
+            base["metadata"]["overlays"].remove("dataflowOss")
+            base["dataflow_analysis"] = {"status": "error"}
+            base["errors"] = [{"section": "dataflow_analysis", "error": "InterruptedDataflow"}]
+            Path(str(output) + ".base.json").write_text(json.dumps(base))
+            if primary == "missing":
+                output.unlink()
+            elif primary == "malformed":
+                output.write_text('{"partially written":')
+            else:
+                raw["dataflow"] = primary
+                if primary == "not_run":
+                    raw.pop("dataflow_analysis")
+                    raw["metadata"]["overlays"].remove("dataflowOss")
+                else:
+                    raw["dataflow_analysis"]["status"] = primary
+                raw["methods"]["rows"][0]["name"] = "from_incomplete_final"
+                output.write_text(json.dumps(raw))
+            return failure
+        return status
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified, analysis_profile="deep")
+    batch = result["coverage"]["batches"][0]
+    assert batch["process_status"] == failure
+    assert batch["base_checkpoint_recovered"] is True
+    assert result["coverage"]["modeled_files"] == 1
+    assert result["topology"]["methods"][0]["name"] == "call"
+    assert result["topology"]["edges"][0]["count"] == 7
+    assert result["coverage"]["phases"]["detail"]["status"] == "complete"
+    assert result["dataflow_analysis"]["paths"] == []
+    assert result["coverage"]["phases"]["dataflow"]["methods_analyzed"] is None
+    assert result["coverage"]["phases"]["dataflow"]["sinks_queried"] is None
+    assert result["status"] == "partial"
+
+
+def test_symlink_base_checkpoint_cannot_recover_source_facts(qualified, monkeypatch, tmp_path):
+    outside = tmp_path / "outside-query.json"
+
+    def run(argv, *, output=None, **kwargs):
+        status = fake_run(argv, output=output, **kwargs)
+        if output:
+            raw = json.loads(output.read_text())
+            raw.update(checkpoint="base_before_dataflow", dataflow="error")
+            raw["metadata"]["overlays"].remove("dataflowOss")
+            raw["dataflow_analysis"] = {"status": "error"}
+            outside.write_text(json.dumps(raw))
+            Path(str(output) + ".base.json").symlink_to(outside)
+            output.unlink()
+            return "tool_failed"
+        return status
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified, analysis_profile="deep")
+    assert not result["coverage"]["batches"][0]["base_checkpoint_recovered"]
+    assert result["coverage"]["modeled_files"] == 0
+    assert result["topology"]["methods"] == []
+    assert result["summary"]["methods"] is None
+
+
+def test_base_checkpoint_cannot_override_a_captured_source_digest_mismatch(qualified, monkeypatch):
+    def run(argv, *, output=None, cwd, **kwargs):
+        status = fake_run(argv, output=output, cwd=cwd, **kwargs)
+        if output:
+            raw = json.loads(output.read_text())
+            raw.update(checkpoint="base_before_dataflow", dataflow="error")
+            raw["metadata"]["overlays"].remove("dataflowOss")
+            raw["dataflow_analysis"] = {"status": "error"}
+            Path(str(output) + ".base.json").write_text(json.dumps(raw))
+            output.unlink()
+            staged = cwd / "source" / "src/app.py"
+            staged.chmod(0o600)
+            staged.write_text("different captured source\n")
+            return "timeout"
+        return status
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified, analysis_profile="deep")
+    batch = result["coverage"]["batches"][0]
+    assert not batch["base_checkpoint_recovered"]
+    assert batch["status"] == "unvalidated_output_or_source"
+    assert result["coverage"]["modeled_files"] == 0
+    assert result["topology"]["methods"] == []
+
+
+def test_standard_never_recovers_a_companion_checkpoint(qualified, monkeypatch):
+    def run(argv, *, output=None, **kwargs):
+        status = fake_run(argv, output=output, **kwargs)
+        if output:
+            raw = json.loads(output.read_text())
+            raw.update(checkpoint="base_before_dataflow", dataflow="error")
+            raw["dataflow_analysis"] = {"status": "error"}
+            Path(str(output) + ".base.json").write_text(json.dumps(raw))
+            output.unlink()
+            return "tool_failed"
+        return status
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified)
+    batch = result["coverage"]["batches"][0]
+    assert not batch["base_checkpoint_recovered"]
+    assert result["coverage"]["modeled_files"] == 0
+    assert result["summary"]["dataflow"] == "not_run"
 
 
 def test_standard_provider_rejects_unrequested_dataflow(qualified, monkeypatch):
@@ -1629,13 +1745,15 @@ def test_dataflow_service_filters_and_pages_frozen_paths_without_scoring(tmp_pat
         b"Too many new tasks in expansion of unresolved output arguments",
     ],
 )
-def test_zero_exit_engine_failures_are_detected_across_log_chunks(tmp_path, capsys, marker):
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_engine_failures_are_detected_across_log_chunks(tmp_path, capsys, marker, exit_code):
     at = len(marker) // 2
     code = (
         "import os,time\n"
         f"os.write(1, b'RAW_SOURCE_SENTINEL ' + {marker[:at]!r})\n"
         "time.sleep(0.05)\n"
         f"os.write(1, {marker[at:]!r})\n"
+        f"raise SystemExit({exit_code})\n"
     )
     status = analysis._run(
         [sys.executable, "-c", code],
