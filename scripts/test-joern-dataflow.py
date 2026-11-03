@@ -202,6 +202,47 @@ def bounded_query_probes(output):
     return receipts
 
 
+def over_limit_probe(output):
+    """Observe the unchanged 50k definition skip while a normal method retains flow."""
+    text = (
+        "def over_limit(payload):\n"
+        + "".join(f"    value_{index} = payload\n" for index in range(17000))
+        + "    return value_16999\n\n"
+        + "def normal(retained):\n    return retained\n"
+    )
+    sources = [synthetic_source("over_limit", text)]
+    (output / "over-limit-sources.json").write_text(json.dumps(sources, indent=2) + "\n")
+    result, seconds = run_case("over-limit", sources, output)
+    combined = result.get("dataflow_analysis", {})
+    batches = combined.get("batches", [])
+    flow = batches[0] if len(batches) == 1 else {}
+    skipped = flow.get("skipped_methods", {}).get("rows", [])
+    paths = combined.get("paths", [])
+    checks = {
+        "method_exceeds_unchanged_definition_limit": flow.get("maximum_definitions_observed", 0) > 50000,
+        "over_limit_skip_has_source_bound_receipt": any(
+            "over_limit" in row["method"] and row["definitions"] > 50000
+            and row["reason"] == "definition_limit" and row.get("source_evidence_id")
+            for row in skipped
+        ),
+        "skipped_flow_remains_partial": combined.get("status") == "partial"
+        and flow.get("methods_skipped", 0) > 0,
+        "normal_method_still_has_parameter_flow": any(
+            row["kind"] == "parameter_to_return" and row["source"]["name"] == "retained"
+            and ".normal" in row["source"]["method"] and ".normal" in row["sink"]["method"]
+            for row in paths
+        ),
+        "skipped_method_has_no_claimed_paths": not any(
+            ".over_limit" in row["source"]["method"] or ".over_limit" in row["sink"]["method"]
+            for row in paths
+        ),
+        "all_phases_completed": bool(batches) and all(
+            batch.get("phase_progress", {}).get("status") == "complete" for batch in result["coverage"]["batches"]
+        ),
+    }
+    return {"case": "over-limit", "seconds": seconds, "checks": checks}
+
+
 def recovery_probe(output):
     """Fail a private trusted query after its checkpoint; never alter production code."""
     production_path = adapter.QUERY_PATH
@@ -243,6 +284,71 @@ def recovery_probe(output):
     }
 
 
+def count_mismatch_probe(output):
+    """A swallowed worker failure must not establish an overlay or usable paths."""
+    production_path = adapter.QUERY_PATH
+    production = production_path.read_bytes()
+    expected = b"val expected = definitionCounts(method.id)"
+    caught = b'errors.value += Obj("section" -> "dataflow_analysis", "error" -> error.getClass.getName)'
+    if production.count(expected) != 1 or production.count(caught) != 1:
+        raise ValueError("Expected one trusted definition guard and dataflow catch")
+    fault = production.replace(expected, expected + b" + 1L", 1).replace(
+        caught,
+        caught + b'\n        result("metadata")("overlays") = Arr.from(cpg.metaData.overlays.toVector.distinct.sorted)',
+        1,
+    )
+    fault_path = output / "count-mismatch.sc"
+    fault_path.write_bytes(fault)
+    fault_path.chmod(0o400)
+    implementation = {
+        Path(adapter.__file__).with_name(name): digest(Path(adapter.__file__).with_name(name).read_bytes())
+        for name in ("joern_analysis.py", "joern_dataflow.py", "joern_bindings.py")
+    }
+    original_run, producer = adapter._run, []
+
+    def run(argv, **kwargs):
+        status = original_run(argv, **kwargs)
+        if path := kwargs.get("output"):
+            if path.is_file():
+                raw = json.loads(path.read_text())
+                producer.append({
+                    "process_status": status, "dataflow": raw.get("dataflow"),
+                    "flow_status": raw.get("dataflow_analysis", {}).get("status"),
+                    "overlays_after_failure": raw.get("metadata", {}).get("overlays", []),
+                    "errors": raw.get("errors", []),
+                })
+        return status
+
+    try:
+        adapter.QUERY_PATH, adapter._run = fault_path, run
+        result, seconds = run_case("count-mismatch", sources_for("python"), output)
+    finally:
+        adapter.QUERY_PATH, adapter._run = production_path, original_run
+    (output / "count-mismatch-producer.json").write_text(json.dumps(producer, indent=2) + "\n")
+    flow = result.get("dataflow_analysis", {})
+    checks = {
+        "producer_rejected_count_mismatch": bool(producer) and all(
+            row["dataflow"] == row["flow_status"] == "error" for row in producer
+        ),
+        "overlay_not_falsely_established": bool(producer) and all(
+            "dataflowOss" not in row["overlays_after_failure"] for row in producer
+        ),
+        "no_usable_flow_paths": flow.get("paths") == [],
+        "worker_failure_remains_unknown": flow.get("status") in {"error", "partial"}
+        and result.get("status") != "complete",
+        "base_methods_retained": (result.get("summary", {}).get("methods") or 0) > 0,
+        "production_query_unchanged": production_path.read_bytes() == production,
+        "implementation_unchanged": all(digest(path.read_bytes()) == value for path, value in implementation.items()),
+    }
+    return {
+        "case": "count-mismatch", "seconds": seconds, "checks": checks,
+        "production_query_sha256": hashlib.sha256(production).hexdigest(),
+        "fault_query_sha256": hashlib.sha256(fault).hexdigest(),
+        "implementation_hashes": {str(path): value for path, value in implementation.items()},
+        "injection": "Trusted private worker expects the native definition count plus one; capture actual graph overlays in the error handler before adapter recovery.",
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path, help="New directory outside checkout")
@@ -251,9 +357,17 @@ def main():
         "--skip-large", action="store_true", help="Omit the large Python method probe"
     )
     parser.add_argument(
+        "--over-limit-probe", action="store_true",
+        help="Also qualify a method above the unchanged 50,000-definition limit",
+    )
+    parser.add_argument(
         "--recovery-probe",
         action="store_true",
         help="Also inject a trusted query failure to qualify immutable checkpoint recovery",
+    )
+    parser.add_argument(
+        "--count-mismatch-probe", action="store_true",
+        help="Also force a private worker definition mismatch and verify fail-closed output",
     )
     args = parser.parse_args()
     output = args.output.expanduser().resolve()
@@ -325,8 +439,14 @@ def main():
         }
         receipts.append({"case": "large", "seconds": seconds, "checks": checks})
         print(json.dumps(receipts[-1]), flush=True)
+    if args.over_limit_probe:
+        receipts.append(over_limit_probe(output))
+        print(json.dumps(receipts[-1]), flush=True)
     if args.recovery_probe:
         receipts.append(recovery_probe(output))
+        print(json.dumps(receipts[-1]), flush=True)
+    if args.count_mismatch_probe:
+        receipts.append(count_mismatch_probe(output))
         print(json.dumps(receipts[-1]), flush=True)
     unchanged = all(
         Path(path).is_file() and digest(Path(path).read_bytes()) == value

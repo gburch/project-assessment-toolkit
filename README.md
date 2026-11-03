@@ -114,7 +114,7 @@ uv run --locked --extra analysis --extra vulture pat --state-dir /path/outside/r
 ```
 
 Configure [Joern separately](docs/PROJECT_ASSESS.md#optional-joern-analysis) for its contained call-graph analysis. Deep records an explicit gap when its trusted runtime is unavailable.
-Its timeout and heap defaults are PAT operational guardrails; trusted host overrides
+Its time, heap and CPU defaults are PAT operational guardrails; trusted host overrides
 are documented at that link and apply to CLI, MCP and UI scans.
 
 Use `pat --state-dir STATE export-report ASSESSMENT_ID` to return nine SVG badges

@@ -58,7 +58,7 @@ def raw_result(path):
 
     return {
         "schema_version": 1,
-        "query_version": "6",
+        "query_version": "7",
         "dataflow": "not_run",
         "errors": [],
         "gaps": [],
@@ -196,6 +196,16 @@ def fake_run(argv, *, cwd, output=None, **kwargs):
     return "complete"
 
 
+def phase_result(*events):
+    return {
+        "schema_version": 1,
+        "query_version": "7",
+        "phases": [
+            {"phase": phase, "elapsed_seconds": elapsed} for phase, elapsed in events
+        ],
+    }
+
+
 def test_missing_operator_tools_does_not_start_or_install_anything(monkeypatch):
     monkeypatch.delenv("PAT_JOERN_HOME", raising=False)
     monkeypatch.delenv("PAT_JOERN_JAVA_HOME", raising=False)
@@ -212,8 +222,8 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("metadata launched Java"))
     info = analysis.joern_info()
     assert info["available"] and info["version"] == "4.0.669"
-    assert info["adapter_version"] == "9"
-    assert info["query_version"] == "6" and info["dataflow"] == "deep_profile"
+    assert info["adapter_version"] == "10"
+    assert info["query_version"] == "7" and info["dataflow"] == "deep_profile"
     assert qualified["root"] not in json.dumps(info)
     deep = analysis.joern_limits("deep")
     assert deep["seconds"] == 7200 and deep["heap_gib"] == 8
@@ -227,27 +237,37 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
 
 
 @pytest.mark.parametrize("profile,seconds,heap", [("standard", 120, 2), ("deep", 7200, 8)])
-@pytest.mark.parametrize("timeout_override,heap_override", [(None, None), (21600, None), (None, 16), (21600, 16)])
+@pytest.mark.parametrize(
+    "timeout_override,heap_override,processor_override",
+    [(None, None, None), (21600, None, None), (None, 16, None), (None, None, 6),
+     (21600, 16, 6), (None, None, 1), (None, None, 32)],
+)
 def test_host_budget_overrides_are_independent_of_profile_defaults(
-    monkeypatch, profile, seconds, heap, timeout_override, heap_override
+    monkeypatch, profile, seconds, heap, timeout_override, heap_override, processor_override
 ):
-    baseline = analysis.joern_limits(profile)
-    for variable, value in (
+    overrides = (
         ("PAT_JOERN_TIMEOUT_SECONDS", timeout_override),
         ("PAT_JOERN_HEAP_GIB", heap_override),
-    ):
+        ("PAT_JOERN_ACTIVE_PROCESSORS", processor_override),
+    )
+    for variable, _ in overrides:
+        monkeypatch.delenv(variable, raising=False)
+    baseline = analysis.joern_limits(profile)
+    for variable, value in overrides:
         if value is not None:
             monkeypatch.setenv(variable, str(value))
     limits = analysis.joern_limits(profile)
     assert baseline["seconds"] == seconds and baseline["heap_gib"] == heap
+    assert baseline["active_processors"] == 2
     assert limits["seconds"] == (timeout_override or seconds)
     assert limits["heap_gib"] == (heap_override or heap)
-    assert {key: value for key, value in limits.items() if key not in {"seconds", "heap_gib"}} == {
-        key: value for key, value in baseline.items() if key not in {"seconds", "heap_gib"}
+    assert limits["active_processors"] == (processor_override or 2)
+    assert {key: value for key, value in limits.items() if key not in {"seconds", "heap_gib", "active_processors"}} == {
+        key: value for key, value in baseline.items() if key not in {"seconds", "heap_gib", "active_processors"}
     }
 
 
-@pytest.mark.parametrize("variable", ["PAT_JOERN_TIMEOUT_SECONDS", "PAT_JOERN_HEAP_GIB"])
+@pytest.mark.parametrize("variable", ["PAT_JOERN_TIMEOUT_SECONDS", "PAT_JOERN_HEAP_GIB", "PAT_JOERN_ACTIVE_PROCESSORS"])
 @pytest.mark.parametrize("value", ["", "0", "-1", "1.5", "nan", "inf", "1e309", " 16", "16 ", "true", "1_000", "16g", "16;echo budget-secret", "$(echo budget-secret)"])
 def test_invalid_host_budgets_fail_before_starting_analyzer(monkeypatch, variable, value):
     monkeypatch.setenv(variable, value)
@@ -258,16 +278,19 @@ def test_invalid_host_budgets_fail_before_starting_analyzer(monkeypatch, variabl
     assert "budget-secret" not in str(raised.value)
 
 
-@pytest.mark.parametrize("variable,value", [("PAT_JOERN_TIMEOUT_SECONDS", "86401"), ("PAT_JOERN_HEAP_GIB", "65")])
+@pytest.mark.parametrize("variable,value", [("PAT_JOERN_TIMEOUT_SECONDS", "86401"), ("PAT_JOERN_HEAP_GIB", "65"), ("PAT_JOERN_ACTIVE_PROCESSORS", "33")])
 def test_host_budget_overrides_remain_bounded(monkeypatch, variable, value):
     monkeypatch.setenv(variable, value)
+    monkeypatch.setattr(analysis, "_run", lambda *a, **k: pytest.fail("invalid budget ran Joern"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("invalid budget started a process"))
     with pytest.raises(ValueError, match=variable):
-        analysis.joern_limits("deep")
+        analysis.analyze_joern([source()], analysis_profile="deep")
 
 
-def test_host_budget_controls_process_deadline_heap_and_receipt(qualified, monkeypatch):
+def test_host_budget_controls_process_deadline_heap_processors_and_receipt(qualified, monkeypatch):
     monkeypatch.setenv("PAT_JOERN_TIMEOUT_SECONDS", "21600")
     monkeypatch.setenv("PAT_JOERN_HEAP_GIB", "16")
+    monkeypatch.setenv("PAT_JOERN_ACTIVE_PROCESSORS", "6")
     monkeypatch.setattr(analysis, "_clock", lambda: 100.0)
     calls = []
 
@@ -275,13 +298,15 @@ def test_host_budget_controls_process_deadline_heap_and_receipt(qualified, monke
         calls.append((argv, kwargs))
         assert kwargs["stop"] == 21700.0
         assert "-J-Xmx16g" in argv
-        assert kwargs["env"]["JAVA_OPTS"] == "-Xmx16g -XX:ActiveProcessorCount=2 -Xss32m"
-        assert kwargs["env"]["_JAVA_OPTIONS"].startswith("-Xmx16g ")
-        assert not {"PAT_JOERN_TIMEOUT_SECONDS", "PAT_JOERN_HEAP_GIB"} & kwargs["env"].keys()
+        assert "-J-XX:ActiveProcessorCount=6" in argv
+        assert kwargs["env"]["JAVA_OPTS"] == "-Xmx16g -XX:ActiveProcessorCount=6 -Xss32m"
+        assert kwargs["env"]["_JAVA_OPTIONS"].startswith("-Xmx16g -XX:ActiveProcessorCount=6 ")
+        assert not {"PAT_JOERN_TIMEOUT_SECONDS", "PAT_JOERN_HEAP_GIB", "PAT_JOERN_ACTIVE_PROCESSORS"} & kwargs["env"].keys()
         status = fake_run(argv, **kwargs)
         if output := kwargs.get("output"):
             raw = json.loads(output.read_text())
             raw["metadata"]["max_heap_bytes"] = 16 * 1024**3
+            raw["metadata"]["active_processors"] = 6
             output.write_text(json.dumps(raw))
         return status
 
@@ -289,6 +314,7 @@ def test_host_budget_controls_process_deadline_heap_and_receipt(qualified, monke
     result = analysis.analyze_joern([source()], snapshot=qualified, analysis_profile="deep")
     assert len(calls) == 2 and result["status"] == "complete"
     assert result["limits"]["seconds"] == 21600 and result["limits"]["heap_gib"] == 16
+    assert result["limits"]["active_processors"] == 6
     assert result["provenance"]["operator_overrides"] == {
         "seconds": {
             "environment_variable": "PAT_JOERN_TIMEOUT_SECONDS",
@@ -300,9 +326,54 @@ def test_host_budget_controls_process_deadline_heap_and_receipt(qualified, monke
             "value": 16,
             "profile_default": 8,
         },
+        "active_processors": {
+            "environment_variable": "PAT_JOERN_ACTIVE_PROCESSORS",
+            "value": 6,
+            "profile_default": 2,
+        },
     }
     assert result["coverage"]["batches"][0]["model_metadata"]["max_heap_bytes"] == 16 * 1024**3
+    assert result["coverage"]["batches"][0]["model_metadata"]["active_processors"] == 6
     assert not result["configuration"]["project_config_loaded"]
+
+
+@pytest.mark.parametrize("processors,equivalent", [("2", True), ("6", False)])
+def test_processor_budget_scope_uses_effective_limit_and_preserves_operator_choice(
+    tmp_path, monkeypatch, processors, equivalent
+):
+    from project_assess.comparison import compare_assessments
+    from project_assess.service import AssessmentService
+
+    def unavailable_tools():
+        raise OSError("synthetic unavailable tools")
+
+    for variable in ("PAT_JOERN_TIMEOUT_SECONDS", "PAT_JOERN_HEAP_GIB", "PAT_JOERN_ACTIVE_PROCESSORS"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setattr(analysis, "_tools", unavailable_tools)
+    monkeypatch.setattr(analysis, "_run", lambda *a, **k: pytest.fail("scope check ran Joern"))
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "app.py").write_text("raise AssertionError('must not execute')\n")
+    service = AssessmentService(tmp_path / "state")
+    baseline = service.scan(root, analyzers=["joern"])
+    monkeypatch.setenv("PAT_JOERN_ACTIVE_PROCESSORS", processors)
+    explicit = service.scan(root, analyzers=["joern"])
+    repeated = service.scan(root, analyzers=["joern"])
+    assert baseline["source"] == explicit["source"] == repeated["source"]
+    assert (baseline["scope_digest"] == explicit["scope_digest"]) is equivalent
+    assert explicit["scope_digest"] == repeated["scope_digest"]
+    assert compare_assessments(baseline, explicit, None, None, None)["comparable"] is equivalent
+    receipt = explicit["facts"]["optional_analysis"]["joern"]
+    limits = explicit["facts"]["collection"]["limits"]["dedicated_analyzer_phases"]["joern"]
+    assert limits["active_processors"] == receipt["limits"]["active_processors"] == int(processors)
+    assert baseline["facts"]["optional_analysis"]["joern"]["provenance"]["operator_overrides"] == {}
+    assert receipt["provenance"]["operator_overrides"] == {
+        "active_processors": {
+            "environment_variable": "PAT_JOERN_ACTIVE_PROCESSORS",
+            "value": int(processors),
+            "profile_default": 2,
+        },
+    }
 
 
 @pytest.mark.parametrize(
@@ -594,8 +665,10 @@ def test_invalid_model_suppression_counts_do_not_become_validated_output(
         {"argv": []},
         {"seconds": 21600},
         {"heap_gib": 16},
+        {"active_processors": 6},
         {"PAT_JOERN_TIMEOUT_SECONDS": "21600"},
         {"PAT_JOERN_HEAP_GIB": "16"},
+        {"PAT_JOERN_ACTIVE_PROCESSORS": "6"},
         False,
     ],
 )
@@ -696,19 +769,26 @@ def test_effective_runtime_limits_are_verified_not_inferred_from_requested_flags
     assert result["candidate_index"] == []
 
 
-def test_runtime_metadata_cannot_exceed_operator_selected_heap(qualified, monkeypatch):
-    monkeypatch.setenv("PAT_JOERN_HEAP_GIB", "16")
+@pytest.mark.parametrize(
+    "variable,limit_key,selected,metadata_key,reported",
+    [("PAT_JOERN_HEAP_GIB", "heap_gib", 16, "max_heap_bytes", 16 * 1024**3 + 1),
+     ("PAT_JOERN_ACTIVE_PROCESSORS", "active_processors", 6, "active_processors", 7)],
+)
+def test_runtime_metadata_cannot_exceed_operator_selected_limit(
+    qualified, monkeypatch, variable, limit_key, selected, metadata_key, reported
+):
+    monkeypatch.setenv(variable, str(selected))
 
     def run(argv, *, output=None, **kwargs):
         if output:
             raw = raw_result("src/app.py")
-            raw["metadata"]["max_heap_bytes"] = 16 * 1024**3 + 1
+            raw["metadata"][metadata_key] = reported
             output.write_text(json.dumps(raw))
         return "complete"
 
     monkeypatch.setattr(analysis, "_run", run)
     result = analysis.analyze_joern([source()], snapshot=qualified)
-    assert result["limits"]["heap_gib"] == 16
+    assert result["limits"][limit_key] == selected
     assert result["status"] == "partial" and result["summary"]["methods"] is None
     assert result["coverage"]["batches"][0]["status"] == "unvalidated_output_or_source"
     assert result["candidate_index"] == []
@@ -799,6 +879,182 @@ def test_failed_provider_output_is_unknown_and_does_not_leak_diagnostics(
     assert "missing results remain unknown" in result["gaps"][0]
 
 
+@pytest.mark.parametrize("profile", ["standard", "deep"])
+def test_phase_progress_qualifies_only_profile_complete_ordered_events(tmp_path, profile):
+    events = [
+        ("import_started", 0),
+        ("import_completed", 1.5),
+        ("default_overlays_started", 1.5),
+        ("default_overlays_completed", 3),
+        ("postprocessing_started", 4),
+        ("postprocessing_completed", 5),
+        ("base_evidence_started", 5),
+        ("base_evidence_completed", 7.5),
+        ("definition_accounting_started", 8),
+        ("definition_accounting_completed", 10),
+        ("dataflow_overlay_started", 11),
+        ("dataflow_overlay_completed", 20),
+        ("dataflow_queries_started", 20),
+        ("dataflow_queries_completed", 86_400),
+    ]
+    durations = {
+        "import": 1.5,
+        "default_overlays": 1.5,
+        "postprocessing": 1,
+        "base_evidence": 2.5,
+        "definition_accounting": 2,
+        "dataflow_overlay": 9,
+        "dataflow_queries": 86_380,
+    }
+    if profile == "standard":
+        events = events[:8]
+        durations = dict(list(durations.items())[:4])
+    payload = phase_result(*events)
+    path = tmp_path / "phases.json"
+    path.write_text(json.dumps(payload))
+    assert analysis._phase_progress(path, profile) == {
+        "status": "complete",
+        "timing_scope": "query_body_only",
+        "last_phase": events[-1][0],
+        "events": payload["phases"],
+        "durations_seconds": durations,
+    }
+
+
+@pytest.mark.parametrize("profile", ["standard", "deep"])
+@pytest.mark.parametrize("event_count", [1, 3])
+def test_phase_progress_keeps_incomplete_stage_without_inventing_duration(
+    tmp_path, profile, event_count
+):
+    events = [("import_started", 0), ("import_completed", 2), ("default_overlays_started", 3)]
+    payload = phase_result(*events[:event_count])
+    path = tmp_path / "phases.json"
+    path.write_text(json.dumps(payload))
+    assert analysis._phase_progress(path, profile) == {
+        "status": "partial",
+        "timing_scope": "query_body_only",
+        "last_phase": events[event_count - 1][0],
+        "events": payload["phases"],
+        "durations_seconds": {"import": 2} if event_count == 3 else {},
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param([], id="not-object"),
+        pytest.param({**phase_result(("import_started", 0)), "schema_version": True}, id="bool-schema"),
+        pytest.param({**phase_result(("import_started", 0)), "schema_version": 1.0}, id="float-schema"),
+        pytest.param({**phase_result(("import_started", 0)), "schema_version": 2}, id="future-schema"),
+        pytest.param({**phase_result(("import_started", 0)), "query_version": "6"}, id="old-query"),
+        pytest.param({**phase_result(("import_started", 0)), "raw_source": "source-secret"}, id="raw-source"),
+        pytest.param({**phase_result(("import_started", 0)), "path": "/private/source-secret"}, id="path-key"),
+        pytest.param({**phase_result(("import_started", 0)), "phases": None}, id="not-events"),
+        pytest.param(phase_result(), id="empty-events"),
+        pytest.param({**phase_result(), "phases": ["source-secret"]}, id="not-event-object"),
+        pytest.param({**phase_result(), "phases": [{"phase": "import_started"}]}, id="missing-time"),
+        pytest.param({**phase_result(), "phases": [{"phase": "import_started", "elapsed_seconds": 0, "path": "source-secret"}]}, id="event-path"),
+        pytest.param(phase_result(("source-secret", 0)), id="unknown-phase"),
+        pytest.param(phase_result(("import_completed", 0)), id="missing-start"),
+        pytest.param(phase_result(("import_started", 0), ("import_started", 1)), id="duplicate-phase"),
+        pytest.param(phase_result(("import_started", 0), ("default_overlays_started", 1)), id="skipped-phase"),
+        pytest.param(phase_result(("import_started", True)), id="bool-time"),
+        pytest.param(phase_result(("import_started", "source-secret")), id="string-time"),
+        pytest.param(phase_result(("import_started", None)), id="null-time"),
+        pytest.param(phase_result(("import_started", -1)), id="negative-time"),
+        pytest.param(phase_result(("import_started", 86_400.1)), id="unbounded-time"),
+        pytest.param(phase_result(("import_started", 10**400)), id="huge-integer-time"),
+        pytest.param(phase_result(("import_started", 2), ("import_completed", 1)), id="regressing-time"),
+        pytest.param(phase_result(("import_started", float("nan"))), id="nan-time"),
+        pytest.param(phase_result(("import_started", float("inf"))), id="infinite-time"),
+    ],
+)
+def test_phase_progress_rejects_unqualified_metadata_without_relaying_content(tmp_path, payload):
+    path = tmp_path / "phases.json"
+    path.write_text(json.dumps(payload))
+    assert analysis._phase_progress(path, "deep") == {"status": "invalid"}
+
+
+def test_standard_phase_progress_rejects_deep_events_and_excess_rows(tmp_path):
+    events = [
+        (f"{stage}_{state}", 0)
+        for stage in (
+            "import", "default_overlays", "postprocessing", "base_evidence",
+            "definition_accounting", "dataflow_overlay", "dataflow_queries",
+        )
+        for state in ("started", "completed")
+    ]
+    path = tmp_path / "phases.json"
+    path.write_text(json.dumps(phase_result(*events[:9])))
+    assert analysis._phase_progress(path, "standard") == {"status": "invalid"}
+    path.write_text(json.dumps(phase_result(*events, ("source-secret", 0))))
+    assert analysis._phase_progress(path, "deep") == {"status": "invalid"}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"source-secret: not JSON",
+        b"\xffsource-secret",
+        b'{"schema_version":1,"query_version":"7","phases":[],"phases":[{"phase":"import_started","elapsed_seconds":0}]}',
+        b'{"schema_version":1,"query_version":"7","phases":[{"phase":"import_started","elapsed_seconds":0,"elapsed_seconds":1}]}',
+    ],
+)
+def test_phase_progress_rejects_invalid_encoding_and_ambiguous_json(tmp_path, payload):
+    path = tmp_path / "phases.json"
+    path.write_bytes(payload)
+    assert analysis._phase_progress(path, "deep") == {"status": "invalid"}
+
+
+def test_phase_progress_bounds_input_and_refuses_symlinks(tmp_path):
+    path = tmp_path / "phases.json"
+    assert analysis._phase_progress(path, "deep") == {"status": "unavailable"}
+    payload = json.dumps(phase_result(("import_started", 0))).encode()
+    path.write_bytes(payload + b" " * (8192 - len(payload)))
+    assert analysis._phase_progress(path, "deep")["status"] == "partial"
+    path.write_bytes(path.read_bytes() + b" ")
+    assert analysis._phase_progress(path, "deep") == {"status": "invalid"}
+    target = tmp_path / "source-secret.json"
+    target.write_bytes(payload)
+    path.unlink()
+    path.symlink_to(target)
+    assert analysis._phase_progress(path, "deep") == {"status": "invalid"}
+    path.unlink()
+    path.mkdir()
+    assert analysis._phase_progress(path, "deep") == {"status": "invalid"}
+
+
+@pytest.mark.parametrize("failure", ["tool_failed", "timeout"])
+def test_failed_query_retains_qualified_phase_receipt_and_process_timing(
+    qualified, monkeypatch, failure
+):
+    payload = phase_result(
+        ("import_started", 0), ("import_completed", 2), ("default_overlays_started", 2.5)
+    )
+
+    def run(argv, *, output=None, **kwargs):
+        if output:
+            output.with_name(output.name + ".phases.json").write_text(json.dumps(payload))
+            return failure
+        return fake_run(argv, output=output, **kwargs)
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified, analysis_profile="deep")
+    batch = result["coverage"]["batches"][0]
+    assert result["status"] == "partial" and result["summary"]["methods"] is None
+    assert batch["status"] == batch["process_status"] == failure
+    assert batch["base_checkpoint_recovered"] is False
+    assert batch["phase_progress"] == {
+        "status": "partial",
+        "timing_scope": "query_body_only",
+        "last_phase": "default_overlays_started",
+        "events": payload["phases"],
+        "durations_seconds": {"import": 2},
+    }
+    assert set(batch["timing"]) == {"parser_seconds", "query_process_seconds"}
+    assert all(type(value) is float and value >= 0 for value in batch["timing"].values())
+
+
 def test_staged_source_mutation_invalidates_model_identity(qualified, monkeypatch):
     def run(argv, **kwargs):
         fake_run(argv, **kwargs)
@@ -855,9 +1111,9 @@ def test_process_runner_enforces_timeout_and_discards_sensitive_logs(tmp_path, c
 @pytest.mark.parametrize(
     "payload",
     [
-        '{"schema_version":1,"query_version":"6","schema_version":1}',
-        '{"schema_version":true,"query_version":"6","dataflow":"not_run"}',
-        '{"schema_version":1,"query_version":"6","dataflow":"run"}',
+        '{"schema_version":1,"query_version":"7","schema_version":1}',
+        '{"schema_version":true,"query_version":"7","dataflow":"not_run"}',
+        '{"schema_version":1,"query_version":"7","dataflow":"run"}',
     ],
 )
 def test_unqualified_or_ambiguous_query_output_is_rejected(tmp_path, payload):

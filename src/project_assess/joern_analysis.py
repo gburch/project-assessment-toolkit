@@ -26,8 +26,8 @@ from .joern_bindings import BindingCountercheck
 from .joern_dataflow import normalize_dataflow
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "9"
-QUERY_VERSION = "6"
+VERSION = "10"
+QUERY_VERSION = "7"
 JOERN_VERSION = "4.0.669"
 QUERY_PATH = Path(__file__).parent / "resources" / "joern.sc"
 MAX_INPUT_RECORDS = 20_000
@@ -258,6 +258,7 @@ def _joern_configuration(analysis_profile):
     for name, field, maximum in (
         ("PAT_JOERN_TIMEOUT_SECONDS", "seconds", 86_400),
         ("PAT_JOERN_HEAP_GIB", "heap_gib", 64),
+        ("PAT_JOERN_ACTIVE_PROCESSORS", "active_processors", 32),
     ):
         raw = os.environ.get(name)
         if raw is None:
@@ -269,11 +270,12 @@ def _joern_configuration(analysis_profile):
             or int(raw) > maximum
         ):
             raise ValueError(f"{name} must be a positive decimal integer from 1 to {maximum}")
+        profile_default = limits[field]
         limits[field] = int(raw)
         overrides[field] = {
             "environment_variable": name,
             "value": limits[field],
-            "profile_default": _PROFILES[analysis_profile][field],
+            "profile_default": profile_default,
         }
     return limits, overrides
 
@@ -719,7 +721,7 @@ def _run(argv, *, workspace, cwd, env, stop, limits, output=None):
     )
 
 
-def _read_result(path, maximum):
+def _read_json(path, maximum):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
@@ -740,7 +742,11 @@ def _read_result(path, maximum):
             result[key] = value
         return result
 
-    result = json.loads(payload, parse_constant=nonfinite, object_pairs_hook=pairs)
+    return json.loads(payload, parse_constant=nonfinite, object_pairs_hook=pairs)
+
+
+def _read_result(path, maximum):
+    result = _read_json(path, maximum)
     if (
         not isinstance(result, dict)
         or type(result.get("schema_version")) is not int
@@ -751,6 +757,57 @@ def _read_result(path, maximum):
     if result.get("dataflow") not in {"not_run", "complete", "partial", "error"}:
         raise ValueError("Unqualified dataflow analysis")
     return result
+
+
+def _phase_progress(path, profile):
+    """Keep bounded, source-free query timing; never relay raw diagnostics."""
+    if not path.exists():
+        return {"status": "unavailable"}
+    stages = (
+        "import", "default_overlays", "postprocessing", "base_evidence",
+        "definition_accounting", "dataflow_overlay", "dataflow_queries",
+    )
+    if profile == "standard":
+        stages = stages[:4]
+    expected = [f"{stage}_{state}" for stage in stages for state in ("started", "completed")]
+    try:
+        value = _read_json(path, 8192)
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"schema_version", "query_version", "phases"}
+            or type(value["schema_version"]) is not int
+            or value["schema_version"] != 1
+            or value["query_version"] != QUERY_VERSION
+            or not isinstance(value["phases"], list)
+            or not 1 <= len(value["phases"]) <= len(expected)
+        ):
+            raise ValueError("Invalid phase metadata")
+        events, previous = [], 0.0
+        for name, row in zip(expected, value["phases"], strict=False):
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"phase", "elapsed_seconds"}
+                or row["phase"] != name
+                or type(row["elapsed_seconds"]) not in {int, float}
+                or not previous <= row["elapsed_seconds"] <= 86_400
+                or not math.isfinite(row["elapsed_seconds"])
+            ):
+                raise ValueError("Invalid phase event")
+            previous = row["elapsed_seconds"]
+            events.append({"phase": name, "elapsed_seconds": previous})
+        return {
+            "status": "complete" if len(events) == len(expected) else "partial",
+            "timing_scope": "query_body_only",
+            "last_phase": events[-1]["phase"],
+            "events": events,
+            "durations_seconds": {
+                stages[index // 2]: events[index + 1]["elapsed_seconds"]
+                - events[index]["elapsed_seconds"]
+                for index in range(0, len(events) - 1, 2)
+            },
+        }
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        return {"status": "invalid"}
 
 
 def _source_path(value, stage, sources):
@@ -1381,6 +1438,7 @@ def analyze_joern(
                     )
                     parser.append("--no-tsTypes")
                 compatibility = None
+                parse_began = time.perf_counter()
                 status = _run(
                     _contained_command(parser, workspace, original, containment, binary, cwd),
                     workspace=workspace,
@@ -1389,6 +1447,8 @@ def analyze_joern(
                     stop=stop,
                     limits=limits,
                 )
+                parse_seconds = time.perf_counter() - parse_began
+                query_seconds = None
                 if status == "complete" and language == "javascript":
                     try:
                         compatibility = _javascript_compatibility(workspace, stage, batch)
@@ -1418,6 +1478,7 @@ def analyze_joern(
                         "--param",
                         "profile=" + analysis_profile,
                     ]
+                    query_began = time.perf_counter()
                     status = _run(
                         _contained_command(command, workspace, original, containment, binary, cwd),
                         workspace=workspace,
@@ -1427,7 +1488,11 @@ def analyze_joern(
                         limits=limits,
                         output=output,
                     )
+                    query_seconds = time.perf_counter() - query_began
                 process_status = status
+                phase_progress = _phase_progress(
+                    output.with_name(output.name + ".phases.json"), analysis_profile
+                )
                 model_status, modeled_count = "unknown", 0
                 counts, metadata, metrics = {}, {}, {}
                 detail_status = "unknown"
@@ -1618,6 +1683,12 @@ def analyze_joern(
                         "model_metadata": metadata,
                         "model_metrics": metrics,
                         "ast_compatibility": compatibility,
+                        "timing": {
+                            "parser_seconds": round(parse_seconds, 3),
+                            "query_process_seconds": round(query_seconds, 3)
+                            if query_seconds is not None else None,
+                        },
+                        "phase_progress": phase_progress,
                     }
                 )
                 shutil.rmtree(cwd)

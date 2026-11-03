@@ -1,15 +1,59 @@
 import io.shiftleft.semanticcpg.language.*
+import io.shiftleft.semanticcpg.utils.MemberAccess.isFieldAccess
+import io.shiftleft.codepropertygraph.generated.DiffGraphBuilder
 import io.shiftleft.codepropertygraph.generated.nodes.*
 import io.joern.dataflowengineoss.language.*
 import io.joern.dataflowengineoss.queryengine.{Engine, EngineContext, EngineConfig}
 import io.joern.dataflowengineoss.layers.dataflows.{OssDataFlow, OssDataFlowOptions}
-import io.joern.dataflowengineoss.passes.reachingdef.{ReachingDefProblem, ReachingDefTransferFunction}
+import io.joern.dataflowengineoss.passes.reachingdef.{DataFlowSolver, DdgGenerator, ReachingDefPass, ReachingDefProblem, ReachingDefTransferFunction}
 import io.shiftleft.semanticcpg.layers.LayerCreatorContext
 import scala.collection.mutable
 import scala.util.control.NonFatal
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Paths}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
+
+// Exact optimized-gen cardinality for pinned Joern 4.0.669. Count node IDs,
+// without constructing its reaching-def flow graph, kill sets or solver state. Preserve
+// call/argument traversal multiplicity for the producer's lone-name rule.
+def optimizedDefinitionCount(method: Method): Long = {
+  val params = method.parameter.toVector
+  val domain = mutable.HashSet.empty[Long]
+  domain += method.id
+  domain += method.methodReturn.id
+  params.foreach(node => domain += node.id)
+  method.parameter.asOutput.foreach(node => domain += node.id)
+  method.reversePostOrder.foreach(node => domain += node.id)
+  method.cfgNode.foreach(node => domain += node.id)
+  val calls = method.call.toVector
+  val declaredNames = params.iterator.map(_.name).toSet ++ method.local.name.toSet
+  val returnedNames = method._returnViaContainsOut.ast.isIdentifier.name.toSet
+  val seenNames = mutable.HashSet.empty[String]
+  val sole = mutable.HashMap.empty[String, (Long, Long)]
+  calls.foreach { call =>
+    call.argument.isIdentifier.foreach { arg =>
+      if (!declaredNames(arg.name) && !returnedNames(arg.name)) {
+        if (seenNames.add(arg.name)) sole(arg.name) = (call.id, arg.id)
+        else sole.remove(arg.name)
+      }
+    }
+  }
+  val loneByCall = sole.values.toVector.groupMap(_._1)(_._2).view.mapValues(_.toSet).toMap
+  val genCounts = mutable.HashMap.empty[Long, Int]
+  calls.filterNot(call => isFieldAccess(call.name)).foreach { call =>
+    val defs = mutable.HashSet.empty[Long]
+    if (domain(call.id)) defs += call.id
+    call.argument.foreach {
+      case node: Call if domain(node.id) => defs += node.id
+      case node: Identifier if domain(node.id) => defs += node.id
+      case _ => ()
+    }
+    loneByCall.get(call.id).foreach(ids => defs --= ids)
+    genCounts(call.id) = defs.size
+  }
+  params.iterator.map(_.id).toSet.size.toLong + genCounts.valuesIterator.map(_.toLong).sum
+}
 
 // Fixed, trusted query for captured source CPGs. Deep adds modeled dataflow, never target execution.
 @main def exec(cpgFile: String, out: String, profile: String = "standard"): Unit = {
@@ -22,7 +66,7 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
     "Unread bindings are review leads only; preserve initializer effects and callback, override and public signature contracts.",
     "Deep dataflow describes modeled parameter influence, not external taint, feasible execution, dead-method proof or target-code execution."
   )
-  val result = Obj("schema_version" -> 1, "query_version" -> "6", "dataflow" -> "not_run",
+  val result = Obj("schema_version" -> 1, "query_version" -> "7", "dataflow" -> "not_run",
     "errors" -> errors, "gaps" -> gaps, "caveats" -> caveats)
   def writeResult(value: Value, name: String = out): Unit = {
     val destination = Paths.get(name)
@@ -32,6 +76,14 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
       Files.move(temporary, destination, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
         java.nio.file.StandardCopyOption.ATOMIC_MOVE)
     } finally Files.deleteIfExists(temporary)
+  }
+  val began = System.nanoTime()
+  val phases = Arr()
+  def phase(name: String): Unit = {
+    // Aggregate timings only: no source names, paths, code or error messages.
+    phases.value += Obj("phase" -> name,
+      "elapsed_seconds" -> Num((System.nanoTime() - began).toDouble / 1e9))
+    writeResult(Obj("schema_version" -> 1, "query_version" -> "7", "phases" -> phases), out + ".phases.json")
   }
   var truncatedValues = 0L
   def text(value: String, limit: Int = 2048): String = {
@@ -228,10 +280,17 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
     case _ => false
   }
   try {
+    phase("import_started")
     importCpg(cpgFile, "captured-input", enhance = false).getOrElse(
       throw new IllegalArgumentException("Cannot load captured graph"))
+    phase("import_completed")
+    phase("default_overlays_started")
     io.joern.x2cpg.X2Cpg.applyDefaultOverlays(cpg)
+    phase("default_overlays_completed")
+    phase("postprocessing_started")
     console.applyPostProcessingPasses(cpg)
+    phase("postprocessing_completed")
+    phase("base_evidence_started")
     languages = cpg.metaData.language.toSet
     result("metadata") = Obj("languages" -> Arr.from(languages.toVector.sorted),
       "language" -> languages.toVector.sorted.headOption.getOrElse("unknown"),
@@ -532,6 +591,7 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
         output
       }
     }
+    phase("base_evidence_completed")
     if (deep) {
       // Preserve validated base facts if a later expensive flow pass is killed.
       // The adapter accepts this distinct checkpoint only with failed process
@@ -563,33 +623,70 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
           "paths_truncated" -> 0, "step_limit" -> stepLimit))
       result("dataflow_analysis") = dataflow
       try {
+        phase("definition_accounting_started")
         val methods = cpg.method.filter(locatedSource).toVector.sortBy(method =>
           (method.filename, method.lineNumber.getOrElse(0), method.fullName))
         dataflow("methods_total") = methods.size
+        // The stock pass processes every graph method, including unlocated and
+        // external ones. Keep that domain; source metadata below stays located.
+        val definitionCounts = cpg.method.map(method => method.id -> optimizedDefinitionCount(method)).toMap
         val skippedIds = mutable.Set.empty[Long]
         val skipped = new Bounded(20000, 2 * 1024 * 1024)
-        var maximumDefinitions = 0
+        var maximumDefinitions = 0L
         methods.foreach { method =>
-          // Use the producer's actual definition accounting. Its default of 4000
-          // otherwise silently leaves the largest methods without DDG edges.
-          val problem = ReachingDefProblem.create(method)
-          val transfer = problem.transferFunction.asInstanceOf[ReachingDefTransferFunction]
-          val definitions = transfer.gen.valuesIterator.map(_.size).sum
+          val definitions = definitionCounts(method.id)
           maximumDefinitions = math.max(maximumDefinitions, definitions)
           if (definitions > maxDefinitions) {
             skippedIds += method.id
             skipped.add(identityRow { Obj("path" -> text(method.filename),
               "line" -> line(method.lineNumber), "method" -> text(method.fullName, 4096),
-              "definitions" -> definitions, "reason" -> "definition_limit") })
+              "definitions" -> Num(definitions.toDouble), "reason" -> "definition_limit") })
           }
         }
-        dataflow("maximum_definitions_observed") = maximumDefinitions
+        dataflow("maximum_definitions_observed") = Num(maximumDefinitions.toDouble)
         dataflow("methods_skipped") = skippedIds.size
         dataflow("skipped_methods") = skipped.output
+        phase("definition_accounting_completed")
         val options = new OssDataFlowOptions(maxNumberOfDefinitions = maxDefinitions)
-        new OssDataFlow(options).run(new LayerCreatorContext(cpg))
+        val passFailed = new AtomicBoolean(false)
+        val methodsCompleted = new AtomicLong(0L)
+        phase("dataflow_overlay_started")
+        new OssDataFlow(options) {
+          override def create(context: LayerCreatorContext): Unit = {
+            new ReachingDefPass(context.cpg, maxDefinitions)(options.semantics) {
+              override def runOnPart(dstGraph: DiffGraphBuilder, method: Method): Unit = {
+                try {
+                  val expected = definitionCounts(method.id)
+                  // Do not pay for quadratic CFG/kill preparation merely to
+                  // rediscover that a method exceeds the unchanged limit.
+                  if (expected <= maxDefinitions) {
+                    val problem = ReachingDefProblem.create(method)
+                    val transfer = problem.transferFunction.asInstanceOf[ReachingDefTransferFunction]
+                    val actual = transfer.gen.valuesIterator.map(_.size.toLong).sum
+                    if (actual != expected) {
+                      passFailed.set(true)
+                      throw new IllegalStateException("Definition accounting mismatch")
+                    }
+                    val solution = new DataFlowSolver().calculateMopSolutionForwards(problem)
+                    new DdgGenerator(options.semantics).addReachingDefEdges(dstGraph, method, problem, solution)
+                  }
+                  methodsCompleted.incrementAndGet()
+                } catch { case NonFatal(error) =>
+                  passFailed.set(true)
+                  throw error
+                }
+              }
+            }.createAndApply()
+            // Parallel pass implementations can swallow worker exceptions.
+            // Reject both explicit failures and any part that never completed
+            // before LayerCreator.run can mark the overlay established.
+            if (passFailed.get() || methodsCompleted.get() != definitionCounts.size.toLong)
+              throw new IllegalStateException("Incomplete reaching definitions pass")
+          }
+        }.run(new LayerCreatorContext(cpg))
         if (!cpg.metaData.overlays.exists(_ == "dataflowOss"))
           throw new IllegalStateException("Dataflow overlay was not established")
+        phase("dataflow_overlay_completed")
         dataflow("methods_analyzed") = methods.size - skippedIds.size
         given EngineContext = EngineContext(config = EngineConfig(maxCallDepth = maxCallDepth))
         val rows = new Bounded(20000, 8 * 1024 * 1024)
@@ -645,6 +742,7 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
         val sinksTotal = sinks.size.toLong
         var sinksQueried = 0L
         var pathsTruncated = 0L
+        phase("dataflow_queries_started")
         val engine = new Engine(summon[EngineContext])
         try sinks.filterNot(_._3).foreach { case (kind, sink, _) =>
           // Keep the original per-endpoint query shape and peak-memory scope;
@@ -678,6 +776,7 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
             }
           }
         } finally engine.shutdown()
+        phase("dataflow_queries_completed")
         val output = rows.output
         val incomplete = skippedIds.nonEmpty || pathsTruncated > 0 || output("omitted").num > 0
         output("count_is_lower_bound") = Bool(pathsTruncated > 0)
