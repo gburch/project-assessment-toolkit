@@ -110,6 +110,7 @@ def parser():
             "candidates",
             "snippets",
             "graph",
+            "dataflow",
             "hotspots",
             "coverage",
             "provenance",

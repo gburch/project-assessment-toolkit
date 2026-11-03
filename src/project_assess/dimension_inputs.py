@@ -52,7 +52,7 @@ _PROVIDERS = {
     ),
     "optional": (
         ("analyzer-analysis",),
-        "Explicit optional analyzer models and candidates with their own limits.",
+        "Optional analyzer models, candidates and Deep Joern parameter-value paths with phase-specific coverage; inspect paths and default-semantics limits rather than inferring absent behavior.",
     ),
     "controls": (
         ("control-analysis",),

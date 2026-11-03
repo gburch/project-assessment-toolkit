@@ -1668,7 +1668,15 @@ def collect(
         facts.setdefault("optional_analysis", {})[name] = {
             key: value
             for key, value in result.items()
-            if key not in {"candidates", "candidate_index", "modules", "topology", "hotspots"}
+            if key
+            not in {
+                "candidates",
+                "candidate_index",
+                "modules",
+                "topology",
+                "hotspots",
+                "dataflow_analysis",
+            }
         }
         facts["optional_analysis"][name]["evidence_id"] = evidence_id
         gaps.extend(f"Analyzer {name}: {gap}" for gap in result["gaps"])

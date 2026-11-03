@@ -1227,6 +1227,7 @@ class AssessmentService:
             "candidates",
             "snippets",
             "graph",
+            "dataflow",
             "hotspots",
             "coverage",
             "provenance",
@@ -1458,6 +1459,17 @@ class AssessmentService:
                     {**module, "record_type": "module", **common}
                     for module in stats.get("modules", [])
                 )
+            elif view == "dataflow":
+                flow = stats.get("dataflow_analysis", {})
+                rows.extend(
+                    {**row, "record_type": "value_flow", "locations": row["steps"], **common}
+                    for row in flow.get("paths", [])
+                )
+                rows.extend(
+                    {**row, "record_type": "dataflow_skipped_method", **common}
+                    for batch in flow.get("batches", [])
+                    for row in batch.get("skipped_methods", {}).get("rows", [])
+                )
             elif view == "hotspots":
                 rows.extend({**row, **common} for row in stats.get("hotspots", []))
             elif view == "coverage" and entry["kind"] == "documentation-analysis":
@@ -1642,6 +1654,16 @@ class AssessmentService:
                     "status": entry["stats"].get("status"),
                     "candidate_counts": entry["stats"].get("candidate_counts", {}),
                     "topology_complete": entry["stats"].get("topology", {}).get("complete"),
+                    **(
+                        {
+                            "dataflow_status": entry["stats"]
+                            .get("dataflow_analysis", {})
+                            .get("status", "not_collected"),
+                            "phases": entry["stats"].get("coverage", {}).get("phases", {}),
+                        }
+                        if view == "dataflow"
+                        else {}
+                    ),
                 }
                 for entry in entries
                 if entry["kind"]

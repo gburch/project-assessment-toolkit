@@ -1,0 +1,29 @@
+import { relay } from "./service";
+
+export function entry(payload: string): string {
+  return relay(payload);
+}
+
+export function operationEntry(operationPayload: string): string {
+  relay(operationPayload);
+  return "handled";
+}
+
+export function unrelated(unrelatedPayload: string): string {
+  return "unchanged";
+}
+
+export function overwritten(obsolete: string, replacement: string): string {
+  let value = obsolete;
+  value = replacement;
+  return value;
+}
+
+export function callback(unusedContext: object): string {
+  return "callback contract";
+}
+
+export function preserveEffect(effect: () => void): string {
+  const unused = effect();
+  return "initializer must remain";
+}

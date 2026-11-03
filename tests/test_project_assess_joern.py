@@ -58,7 +58,7 @@ def raw_result(path):
 
     return {
         "schema_version": 1,
-        "query_version": "3",
+        "query_version": "4",
         "dataflow": "not_run",
         "errors": [],
         "gaps": [],
@@ -162,7 +162,37 @@ def fake_run(argv, *, cwd, output=None, **kwargs):
         )
     if output:
         path = next((cwd / "source").rglob("*.*")).relative_to(cwd / "source").as_posix()
-        output.write_text(json.dumps(raw_result(path)))
+        raw = raw_result(path)
+        if "profile=deep" in argv:
+            raw["dataflow"] = "complete"
+            raw["metadata"]["overlays"].append("dataflowOss")
+            raw["dataflow_analysis"] = {
+                "status": "complete",
+                "max_definitions": 50_000,
+                "maximum_definitions_observed": 0,
+                "max_call_depth": 8,
+                "methods_total": 0,
+                "methods_analyzed": 0,
+                "methods_skipped": 0,
+                "skipped_methods": {"status": "complete", "count": 0, "omitted": 0, "rows": []},
+                "paths": {
+                    "status": "complete",
+                    "count": 0,
+                    "omitted": 0,
+                    "count_is_lower_bound": False,
+                    "rows": [],
+                },
+                "queries": {
+                    "sinks_total": 0,
+                    "sinks_queried": 0,
+                    "sinks_omitted": 0,
+                    "paths_truncated": 0,
+                    "step_limit": 64,
+                },
+            }
+            raw["methods"]["row_byte_limit"] = 48 * 1024**2 - 2 * 1024**2 - 4096
+            raw["methods"]["file_coverage"]["byte_limit"] = 2 * 1024**2
+        output.write_text(json.dumps(raw))
     return "complete"
 
 
@@ -182,13 +212,13 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("metadata launched Java"))
     info = analysis.joern_info()
     assert info["available"] and info["version"] == "4.0.669"
-    assert info["adapter_version"] == "5"
-    assert info["query_version"] == "3" and info["dataflow"] == "not_run"
+    assert info["adapter_version"] == "6"
+    assert info["query_version"] == "4" and info["dataflow"] == "deep_profile"
     assert qualified["root"] not in json.dumps(info)
     deep = analysis.joern_limits("deep")
-    assert deep["seconds"] == 1800 and deep["heap_gib"] == 8
+    assert deep["seconds"] == 7200 and deep["heap_gib"] == 8
     deep["seconds"] = 0
-    assert analysis.joern_limits("deep")["seconds"] == 1800
+    assert analysis.joern_limits("deep")["seconds"] == 7200
     assert info["javascript_transport"]["type_maps"] == "not_run"
     assert (
         info["javascript_transport"]["sha256"]
@@ -503,8 +533,8 @@ def test_staging_is_captured_only_with_clean_environment_and_independent_languag
         calls.append((argv, kwargs))
         env, cwd = kwargs["env"], kwargs["cwd"]
         assert not {"JAVA_TOOL_OPTIONS", "SCALA_OPTS", "CLASSPATH"} & env.keys()
-        assert env["JAVA_OPTS"] == "-Xmx8g -XX:ActiveProcessorCount=2"
-        assert env["_JAVA_OPTIONS"].startswith("-Xmx8g -XX:ActiveProcessorCount=2 ")
+        assert env["JAVA_OPTS"] == "-Xmx8g -XX:ActiveProcessorCount=2 -Xss32m"
+        assert env["_JAVA_OPTIONS"].startswith("-Xmx8g -XX:ActiveProcessorCount=2 -Xss32m ")
         assert "untrusted" not in env["_JAVA_OPTIONS"]
         assert "(deny network*)" in argv[2] and qualified["root"] in argv[2]
         assert not (cwd / "source" / "pyproject.toml").exists()
@@ -717,9 +747,9 @@ def test_process_runner_enforces_timeout_and_discards_sensitive_logs(tmp_path, c
 @pytest.mark.parametrize(
     "payload",
     [
-        '{"schema_version":1,"query_version":"3","schema_version":1}',
-        '{"schema_version":true,"query_version":"3","dataflow":"not_run"}',
-        '{"schema_version":1,"query_version":"3","dataflow":"run"}',
+        '{"schema_version":1,"query_version":"4","schema_version":1}',
+        '{"schema_version":true,"query_version":"4","dataflow":"not_run"}',
+        '{"schema_version":1,"query_version":"4","dataflow":"run"}',
     ],
 )
 def test_unqualified_or_ambiguous_query_output_is_rejected(tmp_path, payload):
@@ -1415,3 +1445,252 @@ def test_python_method_closures_skip_class_namespace(member, expected):
     )
     check = BindingCountercheck({"f.py": {"text": text}}, lambda: False)
     assert check.check("f.py", 1, "value", "parameter") == expected
+
+
+def test_interrupted_deep_dataflow_recovers_only_qualified_base_checkpoint(qualified, monkeypatch):
+    def run(argv, *, output=None, **kwargs):
+        status = fake_run(argv, output=output, **kwargs)
+        if output:
+            raw = json.loads(output.read_text())
+            raw.update(checkpoint="base_before_dataflow", dataflow="error")
+            raw["metadata"]["overlays"].remove("dataflowOss")
+            raw["dataflow_analysis"] = {"status": "error"}
+            raw["errors"] = [{"section": "dataflow_analysis", "error": "InterruptedDataflow"}]
+            output.write_text(json.dumps(raw))
+            return "timeout"
+        return status
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified, analysis_profile="deep")
+    batch = result["coverage"]["batches"][0]
+    assert batch["process_status"] == "timeout"
+    assert batch["base_checkpoint_recovered"] is True
+    assert result["coverage"]["modeled_files"] == 1
+    assert result["topology"]["methods"] and result["topology"]["calls"]
+    assert result["topology"]["edges"][0]["count"] == 7
+    assert result["status"] == "partial"
+    assert result["coverage"]["phases"]["detail"]["status"] == "complete"
+    phase = result["coverage"]["phases"]["dataflow"]
+    assert phase["methods_analyzed"] is None
+    assert phase["methods_skipped"] is None
+    assert phase["sinks_queried"] is None
+    assert result["dataflow_analysis"]["batches"][0]["status"] == "error"
+    assert result["dataflow_analysis"]["paths"] == []
+
+
+@pytest.mark.parametrize("unqualified", ["missing_checkpoint", "completed_flow"])
+def test_interrupted_process_cannot_promote_an_unqualified_result(
+    qualified, monkeypatch, unqualified
+):
+    def run(argv, *, output=None, **kwargs):
+        status = fake_run(argv, output=output, **kwargs)
+        if output:
+            raw = json.loads(output.read_text())
+            if unqualified == "missing_checkpoint":
+                raw["dataflow"] = "error"
+                raw["dataflow_analysis"] = {"status": "error"}
+                raw["metadata"]["overlays"].remove("dataflowOss")
+            else:
+                raw["checkpoint"] = "base_before_dataflow"
+            output.write_text(json.dumps(raw))
+            return "timeout"
+        return status
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified, analysis_profile="deep")
+    batch = result["coverage"]["batches"][0]
+    assert batch["process_status"] == "timeout"
+    assert not batch["base_checkpoint_recovered"]
+    assert batch["status"] == "unvalidated_output_or_source"
+    assert result["coverage"]["modeled_files"] == 0
+    assert result["topology"]["methods"] == []
+    assert result["summary"]["methods"] is None
+
+
+def test_standard_provider_rejects_unrequested_dataflow(qualified, monkeypatch):
+    def run(argv, *, output=None, **kwargs):
+        status = fake_run(argv, output=output, **kwargs)
+        if output:
+            raw = json.loads(output.read_text())
+            raw["dataflow"] = "complete"
+            raw["metadata"]["overlays"].append("dataflowOss")
+            output.write_text(json.dumps(raw))
+        return status
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified, analysis_profile="standard")
+    assert result["status"] == "partial"
+    assert result["summary"]["dataflow"] == "not_run"
+    assert result["coverage"]["batches"][0]["status"] == "unvalidated_output_or_source"
+    assert result["coverage"]["modeled_files"] == 0
+    assert result["dataflow_analysis"]["paths"] == []
+
+
+def test_dataflow_service_filters_and_pages_frozen_paths_without_scoring(tmp_path, monkeypatch):
+    from project_assess import collector
+    from project_assess.service import AssessmentService
+
+    root = tmp_path / "project"
+    files = {
+        "src/start.py": "def start(value):\n    checked = value\n    return finish(checked)\n",
+        "src/finish.py": "def finish(value):\n    first = value\n    return first\n",
+        "tests/test_flow.py": "def test_flow(value):\n    return value\nraise AssertionError('must not execute')\n",
+    }
+    for path, text in files.items():
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+
+    def analyze(name, sources, **options):
+        by_path = {row["path"]: row for row in sources}
+
+        def node(path, line):
+            record = by_path[path]
+            return {
+                "path": path,
+                "line": line,
+                "name": "value",
+                "method": path + ":method",
+                "node_type": "IDENTIFIER",
+                "source_evidence_id": record["evidence_id"],
+                "digest": record["digest"],
+            }
+
+        paths = []
+        if name == "joern":
+            for index, locations in enumerate(
+                [
+                    [("src/start.py", 1), ("src/finish.py", 2)],
+                    [("src/start.py", 2), ("src/finish.py", 3)],
+                    [("tests/test_flow.py", 1), ("tests/test_flow.py", 2)],
+                ]
+            ):
+                steps = [node(path, at) for path, at in locations]
+                paths.append(
+                    {
+                        "id": f"jf-fixture-{index}",
+                        "kind": "parameter_to_return",
+                        "source": steps[0],
+                        "sink": steps[-1],
+                        "steps": steps,
+                        "interprocedural": index < 2,
+                    }
+                )
+        return {
+            "schema_version": 1,
+            "analyzer": {"name": name, "version": "fixture"},
+            "available": True,
+            "configuration": {},
+            "limits": {},
+            "status": "complete",
+            "coverage": {
+                "phases": {"dataflow": {"status": "complete", "retained_paths": len(paths)}}
+            },
+            "gaps": [],
+            "candidates": [],
+            "candidate_index": [],
+            "modules": [{"path": row["path"], "role": row["role"]} for row in sources],
+            "summary": {"candidate_count": 0, "dataflow": "complete", "value_paths": len(paths)},
+            "dataflow_analysis": {"status": "complete", "paths": paths, "batches": []},
+        }
+
+    monkeypatch.setattr(collector, "run_analyzer", analyze)
+    service = AssessmentService(tmp_path / "state")
+    snapshot = service.scan(root, analysis_profile="deep")
+    query = service.query_evidence(snapshot["id"], view="dataflow", limit=1)
+    assert query["matched"] == 3 and query["returned"] == 1 and query["next_offset"] == 1
+    second = service.query_evidence(
+        snapshot["id"], view="dataflow", limit=1, offset=query["next_offset"]
+    )
+    assert second["items"][0]["id"] != query["items"][0]["id"]
+    target = service.query_evidence(snapshot["id"], view="dataflow", path="src/finish.py", line=3)
+    assert target["matched"] == 1 and target["items"][0]["id"] == "jf-fixture-1"
+    assert (
+        service.query_evidence(snapshot["id"], view="dataflow", role="production")["matched"] == 2
+    )
+    assert service.query_evidence(snapshot["id"], view="dataflow", role="test")["matched"] == 1
+    original = service.query_evidence(snapshot["id"], view="dataflow")
+    for path in files:
+        (root / path).write_text("changed after capture\n")
+    assert service.query_evidence(snapshot["id"], view="dataflow") == original
+    report = service.get_report(snapshot["id"])
+    assert report["review"] is None and report["goals"] is None
+    assert "dataflow_analysis" not in snapshot["facts"]["optional_analysis"]["joern"]
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        b"SolveTask failed",
+        b"java.lang.StackOverflowError",
+        b"java.lang.OutOfMemoryError",
+        b"java.util.concurrent.ExecutionException:",
+        b"Too many arguments for parameter:",
+        b"Too many new tasks in expansion of unresolved output arguments",
+    ],
+)
+def test_zero_exit_engine_failures_are_detected_across_log_chunks(tmp_path, capsys, marker):
+    at = len(marker) // 2
+    code = (
+        "import os,time\n"
+        f"os.write(1, b'RAW_SOURCE_SENTINEL ' + {marker[:at]!r})\n"
+        "time.sleep(0.05)\n"
+        f"os.write(1, {marker[at:]!r})\n"
+    )
+    status = analysis._run(
+        [sys.executable, "-c", code],
+        workspace=tmp_path,
+        cwd=tmp_path,
+        env={},
+        stop=time.monotonic() + 3,
+        limits=analysis.joern_limits("standard"),
+    )
+    assert status == "analysis_engine_error"
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+def test_zero_exit_engine_failure_discards_flows_but_preserves_base_facts(qualified, monkeypatch):
+    def run(argv, *, output=None, **kwargs):
+        status = fake_run(argv, output=output, **kwargs)
+        if output:
+            raw = json.loads(output.read_text())
+            start = {
+                "path": "src/app.py",
+                "line": 1,
+                "name": "context",
+                "method": "call",
+                "node_type": "METHOD_PARAMETER_IN",
+            }
+            end = {
+                "path": "src/app.py",
+                "line": 3,
+                "name": "return",
+                "method": "call",
+                "node_type": "RETURN",
+            }
+            raw["dataflow_analysis"]["paths"].update(
+                count=1,
+                rows=[
+                    {
+                        "kind": "parameter_to_return",
+                        "source": start,
+                        "sink": end,
+                        "steps": [start, end],
+                        "interprocedural": False,
+                    }
+                ],
+            )
+            output.write_text(json.dumps(raw))
+        return "analysis_engine_error" if output else status
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified, analysis_profile="deep")
+    batch = result["coverage"]["batches"][0]
+    assert batch["process_status"] == "analysis_engine_error"
+    assert batch["base_checkpoint_recovered"] is False
+    assert batch["dataflow_worker_failed"] is True
+    assert result["coverage"]["modeled_files"] == 1
+    assert result["topology"]["methods"] and result["topology"]["calls"]
+    assert result["dataflow_analysis"]["paths"] == []
+    assert result["coverage"]["phases"]["dataflow"]["methods_analyzed"] is None

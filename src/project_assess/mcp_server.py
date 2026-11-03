@@ -137,7 +137,7 @@ def create_mcp(service):
         limit: int = 20,
         max_chars: int = 24000,
     ) -> dict[str, Any]:
-        """Page captured evidence, controls, burden hurdles or review-plan tasks. Controls, burden and review-plan accept dimension filters; review-plan supplies source-bound inspection tasks and contrasting workflow questions. These are not completed reviews or confidence grades. Controls candidate_kind='file' selects coverage rows. Source is never reread; max_chars bounds serialized output."""
+        """Page captured evidence, dataflow paths, controls, burden hurdles or review-plan tasks. The dataflow view filters stored value paths by captured path/line/role; paths are modeled evidence, not vulnerability or safe-deletion proof. Controls, burden and review-plan accept dimension filters; review-plan supplies source-bound inspection tasks and contrasting workflow questions. These are not completed reviews or confidence grades. Controls candidate_kind='file' selects coverage rows. Source is never reread; max_chars bounds serialized output."""
         return service.query_evidence(
             assessment_id,
             view=view,
