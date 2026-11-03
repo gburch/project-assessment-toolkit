@@ -639,6 +639,108 @@ def _coverage_html(report, model, confidence):
     return "\n".join(lines)
 
 
+def _prompting_html(report):
+    from .prompting import prompting_profile
+
+    profile = prompting_profile(report["assessment"], report.get("review"))
+    paths = {entry["id"]: entry["path"] for entry in report["assessment"]["evidence"]}
+
+    def cites(identities):
+        return (
+            '<p class="secondary">Evidence: '
+            + ", ".join(
+                _text(f"{identity} ({paths.get(identity, 'unknown')})") for identity in identities
+            )
+            + "</p>"
+            if identities
+            else ""
+        )
+
+    level = "Unknown" if profile["level"] is None else f"{profile['level']}/5"
+    lines = [
+        '<details id="prompting-profile"><summary><h2>Behavioral prompt reliance</h2><span>'
+        + _text(level)
+        + '</span></summary><div class="body">'
+    ]
+    lines += [
+        "<p><strong>"
+        + _text(profile["level_label"])
+        + "</strong> · "
+        + _text(profile["confidence"])
+        + " declared confidence</p>",
+        "<p>" + _text(profile["rationale"]) + "</p>",
+    ]
+    intent = profile["intent"]
+    lines.append(cites(profile["evidence_ids"]))
+    if intent["min"] is not None or intent["max"] is not None:
+        lines.append(
+            "<p>Preferred context range: "
+            + _text(
+                f"{intent['min'] if intent['min'] is not None else 'any'}–{intent['max'] if intent['max'] is not None else 'any'}; {intent['basis_label']}"
+            )
+            + ". "
+            + _text(profile["fit"]["label"])
+            + "</p><p>"
+            + _text(intent["rationale"])
+            + "</p>"
+        )
+        lines.append(cites(intent["evidence_ids"]))
+    lines += [
+        "<p>Output variability: "
+        + _text(profile["variability"]["label"])
+        + "</p><p>"
+        + _text(profile["variability"]["rationale"])
+        + "</p>"
+    ]
+    lines.append(cites(profile["variability"]["evidence_ids"]))
+    for workflow in profile["workflows"]:
+        lines += [
+            "<h3>"
+            + _text(workflow["name"])
+            + " · "
+            + _text(workflow["control_label"])
+            + "</h3><p>"
+            + _text(workflow["rationale"])
+            + "</p>"
+        ]
+        lines.append(cites(workflow["evidence_ids"]))
+    for recommendation in profile["recommendations"]:
+        lines += [
+            "<h3>"
+            + _text(recommendation["direction_label"])
+            + "</h3><p>"
+            + _text(recommendation["action"])
+            + "</p><p>"
+            + _text(recommendation["rationale"])
+            + "</p>"
+        ]
+        lines.append(cites(recommendation["evidence_ids"]))
+    collection = profile["collection"]
+    lines.append(cites([collection["evidence_id"]] if collection.get("evidence_id") else []))
+    lines += [
+        "<h3>Captured evidence</h3><p>Collection: " + _text(collection["status"]) + "</p><ul>"
+    ]
+    lines += [
+        "<li>"
+        + _text(
+            "guidance / skill assets (consumer unverified)"
+            if kind == "development_guidance"
+            else kind.replace("_", " ")
+        )
+        + ": "
+        + _text(count)
+        + "</li>"
+        for kind, count in collection.get("summary", {}).get("counts_by_kind", {}).items()
+    ]
+    lines += [
+        "</ul><p>" + _text(profile["caveat"]) + "</p><p>" + _text(profile["profile_note"]) + "</p>"
+    ]
+    lines += [
+        "<p>" + _text(gap) + "</p>" for gap in [*profile["gaps"], *collection.get("gaps", [])]
+    ]
+    return "".join(lines) + "</div></details>"
+
+
 def report_html(report):
     """Render an offline document with no external resources or executable report text."""
     model = dimension_map_data(report)
@@ -739,6 +841,7 @@ def report_html(report):
         '<section class="more" aria-label="Plan, context and evidence">',
         _plan_html(plan),
         _context_html(context),
+        _prompting_html(report),
         _coverage_html(report, model, confidence),
         '<details id="downloads"><summary><h2>Downloads</h2><span>report.md · report.json · badges</span></summary>'
         '<div class="body"><p><a href="report.md">report.md</a> · <a href="report.json">report.json</a> '

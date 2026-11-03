@@ -883,6 +883,107 @@ async function checkPlanningEvidence(browser, info) {
   } finally { await context.close(); }
 }
 
+async function checkPromptingProfile(browser, info) {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  const errors = [], writes = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("request", (request) => {
+    if (request.method() === "POST" && ["/api/targets", "/api/review"].includes(new URL(request.url()).pathname)) writes.push(request.url());
+  });
+  let mode = "deterministic";
+  const hostile = "<img src=x onerror=window.promptingPwned=1>";
+  const handler = async (route) => {
+    const response = await route.fetch();
+    const report = await response.json();
+    report.assessment.evidence = report.assessment.evidence.filter((entry) => entry.kind !== "prompting-analysis");
+    if (mode === "legacy") {
+      delete report.prompting;
+      delete report.assessment.facts.prompting;
+    } else {
+      const runtime = mode === "prompt_led";
+      report.assessment.evidence.push({ id: "e-prompting-browser", path: "<prompting-analysis>", kind: "prompting-analysis", digest: "sha256:fixture", stats: { schema_version: 1, prompt_asset: hostile } });
+      for (const name of ["variability", "intent", "recommendation"]) report.assessment.evidence.push({ id: `e-prompting-${name}`, path: `${name}.md`, kind: "documentation", digest: "sha256:fixture", excerpt: `Captured ${name} context` });
+      report.prompting = {
+        status: mode === "unknown" ? "unestablished" : "recorded",
+        level: mode === "unknown" ? null : runtime ? 4 : 0,
+        level_label: runtime ? "Prompt-led workflows" : "Code-controlled behavior",
+        confidence: "medium", rationale: `Reviewed behavior, not a file-count grade. ${hostile}`,
+        evidence_ids: ["e-prompting-browser"],
+        workflows: [{ name: "Eligibility", control: "deterministic", control_label: "Deterministic", rationale: "Fixed eligibility rules are enforced in code.", evidence_ids: ["e-prompting-browser"] }],
+        variability: { status: "unknown", label: "Unknown · no runtime repeatability evidence", rationale: "A typed response or temperature zero does not establish repeatable output.", evidence_ids: ["e-prompting-variability"] },
+        intent: { min: mode === "maximum" ? null : mode === "minimum" ? 1 : runtime ? 3 : 0, max: mode === "minimum" ? null : mode === "maximum" ? 0 : runtime ? 5 : 1, basis: "inferred", basis_label: "Inferred", provisional: true, rationale: "A provisional range based on the stated workflow.", evidence_ids: ["e-prompting-intent"] },
+        fit: { status: "aligned", label: "Within the provisional intended range", direction: "retain", gap: 0, provisional: true },
+        recommendations: [{ direction: "more_deterministic", direction_label: "Use deterministic rules", action: "Keep fixed eligibility decisions in code.", rationale: hostile, evidence_ids: ["e-prompting-recommendation"] }],
+        collection: { status: "complete", evidence_id: "e-prompting-browser", summary: { guidance_files: 5, runtime_prompt_files: runtime ? 2 : 0, counts_by_kind: { development_guidance: 5, runtime_prompt_asset: runtime ? 2 : 0, model_client_setup: 2, model_invocation: runtime ? 1 : 0, agent_orchestration: runtime ? 1 : 0, output_contract: 1, evaluation_signal: 0 } }, coverage: {}, gaps: [] },
+        caveat: "Prompt reliance is descriptive; high and low values can both fit the project.", gaps: []
+      };
+    }
+    await route.fulfill({ response, json: report });
+  };
+  try {
+    await page.route("**/api/report?assessment_id=*", handler);
+    await page.goto(info.origin);
+    const panel = page.locator("#prompting-profile");
+    await expect(panel.getByRole("heading", { name: "Prompting and behavior control" })).toBeVisible();
+    await expect(panel.locator("#prompting-runtime")).toContainText("0 / 5 · Code-controlled behavior");
+    await expect(panel.locator("#prompting-runtime")).not.toContainText("Unknown");
+    await expect(panel.locator("#prompting-intent")).toContainText("0–1 / 5");
+    await expect(panel.locator("#prompting-intent")).toContainText("Inferred · provisional");
+    await expect(panel.locator("#prompting-intent .evidence-meta")).toHaveText("Evidence: e-prompting-intent");
+    await expect(panel.locator("#prompting-variability .evidence-meta")).toHaveText("Evidence: e-prompting-variability");
+    await expect(panel.locator(".prompting-recommendation .evidence-meta")).toHaveText("Evidence: e-prompting-recommendation");
+    await expect(panel).toContainText("Unknown · no runtime repeatability evidence");
+    await expect(panel).toContainText("Capability and burden goals remain independent");
+    await panel.locator("#prompting-collected summary").click();
+    await expect(panel).toContainText("Development guidance: 5 file(s), 5 signal(s)");
+    await expect(panel).toContainText("Runtime hints: 0 prompt-asset file(s), 0 model invocation(s)");
+    await expect(panel).toContainText("Model client setup: 2 signal(s). Setup declarations do not establish a model invocation");
+    await expect(panel).toContainText("Development skills and signal counts do not establish runtime prompt reliance");
+    await expect(panel).toContainText(hostile);
+    const inspect = panel.getByRole("button", { name: "Inspect Prompting evidence" });
+    await inspect.focus();
+    await page.keyboard.press("Enter");
+    const record = page.locator('#evidence details[data-evidence-id="e-prompting-browser"]');
+    await expect(record).toHaveAttribute("open", "");
+    await expect(record.locator("summary")).toBeFocused();
+    await expect(record).toContainText(hostile);
+    assert.equal(await page.evaluate(() => window.promptingPwned), undefined);
+    assert.equal(await page.locator("main img[src=x]").count(), 0);
+    mode = "prompt_led";
+    await page.reload();
+    await expect(panel.locator("#prompting-runtime")).toContainText("4 / 5 · Prompt-led workflows");
+    await expect(panel.locator("#prompting-intent")).toContainText("3–5 / 5");
+    await panel.locator("#prompting-collected summary").click();
+    await expect(panel).toContainText("Runtime hints: 2 prompt-asset file(s), 1 model invocation(s)");
+    await expect(page.locator("#ratings .rating")).toHaveCount(8);
+    await expect(page.locator("#badges img")).toHaveCount(9);
+    const accessibility = await new AxeBuilder({ page }).include("#prompting-profile").analyze();
+    assert.deepEqual(accessibility.violations.map((entry) => entry.id), [], "prompting profile accessibility");
+    await panel.screenshot({ path: path.join(output, "project-assess-prompting-desktop.png") });
+    await page.setViewportSize({ width: 320, height: 900 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "prompting profile fits mobile");
+    await panel.screenshot({ path: path.join(output, "project-assess-prompting-mobile.png") });
+    mode = "minimum";
+    await page.reload();
+    await expect(panel.locator("#prompting-intent")).toContainText("At least 1 / 5");
+    mode = "maximum";
+    await page.reload();
+    await expect(panel.locator("#prompting-intent")).toContainText("At most 0 / 5");
+    mode = "unknown";
+    await page.reload();
+    await expect(panel.locator("#prompting-runtime")).toContainText("Unknown · no runtime reliance level established");
+    mode = "legacy";
+    await page.reload();
+    await expect(panel).toContainText("No prompting judgment is recorded for this snapshot");
+    await panel.locator("#prompting-collected summary").click();
+    await expect(panel).toContainText("Not collected for this snapshot");
+    await expect(panel.getByRole("button", { name: "Inspect Prompting evidence" })).toHaveCount(0);
+    assert.deepEqual(writes, [], "prompting display never saves goals or reviews");
+    assert.deepEqual(errors, [], "prompting profile produces no browser errors");
+  } finally { await context.close(); }
+}
+
 async function checkAnalysisOptions(browser, info) {
   const origin = info.first_origin;
   const context = await browser.newContext({ viewport: { width: 320, height: 900 } });
@@ -1020,6 +1121,7 @@ try {
   await checkFirstScanAndReview(browser, info);
   await checkDimensionReviewPlans(browser, info);
   await checkPlanningEvidence(browser, info);
+  await checkPromptingProfile(browser, info);
   await checkAnalysisOptions(browser, info);
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();

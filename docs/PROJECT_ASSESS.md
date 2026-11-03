@@ -33,6 +33,27 @@ Whole-project maintainability review also traces **systemic debt**: domains, sha
 
 Broad scoring starts with the shared **system map**, a bounded inventory of captured production areas and phased cross-area imports. It helps a reviewer inspect the system before local Doctor candidates; paths and counts do not establish semantic ownership or quality. Reviews record per-dimension coverage (`reviewed`, `partial`, `unreviewed`) with rationale and citations. Whole-project unreviewed dimensions cannot receive numeric grades. Reports and Evolve distinguish broad, partial, focused and unestablished review scope. Without recorded coverage, breadth remains unestablished; structural validation does not prove the truth or completeness of a review.
 
+## Behavioral prompt reliance
+
+The report also describes how much the product's behavior depends on model-interpreted instructions. This is a contextual profile, separate from capability and upkeep burden. Development skills may help build ordinary code, or they may be the product users actually run through a host agent. Inspect the consuming workflow before deciding which applies. PAT does not detect whether source was authored by AI.
+
+| Level | Behavior control | Example |
+| --- | --- | --- |
+| 0 | Code-controlled | Rules and code implement the useful workflow; randomness or external data can still vary its outputs. |
+| 1 | Optional model assistance | An advisory model feature supplements a useful coded workflow. |
+| 2 | Bounded model step | A model completes a constrained step within a coded process. |
+| 3 | Hybrid behavior | Important behavior combines coded rules with model interpretation. |
+| 4 | Prompt-led workflows | Instructions drive important workflows through supported tools and boundaries. |
+| 5 | Predominantly instruction-defined | Prompts or host-agent skills define most useful product behavior. |
+
+Higher and lower levels can both fit. A creative assistant may benefit from prompt-led behavior; stable pricing rules or durable-state changes may need more coded control. Recommendations can move either way, or retain the current balance. The optional preferred range in `review.prompting.intent` records user-stated, documented or inferred context. Inferred ranges remain provisional; they do not save or replace numerical capability/burden goals. A different range records an assessment update, not engineering progress.
+
+The deterministic `prompting-analysis` evidence separates guidance, prompt assets, SDK client setup, model invocation, orchestration, output contracts and evaluation hints. Counts are not percentages of behavior or automatic reliance levels. Signals include source locations, identities, roles, coverage and omissions without storing prompt bodies in the analysis. Python and installed JS/TS syntax have explicit limits; dynamically loaded prompts, remote instructions and unsupported languages remain unknown. `.prompt`, `.jinja`, `.jinja2`, `.j2` and prompt-directory text files are captured under the existing secret, byte and containment boundaries.
+
+Use `evidence-query ID --view prompting` and filter by path/role/line. `--candidate-kind model_invocation` selects a signal kind; `--candidate-kind file` pages per-file coverage, including files without retained signal details. `rubric` exposes the anchors and `review-template ID` includes the optional source-cited profile. Reports, Doctor/Evolve, CLI and MCP share the same projection.
+
+Output variability is independent of reliance. Fixed sampling settings, schemas and validation are source controls, not proof of repeatability or semantic correctness. Observed variability requires a supplied source-matched `pat.observation.v1` report with `type: "prompting"`, applicable repeated-scenario results and declared limitations; imports remain attributed claims. Without that evidence, keep outcomes unknown. Assessment never executes prompts or requires a new evaluation framework or CI gate.
+
 ## Scanner coverage
 
 Source discovery, captured bytes, parsed syntax, detailed analysis and source actually inspected by a reviewer have separate scopes. Completeness describes eligible inputs after dependency/build, credential and symlink exclusions; inspect exclusions and unsupported languages as well as budget omissions. An inventory or an analysis row does not establish whole-project understanding.

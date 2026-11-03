@@ -54,6 +54,7 @@ Organize the response so the user can assess the judgment without opening files:
   needs and the principal constraints or costs of valuable change. Show current
   milestone/readiness → intended destination, each with evidence/confidence and
   the intended goal's basis. Legacy missing context remains unestablished.
+- **Prompt reliance:** report the separate 0–5 behavioral profile, representative coded/model/host-agent workflows, observed variability or its explicit unknown, and any contextual preferred range. Explain whether that balance fits the intended purpose; development guidance alone does not establish product reliance. Higher reliance is not a worse quality grade.
 - **Scorecard:** current capability and burden for all eight dimensions in a
   whole-project review, with separate confidence for each axis and selected
   capability minimums/burden ceilings when available. Explain unknowns. For a

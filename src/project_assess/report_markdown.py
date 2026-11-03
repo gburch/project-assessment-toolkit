@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .confidence import confidence_assessment
 from .project_context import project_context_assessment
+from .prompting import prompting_profile
 from .rubric import DIMENSIONS
 
 
@@ -513,6 +514,89 @@ def _planning_markdown(alignment):
     return lines
 
 
+def _prompting_markdown(report):
+    profile = prompting_profile(report["assessment"], report.get("review"))
+    paths = {entry["id"]: entry["path"] for entry in report["assessment"]["evidence"]}
+
+    def cites(identities):
+        return "Evidence: " + ", ".join(
+            _markdown_text(f"{identity} ({paths.get(identity, 'unknown')})")
+            for identity in identities
+        )
+
+    level = profile["level"]
+    lines = [
+        "",
+        "## Behavioral prompt reliance",
+        "",
+        (f"Prompt reliance: {level}/5 · " if level is not None else "Prompt reliance: unknown · ")
+        + _markdown_text(profile["level_label"])
+        + ".",
+        "",
+        _markdown_text(profile["rationale"]),
+    ]
+    if profile["evidence_ids"]:
+        lines += ["", cites(profile["evidence_ids"])]
+    intent = profile["intent"]
+    if intent["min"] is not None or intent["max"] is not None:
+        lines += [
+            "",
+            "Preferred context range: "
+            + _markdown_text(
+                f"{intent['min'] if intent['min'] is not None else 'any'}–{intent['max'] if intent['max'] is not None else 'any'}; {intent['basis_label']}"
+            )
+            + ".",
+            _markdown_text(intent["rationale"]),
+            _markdown_text(profile["fit"]["label"]),
+        ]
+        if intent["evidence_ids"]:
+            lines.append(cites(intent["evidence_ids"]))
+    lines += [
+        "",
+        "Output variability: " + _markdown_text(profile["variability"]["label"]) + ".",
+        _markdown_text(profile["variability"]["rationale"]),
+    ]
+    if profile["variability"]["evidence_ids"]:
+        lines.append(cites(profile["variability"]["evidence_ids"]))
+    collection = profile["collection"]
+    lines += ["", "Collection: " + _markdown_text(collection["status"]) + "."]
+    if collection.get("evidence_id"):
+        lines.append(cites([collection["evidence_id"]]))
+    for kind, count in collection.get("summary", {}).get("counts_by_kind", {}).items():
+        label = (
+            "guidance / skill assets (consumer unverified)"
+            if kind == "development_guidance"
+            else kind.replace("_", " ")
+        )
+        lines.append("- " + _markdown_text(label) + ": " + _markdown_text(count))
+    for workflow in profile["workflows"]:
+        lines += [
+            "",
+            "- "
+            + _markdown_text(workflow["name"])
+            + " · "
+            + _markdown_text(workflow["control_label"])
+            + ": "
+            + _markdown_text(workflow["rationale"]),
+        ]
+        if workflow["evidence_ids"]:
+            lines.append(cites(workflow["evidence_ids"]))
+    for recommendation in profile["recommendations"]:
+        lines += [
+            "",
+            "- "
+            + _markdown_text(recommendation["direction_label"])
+            + ": "
+            + _markdown_text(recommendation["action"]),
+            _markdown_text(recommendation["rationale"]),
+        ]
+        if recommendation["evidence_ids"]:
+            lines.append(cites(recommendation["evidence_ids"]))
+    lines += ["", _markdown_text(profile["caveat"]), _markdown_text(profile["profile_note"])]
+    lines += ["- " + _markdown_text(gap) for gap in [*profile["gaps"], *collection.get("gaps", [])]]
+    return lines
+
+
 def markdown_report(report):
     assessment = report["assessment"]
     lines = [
@@ -522,6 +606,7 @@ def markdown_report(report):
         "",
         "Capability and burden are evidence-backed judgments; missing evidence is unknown.",
         *_project_context_markdown(report),
+        *_prompting_markdown(report),
         "",
         "| Dimension | Capability | Burden and evidence | Capability confidence |",
         "|---|---:|---:|---|",

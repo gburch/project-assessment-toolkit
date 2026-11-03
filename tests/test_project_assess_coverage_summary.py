@@ -84,7 +84,9 @@ def test_detailed_coverage_stays_queryable_while_summary_views_fit_their_budget(
         row for row in doctor["analysis_scope"]["analyses"] if row["evidence_id"] == evidence["id"]
     )
     assert len(json.dumps(reply, indent=2)) <= 48000 and reply["oversized_rows"] == 0
-    assert len(canonical(brief)) < 48000
+    # Catch accidental per-file table copies, while leaving room for contextual
+    # profiles. The brief's exact byte length is not an interface contract.
+    assert len(canonical(brief)) < 64000
     for value in (
         brief["optional_analysis"]["joern"]["coverage"],
         query["coverage"],

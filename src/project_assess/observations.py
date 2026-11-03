@@ -32,6 +32,7 @@ _DOCUMENT = {
                 "change_cost",
                 "security",
                 "extensibility",
+                "prompting",
             ]
         },
         "observed_at": {"type": "string", "maxLength": 100},
@@ -75,6 +76,26 @@ _DOCUMENT = {
             },
         },
         "limitations": {"type": "array", "minItems": 1, "maxItems": 30, "items": _TEXT},
+        "prompting": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "input_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "configuration_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "trials": {"type": "integer", "minimum": 2, "maximum": 1000000},
+                "distinct_outputs": {"type": "integer", "minimum": 1, "maximum": 1000000},
+                "comparison": {"enum": ["exact", "semantic"]},
+                "criterion": _TEXT,
+            },
+            "required": [
+                "input_digest",
+                "configuration_digest",
+                "trials",
+                "distinct_outputs",
+                "comparison",
+                "criterion",
+            ],
+        },
     },
     "required": ["schema", "type", "observed_at", "source", "scenario", "results", "limitations"],
 }
@@ -99,6 +120,12 @@ def import_observation(payload, manifest, revision, redact=lambda value: value):
     except ValueError as exc:
         raise ValueError("Observation timestamp requires ISO8601 timezone") from exc
     files = data["source"]["files"]
+    if data["type"] == "prompting":
+        repeated = data.get("prompting")
+        if repeated is None or repeated["distinct_outputs"] > repeated["trials"]:
+            raise ValueError("Prompting observations require consistent repeated-scenario metadata")
+    elif "prompting" in data:
+        raise ValueError("Repeated prompting metadata requires a prompting observation")
     paths = [normalize_report_path(row["path"]) for row in files]
     scope = [normalize_report_path(path) for path in data["scenario"]["scope"]]
     if len(paths) != len(set(paths)) or len(scope) != len(set(scope)):
@@ -127,6 +154,16 @@ def import_observation(payload, manifest, revision, redact=lambda value: value):
             for row in data["results"]
         ],
         "limitations": [redact(value) for value in data["limitations"]],
+        **(
+            {
+                "prompting": {
+                    **data["prompting"],
+                    "criterion": redact(data["prompting"]["criterion"]),
+                }
+            }
+            if "prompting" in data
+            else {}
+        ),
         "sourceIdentity": identity,
         "coverage": coverage,
         "gaps": gaps,
