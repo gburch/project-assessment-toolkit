@@ -26,8 +26,8 @@ from .joern_bindings import BindingCountercheck
 from .joern_dataflow import normalize_dataflow
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "6"
-QUERY_VERSION = "4"
+VERSION = "7"
+QUERY_VERSION = "5"
 JOERN_VERSION = "4.0.669"
 QUERY_PATH = Path(__file__).parent / "resources" / "joern.sc"
 MAX_INPUT_RECORDS = 20_000
@@ -686,7 +686,11 @@ def _run(argv, *, workspace, cwd, env, stop, limits, output=None):
         and output.lstat().st_size > limits["query_json_bytes"]
     ):
         status = "output_limit"
-    return "analysis_engine_error" if status == "complete" and engine_error else status
+    return (
+        "analysis_engine_error"
+        if status in {"complete", "tool_failed"} and engine_error
+        else status
+    )
 
 
 def _read_result(path, maximum):
@@ -1401,7 +1405,12 @@ def analyze_joern(
                 counts, metadata, metrics = {}, {}, {}
                 detail_status = "unknown"
                 validated = checkpoint_recovered = False
-                if status == "complete" or analysis_profile == "deep" and output.is_file():
+                base_output = output.with_name(output.name + ".base.json")
+                if (
+                    status == "complete"
+                    or analysis_profile == "deep"
+                    and (output.is_file() or base_output.is_file())
+                ):
                     try:
                         for path, source in batch.items():
                             staged_path = stage / path
@@ -1410,7 +1419,12 @@ def analyze_joern(
                                 or _hash_file(staged_path) != source["digest"]
                             ):
                                 raise ValueError("Staged source identity changed")
-                        raw = _read_result(output, limits["query_json_bytes"])
+                        recovered_output = (
+                            base_output
+                            if process_status != "complete" and base_output.is_file()
+                            else output
+                        )
+                        raw = _read_result(recovered_output, limits["query_json_bytes"])
                         if process_status != "complete":
                             checkpoint_recovered = (
                                 raw.get("checkpoint") == "base_before_dataflow"

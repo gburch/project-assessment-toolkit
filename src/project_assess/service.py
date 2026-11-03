@@ -1677,6 +1677,13 @@ class AssessmentService:
                 }
             ],
         }
+        if view == "dataflow":
+            result["caveat"] = (
+                "Modeled value influence under Joern's default semantics and call targets, "
+                "not validated provenance, feasible execution or safe deletion. External calls, "
+                "callbacks and execution boundaries can produce spurious paths; verify source "
+                "and library contracts. Empty results leave missing flows unknown."
+            )
         if documentation_projections and view == "candidates":
             result["documentation_scope"] = {
                 "collection_status": dimension_inputs(assessment)["providers"]["documentation"][

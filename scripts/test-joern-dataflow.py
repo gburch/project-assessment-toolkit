@@ -118,12 +118,58 @@ def fixture_checks(result):
     return checks
 
 
+def recovery_probe(output):
+    """Fail a private trusted query after its checkpoint; never alter production code."""
+    production_path = adapter.QUERY_PATH
+    production = production_path.read_bytes()
+    marker = b"// PAT_DATAFLOW_CHECKPOINT_COMPLETE"
+    if production.count(marker) != 1:
+        raise ValueError("Expected one trusted dataflow checkpoint marker")
+    fault_path = output / "recovery-fault.sc"
+    fault = production.replace(marker, b'throw new OutOfMemoryError("synthetic recovery probe")', 1)
+    fault_path.write_bytes(fault)
+    fault_path.chmod(0o400)
+    try:
+        adapter.QUERY_PATH = fault_path
+        result, seconds = run_case("recovery-fault", sources_for("python"), output)
+    finally:
+        adapter.QUERY_PATH = production_path
+    batches = result.get("coverage", {}).get("batches", [])
+    flow = result.get("dataflow_analysis", {})
+    checks = {
+        "query_process_failed": bool(batches)
+        and all(batch.get("process_status") != "complete" for batch in batches),
+        "immutable_base_checkpoint_recovered": bool(batches)
+        and all(batch.get("base_checkpoint_recovered") for batch in batches),
+        "all_source_files_modeled_after_recovery": result.get("coverage", {}).get("modeled_files")
+        == len(sources_for("python")),
+        "base_methods_retained": (result.get("summary", {}).get("methods") or 0) > 0,
+        "base_calls_retained": (result.get("summary", {}).get("calls") or 0) > 0,
+        "failed_dataflow_remains_unknown": flow.get("status") == "error"
+        and flow.get("paths") == [],
+        "production_query_unchanged": production_path.read_bytes() == production,
+    }
+    return {
+        "case": "recovery-fault",
+        "seconds": seconds,
+        "production_query_sha256": hashlib.sha256(production).hexdigest(),
+        "fault_query_sha256": hashlib.sha256(fault).hexdigest(),
+        "injection": "Trusted private query throws after checkpoint, before dataflow; final output is overwritten and process fails.",
+        "checks": checks,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path, help="New directory outside checkout")
     parser.add_argument("--language", choices=LANGUAGES, action="append")
     parser.add_argument(
         "--skip-large", action="store_true", help="Omit the large Python method probe"
+    )
+    parser.add_argument(
+        "--recovery-probe",
+        action="store_true",
+        help="Also inject a trusted query failure to qualify immutable checkpoint recovery",
     )
     args = parser.parse_args()
     output = args.output.expanduser().resolve()
@@ -193,6 +239,9 @@ def main():
             ),
         }
         receipts.append({"case": "large", "seconds": seconds, "checks": checks})
+        print(json.dumps(receipts[-1]), flush=True)
+    if args.recovery_probe:
+        receipts.append(recovery_probe(output))
         print(json.dumps(receipts[-1]), flush=True)
     unchanged = all(
         Path(path).is_file() and digest(Path(path).read_bytes()) == value
