@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pat-assess"
-version = "0.17.3"
+version = "0.17.4"
 description = "PAT — Project Assessment Toolkit: capability, upkeep burden, and goal tracking"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,6 +43,7 @@ packages = ["src/project_assess"]
 [tool.hatch.build.targets.wheel.force-include]
 ".agents/skills" = "project_assess/.agents/skills"
 "docs/PROJECT_ASSESS.md" = "project_assess/docs/PROJECT_ASSESS.md"
+"docs/USE_CASES.md" = "project_assess/docs/USE_CASES.md"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

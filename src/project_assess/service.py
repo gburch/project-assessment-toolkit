@@ -1509,6 +1509,13 @@ class AssessmentService:
                     for batch in flow.get("batches", [])
                     for row in batch.get("skipped_methods", {}).get("rows", [])
                 )
+                rows.extend(
+                    {**row, "record_type": "dataflow_endpoint", "language": batch["language"],
+                     "selection_policy": batch["selection"]["policy"],
+                     "plan_digest": batch["selection"]["plan_digest"], **common}
+                    for batch in flow.get("batches", [])
+                    for row in batch.get("selection", {}).get("endpoints", [])
+                )
             elif view == "hotspots":
                 rows.extend({**row, **common} for row in stats.get("hotspots", []))
             elif view == "coverage" and entry["kind"] == "documentation-analysis":
@@ -1704,6 +1711,14 @@ class AssessmentService:
                             .get("dataflow_analysis", {})
                             .get("status", "not_collected"),
                             "phases": entry["stats"].get("coverage", {}).get("phases", {}),
+                            "query_coverage": [
+                                {"language": batch["language"], "status": batch["status"],
+                                 "queries": batch.get("queries", {}),
+                                 "selection_policy": batch.get("selection", {}).get("policy"),
+                                 "plan_digest": batch.get("selection", {}).get("plan_digest"),
+                                 "checkpoint_recovered": batch.get("checkpoint_recovered", False)}
+                                for batch in entry["stats"].get("dataflow_analysis", {}).get("batches", [])
+                            ],
                         }
                         if view == "dataflow"
                         else {}

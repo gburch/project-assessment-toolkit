@@ -26,7 +26,7 @@ assert not base.is_relative_to(Path(sys.argv[1]).resolve())
 assert importlib.util.find_spec('mcp') is None
 assert importlib.util.find_spec('tree_sitter') is None
 assert importlib.util.find_spec('vulture') is None
-for name in ('static/index.html', 'static/app.js', 'static/style.css', 'static/dimension-map.generated.js', 'static/dimension-map.css', 'static/THREE-LICENSE.txt', 'docs/PROJECT_ASSESS.md', 'resources/joern.sc'):
+for name in ('static/index.html', 'static/app.js', 'static/style.css', 'static/dimension-map.generated.js', 'static/dimension-map.css', 'static/THREE-LICENSE.txt', 'docs/PROJECT_ASSESS.md', 'docs/USE_CASES.md', 'resources/joern.sc'):
     assert (base / name).is_file() and (base / name).read_bytes()
 joern = next(row for row in list_analyzers() if row['name'] == 'joern')
 assert not joern['available']

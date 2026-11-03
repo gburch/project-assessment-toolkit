@@ -55,10 +55,23 @@ def optimizedDefinitionCount(method: Method): Long = {
   params.iterator.map(_.id).toSet.size.toLong + genCounts.valuesIterator.map(_.toLong).sum
 }
 
+// Valid only at an initial endpoint after the reaching-def overlay is complete.
+// These excluded starters can expand across calls without an incoming DDG edge.
+def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
+  case _: MethodParameterIn | _: Call | _: MethodRef => false
+  case _ => !sink.inE("REACHING_DEF").exists { edge => edge.src match {
+    case node: CfgNode => !node.isInstanceOf[Method]
+    case _ => false
+  }}
+}
+
 // Fixed, trusted query for captured source CPGs. Deep adds modeled dataflow, never target execution.
-@main def exec(cpgFile: String, out: String, profile: String = "standard"): Unit = {
+@main def exec(cpgFile: String, out: String, profile: String = "standard",
+    runToken: String = "", flowSeconds: Int = 1200): Unit = {
   require(Set("standard", "deep")(profile), "Unsupported analysis profile")
   val deep = profile == "deep"
+  require((runToken.isEmpty && !deep) || runToken.matches("[0-9a-f]{32}"), "Invalid run token")
+  require(flowSeconds >= 1 && flowSeconds <= 86400, "Invalid flow work budget")
   val errors = Arr()
   val gaps = Arr()
   val caveats = Arr(
@@ -66,7 +79,7 @@ def optimizedDefinitionCount(method: Method): Long = {
     "Unread bindings are review leads only; preserve initializer effects and callback, override and public signature contracts.",
     "Deep dataflow describes modeled parameter influence, not external taint, feasible execution, dead-method proof or target-code execution."
   )
-  val result = Obj("schema_version" -> 1, "query_version" -> "7", "dataflow" -> "not_run",
+  val result = Obj("schema_version" -> 1, "query_version" -> "8", "run_token" -> runToken, "dataflow" -> "not_run",
     "errors" -> errors, "gaps" -> gaps, "caveats" -> caveats)
   def writeResult(value: Value, name: String = out): Unit = {
     val destination = Paths.get(name)
@@ -83,7 +96,7 @@ def optimizedDefinitionCount(method: Method): Long = {
     // Aggregate timings only: no source names, paths, code or error messages.
     phases.value += Obj("phase" -> name,
       "elapsed_seconds" -> Num((System.nanoTime() - began).toDouble / 1e9))
-    writeResult(Obj("schema_version" -> 1, "query_version" -> "7", "phases" -> phases), out + ".phases.json")
+    writeResult(Obj("schema_version" -> 1, "query_version" -> "8", "phases" -> phases), out + ".phases.json")
   }
   var truncatedValues = 0L
   def text(value: String, limit: Int = 2048): String = {
@@ -403,6 +416,7 @@ def optimizedDefinitionCount(method: Method): Long = {
       .flatMap(_.refsTo).flatMap(canonical).toVector
     val directTargets = mutable.Set.empty[String]
     val escapedMethods = mutable.Set.empty[String]
+    val crossFileMethods = mutable.Set.empty[Long]
     cpg.identifier.foreach { identifier =>
       if (!assignmentLhsOnly(identifier)) {
         val called = identifier.astParentOption.exists {
@@ -507,6 +521,10 @@ def optimizedDefinitionCount(method: Method): Long = {
             if (status == "source_supported") {
               supported.add(caller.filename, target.filename)
               directTargets += target.fullName
+              if (caller.filename != target.filename) {
+                crossFileMethods += caller.id
+                crossFileMethods += target.id
+              }
             } else if (status == "producer_inferred") inferred.add(caller.filename, target.filename)
           }
         }
@@ -606,6 +624,17 @@ def optimizedDefinitionCount(method: Method): Long = {
       // with incomplete state even after a fatal JVM error and nonzero exit.
       writeResult(checkpoint, out + ".base.json")
       writeResult(checkpoint)
+      val baseDigest = java.security.MessageDigest.getInstance("SHA-256")
+      val baseStream = Files.newInputStream(Paths.get(out + ".base.json"))
+      try {
+        val buffer = new Array[Byte](65536)
+        var count = baseStream.read(buffer)
+        while (count >= 0) {
+          if (count > 0) baseDigest.update(buffer, 0, count)
+          count = baseStream.read(buffer)
+        }
+      } finally baseStream.close()
+      val baseSha256 = java.util.HexFormat.of().formatHex(baseDigest.digest())
       // PAT_DATAFLOW_CHECKPOINT_COMPLETE
       val maxDefinitions = 50000
       val maxCallDepth = 8
@@ -728,27 +757,173 @@ def optimizedDefinitionCount(method: Method): Long = {
         // across every graph method, creates an executor and materializes all
         // returned paths before its Iterator can be limited. Use the qualified
         // engine directly, preserving source visibility and path semantics.
+        val effectNames = Set("write", "writeFile", "writeFileSync", "appendFile", "open", "readFile", "readFileSync",
+          "unlink", "remove", "rename", "execute", "executemany", "exec", "execFile", "spawn", "run", "Popen",
+          "system", "eval", "send", "sendall", "fetch", "request", "post", "put", "delete")
+        val categories = Vector("named_effect_hint", "lifecycle_name_hint", "source_supported_cross_file", "breadth")
+        val lifecycleNames = Set("init", "__init__", "<init>", "start", "stop", "close", "shutdown", "setup",
+          "teardown", "setUp", "tearDown", "bootstrap", "migrate", "_migrate", "initialize", "dispose", "cleanup")
+        val lifecycleVerbs = Set("init", "initialize", "start", "stop", "close", "shutdown", "setup", "teardown",
+          "bootstrap", "migrate", "dispose", "cleanup", "create", "archive", "restore", "recover", "reconcile",
+          "approve", "authorize", "dispatch", "transition", "commit", "rollback", "delete", "update")
+        def lifecycleHint(name: String): Boolean = lifecycleNames(name) || {
+          val tokens = name.replaceAll("([a-z0-9])([A-Z])", "$1_$2")
+            .replaceAll("([A-Z]+)([A-Z][a-z])", "$1_$2")
+            .toLowerCase(java.util.Locale.ROOT).split("[^a-z0-9]+")
+          tokens.exists(lifecycleVerbs)
+        }
+        val sourceRoot = Paths.get(cpgFile).toAbsolutePath.getParent.resolve("source").normalize.toString.replace('\\', '/')
+        def relativeIdentity(value: String): String = value.replace('\\', '/').replace(sourceRoot + "/", "")
+        def sha(value: String): String = samplingHex.formatHex(samplingDigest.digest(value.getBytes(UTF_8)))
+        case class Endpoint(id: String, category: String, kind: String, node: CfgNode,
+            method: Method, at: Int, locationBasis: String, skipped: Boolean)
+        def endpoint(kind: String, node: CfgNode, method: Method, effect: Boolean): Endpoint = {
+          val at = node.lineNumber.filter(_ > 0)
+          val category = if (effect) categories(0)
+            else if (lifecycleHint(method.name)) categories(1)
+            else if (crossFileMethods(method.id)) categories(2) else categories(3)
+          val ancestry = ancestors(node).takeWhile(_ != method).map(parent => Seq(parent.label,
+            parent.lineNumber.toString, parent.columnNumber.toString,
+            Option(parent.propertiesMap.get("ORDER")).map(_.toString).getOrElse("")).mkString("\u0000"))
+            .mkString("\u0001")
+          val identity = Seq(kind, relativeIdentity(method.filename), relativeIdentity(method.fullName),
+            method.lineNumber.toString, node.lineNumber.toString, node.columnNumber.toString, node.label,
+            Option(node.propertiesMap.get("ORDER")).map(_.toString).getOrElse(""),
+            node match { case expression: Expression => expression.argumentIndex.toString; case _ => "" },
+            node match { case reference: MethodRef => relativeIdentity(reference.methodFullName); case _ => "" },
+            relativeIdentity(node.code), ancestry).mkString("\u0000")
+          Endpoint(sha(identity), category, kind, node, method, at.getOrElse(method.lineNumber.get),
+            if (at.nonEmpty) "node_line" else "method_line", skippedIds(method.id))
+        }
         val sinks = methods.flatMap { method =>
           val returns = method.ast.isReturn.filter(node => owner(node).exists(_.id == method.id))
-            .map(node => ("parameter_to_return", node: CfgNode)).toVector
+            .map(node => endpoint("parameter_to_return", node, method, false)).toVector
           val operations = method.ast.isCall.filter(call => owner(call).exists(_.id == method.id) &&
               operationNames(call.name))
-            .flatMap(_.argument.filter(_.argumentIndex > 0)).map(node => ("parameter_to_operation", node: CfgNode))
+            .flatMap(call => call.argument.filter(_.argumentIndex > 0)
+              .map(node => endpoint("parameter_to_operation", node, method, effectNames(call.name))))
             .toVector
-          (returns ++ operations).sortBy { case (kind, node) =>
-            (node.lineNumber.getOrElse(Int.MaxValue), kind, node.code) }
-            .map { case (kind, node) => (kind, node, skippedIds(method.id)) }
+          returns ++ operations
         }
+        // The selection cap bounds endpoint work, not graph/source capture.
+        // Each category gets a turn, including reserved general breadth. Within
+        // each category, files and then methods rotate before taking another
+        // endpoint. SHA source identities, never graph IDs, determine ordering.
+        def roundRobin[A](groups: Vector[Iterator[A]]): Iterator[A] = new Iterator[A] {
+          private val active = mutable.Queue.from(groups.filter(_.hasNext))
+          override def hasNext: Boolean = active.nonEmpty
+          override def next(): A = {
+            val group = active.dequeue()
+            val value = group.next()
+            if (group.hasNext) active.enqueue(group)
+            value
+          }
+        }
+        val eligible = sinks.filterNot(_.skipped)
+        def categoryPlan(category: String): Iterator[Endpoint] = {
+          val files = eligible.filter(_.category == category).groupBy(_.method.filename).toVector
+            .sortBy { case (path, _) => sha(relativeIdentity(path)) }
+          roundRobin(files.map { case (_, endpoints) =>
+            val methodGroups = endpoints.groupBy(endpoint =>
+              (relativeIdentity(endpoint.method.fullName), endpoint.method.lineNumber)).toVector
+              .sortBy { case ((name, at), _) => sha(name + "\u0000" + at.toString) }
+            roundRobin(methodGroups.map { case (_, values) => values.sortBy(_.id).iterator })
+          })
+        }
+        val selectionLimit = 2048
+        val selected = roundRobin(categories.map(categoryPlan)).take(selectionLimit).toVector
+        if (selected.map(_.id).distinct.size != selected.size)
+          throw new IllegalStateException("Ambiguous endpoint source identities")
+        val planDigest = sha(selected.map(_.id).mkString("\n"))
+        dataflow("selection") = Obj("policy" -> "priority_file_method_round_robin_v1", "limit" -> selectionLimit,
+          "plan_digest" -> planDigest, "endpoints" -> Arr.from(selected.map(endpoint =>
+            Obj("id" -> endpoint.id, "category" -> endpoint.category, "kind" -> endpoint.kind,
+              "path" -> text(endpoint.method.filename), "line" -> endpoint.at,
+              "location_basis" -> endpoint.locationBasis))))
         val sinksTotal = sinks.size.toLong
+        val categoryCandidates = eligible.groupMapReduce(_.category)(_ => 1L)(_ + _)
+        val categorySelected = selected.groupMapReduce(_.category)(_ => 1L)(_ + _)
         var sinksQueried = 0L
+        var engineQueries = 0L
+        var engineQueriesStarted = 0L
+        var provenEmpty = 0L
         var pathsTruncated = 0L
+        val categoryQueried = mutable.Map.from(categories.map(_ -> 0L))
+        val flowBegan = System.nanoTime()
+        val flowDeadline = began + flowSeconds.toLong * 1000000000L
+        var maximumEndpointSeconds = 0.0
+        var currentEndpointStarted: Option[Double] = None
+        def number(value: Long): Num = Num(value.toDouble)
+        def categoryCounts: Obj = Obj.from(categories.map(category => category -> Obj(
+          "candidates" -> number(categoryCandidates.getOrElse(category, 0L)),
+          "selected" -> number(categorySelected.getOrElse(category, 0L)),
+          "queried" -> number(categoryQueried(category)))))
+        def updateFlow(finished: Boolean): Unit = {
+          val output = rows.output
+          val missing = skippedIds.nonEmpty || eligible.size > selected.size || sinksQueried < selected.size
+          val lowerBound = missing || pathsTruncated > 0
+          val incomplete = lowerBound || output("omitted").num > 0
+          output("count_is_lower_bound") = Bool(lowerBound)
+          if (incomplete) output("status") = Str("partial")
+          dataflow("paths") = output
+          dataflow("queries") = Obj("sinks_total" -> number(sinksTotal),
+            "sinks_eligible" -> eligible.size, "sinks_selected" -> selected.size,
+            "sinks_not_selected" -> (eligible.size - selected.size),
+            "sinks_skipped" -> (sinks.size - eligible.size),
+            "sinks_pending" -> number(selected.size.toLong - sinksQueried),
+            "sinks_queried" -> number(sinksQueried), "sinks_omitted" -> number(sinksTotal - sinksQueried),
+            "engine_queries" -> number(engineQueries), "sinks_proven_empty" -> number(provenEmpty),
+            "paths_truncated" -> number(pathsTruncated), "step_limit" -> stepLimit,
+            "by_category" -> categoryCounts)
+          dataflow("status") = Str(if (finished && !incomplete) "complete" else "partial")
+          result("dataflow") = dataflow("status")
+        }
+        def progress(stage: String): Unit = {
+          writeResult(Obj("schema_version" -> 1, "query_version" -> "8", "run_token" -> runToken,
+            "base_sha256" -> baseSha256, "plan_digest" -> planDigest, "stage" -> stage,
+            "source_parameter_count" -> parameters.size, "sinks_total" -> number(sinksTotal),
+            "sinks_eligible" -> eligible.size, "sinks_selected" -> selected.size,
+            "sinks_not_selected" -> (eligible.size - selected.size), "sinks_skipped" -> (sinks.size - eligible.size),
+            "sinks_queried" -> number(sinksQueried), "sinks_pending" -> number(selected.size.toLong - sinksQueried),
+            "engine_queries" -> number(engineQueries), "engine_queries_started" -> number(engineQueriesStarted),
+            "sinks_proven_empty" -> number(provenEmpty), "by_category" -> categoryCounts,
+            "flow_budget_seconds" -> flowSeconds, "budget_origin" -> "query_body_start",
+            "elapsed_seconds" -> Num((System.nanoTime() - began).toDouble / 1e9),
+            "flow_elapsed_seconds" -> Num((System.nanoTime() - flowBegan).toDouble / 1e9),
+            "current_endpoint_started_seconds" -> currentEndpointStarted.map(Num(_)).getOrElse(Null),
+            "maximum_endpoint_seconds" -> Num(maximumEndpointSeconds)), out + ".flow-progress.json")
+        }
+        var lastCheckpointAt = flowBegan
+        var lastCheckpointCount = 0L
+        var firstWitnessSaved = false
+        def flowCheckpoint(): Unit = {
+          updateFlow(false)
+          val snapshot = ujson.read(ujson.write(dataflow))
+          writeResult(Obj("schema_version" -> 1, "query_version" -> "8", "checkpoint" -> "dataflow_progress",
+            "run_token" -> runToken, "base_sha256" -> baseSha256,
+            "overlays" -> Arr.from(cpg.metaData.overlays.toVector.distinct.sorted),
+            "truncated_values" -> number(truncatedValues), "dataflow_analysis" -> snapshot), out + ".flow.json")
+          lastCheckpointAt = System.nanoTime()
+          lastCheckpointCount = sinksQueried
+          if (rows.count > 0) firstWitnessSaved = true
+        }
         phase("dataflow_queries_started")
+        flowCheckpoint()
+        progress("ready")
         val engine = new Engine(summon[EngineContext])
-        try sinks.filterNot(_._3).foreach { case (kind, sink, _) =>
+        try selected.iterator.takeWhile(_ => System.nanoTime() < flowDeadline).foreach { endpoint =>
+          val kind = endpoint.kind
+          val sink = endpoint.node
+          val endpointBegan = System.nanoTime()
+          currentEndpointStarted = Some((endpointBegan - began).toDouble / 1e9)
           // Keep the original per-endpoint query shape and peak-memory scope;
           // share the executor without generic source/usage expansion.
-          val entries = engine.backwards(List(sink), parameterNodes)
-          sinksQueried += 1
+          val empty = provenEmptyStarter(sink)
+          val entries = if (empty) List.empty[io.joern.dataflowengineoss.queryengine.TableEntry] else {
+            engineQueriesStarted += 1
+            progress("querying")
+            engine.backwards(List(sink), parameterNodes)
+          }
           val paths = entries.iterator.filter { entry =>
             entry.path.headOption.forall(first => first.visible || parameterIds(first.node.id))
           }.map { entry =>
@@ -762,32 +937,37 @@ def optimizedDefinitionCount(method: Method): Long = {
           paths.take(pathsPerSink).foreach { path =>
             val elements = path
             val mapped = elements.take(stepLimit + 1).map(flowNode)
-            if (elements.size > stepLimit || mapped.exists(_.isEmpty) || mapped.size < 2) pathsTruncated += 1
+            if (elements.size > stepLimit || mapped.exists(_.isEmpty) ||
+                mapped.flatten.exists(_("identity_truncated").bool) || mapped.size < 2) pathsTruncated += 1
             else {
               val steps = mapped.flatten
               val source = steps.head
-              val endpoint = steps.last
+              val endPoint = steps.last
               // A source must actually be a captured parameter selected
               // above; no unknown/imported value is silently classified.
               if (!parameterIds(elements.head.id) || elements.last.id != sink.id) pathsTruncated += 1
-              else rows.add(Obj("kind" -> kind, "source" -> source, "sink" -> endpoint,
+              else rows.add(Obj("kind" -> kind, "endpoint_id" -> endpoint.id, "source" -> source, "sink" -> endPoint,
                 "steps" -> Arr.from(steps),
                 "interprocedural" -> Bool(steps.map(_("method").str).distinct.size > 1)))
             }
           }
+          // A completed prefix includes only fully returned AND normalized
+          // endpoints. An in-flight engine call remains pending on interruption.
+          if (empty) provenEmpty += 1 else engineQueries += 1
+          sinksQueried += 1
+          categoryQueried(endpoint.category) += 1
+          maximumEndpointSeconds = math.max(maximumEndpointSeconds, (System.nanoTime() - endpointBegan).toDouble / 1e9)
+          currentEndpointStarted = None
+          if ((!firstWitnessSaved && rows.count > 0) || sinksQueried - lastCheckpointCount >= 64 ||
+              System.nanoTime() - lastCheckpointAt >= 15000000000L) {
+            flowCheckpoint()
+            progress("ready")
+          }
         } finally engine.shutdown()
+        flowCheckpoint()
+        progress(if (sinksQueried < selected.size) "budget_exhausted" else "finished")
         phase("dataflow_queries_completed")
-        val output = rows.output
-        val incomplete = skippedIds.nonEmpty || pathsTruncated > 0 || output("omitted").num > 0
-        output("count_is_lower_bound") = Bool(pathsTruncated > 0)
-        if (incomplete) output("status") = Str("partial")
-        dataflow("paths") = output
-        dataflow("queries") = Obj("sinks_total" -> Num(sinksTotal.toDouble),
-          "sinks_queried" -> Num(sinksQueried.toDouble),
-          "sinks_omitted" -> Num((sinksTotal - sinksQueried).toDouble),
-          "paths_truncated" -> Num(pathsTruncated.toDouble), "step_limit" -> stepLimit)
-        dataflow("status") = Str(if (incomplete) "partial" else "complete")
-        result("dataflow") = dataflow("status")
+        updateFlow(true)
         result("metadata")("overlays") = Arr.from(cpg.metaData.overlays.toVector.distinct.sorted)
         var reachingEdges = 0L
         var edgesAfterDataflow = 0L

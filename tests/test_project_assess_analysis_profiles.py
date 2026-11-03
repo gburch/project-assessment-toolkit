@@ -336,7 +336,7 @@ def test_dedicated_joern_phase_preserves_core_reports_and_other_analyzer_budget(
     assert not snapshot["facts"]["collection"]["deadline_exceeded"]
     assert snapshot["facts"]["collection"]["unprocessed_reports"] == []
     limits = snapshot["facts"]["collection"]["limits"]["dedicated_analyzer_phases"]
-    assert limits["joern"]["seconds"] == 7200
+    assert limits["joern"]["seconds"] == 3600
     assert limits["vulture"]["seconds"] == 300
     assert snapshot["facts"]["optional_analysis"].keys() == {"joern", "vulture"}
 

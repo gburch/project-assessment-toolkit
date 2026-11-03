@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import time
+from collections import Counter
 from pathlib import Path
 
 from project_assess import joern_analysis as adapter
@@ -157,6 +158,8 @@ def bounded_query_probes(output):
             "more_than_sixty_four_sinks": queries.get("sinks_total", 0) > 64,
             "all_sinks_queried": queries.get("sinks_queried") == queries.get("sinks_total")
             and queries.get("sinks_omitted") == 0,
+            "under_cap_scope_preserved": queries.get("sinks_selected") == queries.get("sinks_eligible")
+            and queries.get("sinks_not_selected") == 0,
             "all_seventy_operation_endpoints_retained": retained_endpoints
             == {(2 + 3 * index, f"payload_{index}") for index in range(70)},
             "no_path_detail_truncation": queries.get("paths_truncated") == 0,
@@ -349,6 +352,218 @@ def count_mismatch_probe(output):
     }
 
 
+def empty_shortcut_probe(output):
+    """Compare the exact-empty shortcut with Engine execution on the same source."""
+    production_path = adapter.QUERY_PATH
+    production = production_path.read_bytes()
+    overlay = b'phase("dataflow_overlay_completed")'
+    decision = b"val empty = provenEmptyStarter(sink)"
+    if production.count(overlay) != 1 or production.count(decision) != 1:
+        raise ValueError("Expected one qualified overlay and initial-starter decision")
+    audit = b'''
+        def probeHasIncoming(node: CfgNode): Boolean = node.inE("REACHING_DEF").exists {
+          edge => edge.src match {
+            case parent: CfgNode => !parent.isInstanceOf[Method]
+            case _ => false
+          }
+        }
+        val excludedProbe = Seq(
+          "METHOD_PARAMETER_IN" -> cpg.method.parameter.toVector.map(node => node: CfgNode),
+          "CALL" -> cpg.call.toVector.map(node => node: CfgNode),
+          "METHOD_REF" -> cpg.methodRef.toVector.map(node => node: CfgNode)
+        ).map { case (kind, nodes) =>
+          val zero = nodes.filterNot(probeHasIncoming)
+          kind -> Obj("zero_ddg_nodes" -> zero.size,
+            "all_refused" -> Bool(zero.forall(node => !provenEmptyStarter(node))))
+        }
+        result("starter_probe") = Obj.from(excludedProbe)
+'''
+    sources = [synthetic_source("empty_starters", (
+        "def identity(value):\n    return value\n\n"
+        "def call_argument(value):\n    print(identity(value))\n\n"
+        'def literal_only():\n    print("fixed")\n    return "fixed"\n\n'
+        "def empty_call():\n    return unknown()\n\n"
+        "def callback(value):\n    return lambda: value\n\n"
+        "def callback_argument(value):\n    print(lambda: value)\n"
+    ))]
+    (output / "empty-shortcut-sources.json").write_text(json.dumps(sources, indent=2) + "\n")
+    results, proofs, times = {}, {}, {}
+    original_run = adapter._run
+    for mode in ("enabled", "disabled"):
+        query = production.replace(overlay, overlay + audit, 1)
+        if mode == "disabled":
+            query = query.replace(decision, b"val empty = false", 1)
+        path = output / ("empty-shortcut-" + mode + ".sc")
+        path.write_bytes(query)
+        path.chmod(0o400)
+
+        def run(argv, *, probe_mode=mode, **kwargs):
+            status = original_run(argv, **kwargs)
+            if producer := kwargs.get("output"):
+                if producer.is_file():
+                    proofs[probe_mode] = json.loads(producer.read_text()).get("starter_probe", {})
+            return status
+
+        try:
+            adapter.QUERY_PATH, adapter._run = path, run
+            results[mode], times[mode] = run_case("empty-shortcut-" + mode, sources, output)
+        finally:
+            adapter.QUERY_PATH, adapter._run = production_path, original_run
+    (output / "empty-shortcut-starter-proof.json").write_text(json.dumps(proofs, indent=2) + "\n")
+    enabled, disabled = (results[mode]["dataflow_analysis"] for mode in ("enabled", "disabled"))
+
+    def core_paths(flow):
+        return {json.dumps({key: value for key, value in row.items() if key != "endpoint_id"}, sort_keys=True)
+                for row in flow["paths"]}
+
+    checks = {
+        "complete_flow_on_both_paths": enabled["status"] == disabled["status"] == "complete",
+        "nonempty_semantic_paths_and_ids_preserved": bool(enabled["paths"])
+        and core_paths(enabled) == core_paths(disabled),
+        "parameter_call_argument_flow_preserved": any(
+            row["kind"] == "parameter_to_operation" and row["sink"]["node_type"] == "CALL"
+            and "call_argument" in row["sink"]["method"] for row in enabled["paths"]
+        ),
+        "special_zero_ddg_starters_never_bypassed": all(
+            proofs.get(mode, {}).get(kind, {}).get("zero_ddg_nodes", 0) > 0
+            and proofs[mode][kind]["all_refused"]
+            for mode in ("enabled", "disabled") for kind in ("METHOD_PARAMETER_IN", "CALL", "METHOD_REF")
+        ),
+        "ordinary_empty_shortcut_exercised": sum(batch["queries"]["sinks_proven_empty"]
+                                                 for batch in enabled["batches"]) > 0,
+        "disabled_shortcut_uses_engine": all(batch["queries"]["sinks_proven_empty"] == 0
+                                            for batch in disabled["batches"]),
+        "production_query_unchanged": production_path.read_bytes() == production,
+    }
+    return {"case": "empty-shortcut", "seconds": times, "checks": checks,
+            "production_query_sha256": hashlib.sha256(production).hexdigest()}
+
+
+def selection_breadth_probe(output):
+    """Exercise the production cap with competing files, methods and priorities."""
+    sources, fat_ranges = [], {}
+    large_files = (
+        ("src/selection_a.py", "production"), ("src/selection_b.py", "production"),
+        ("tests/test_selection.py", "test"), ("tools/selection.py", "tooling"),
+    )
+    for path, role in large_files:
+        text = ""
+        if path == "src/selection_a.py":
+            text = (
+                "from selection_service import relay\n\n"
+                "def effect_priority(payload):\n    send(payload)\n\n"
+                "def close(payload):\n    return payload\n\n"
+                "def cross_file(payload):\n    return relay(payload)\n\n"
+            )
+        text += "".join(f"def method_{index}(payload):\n    return payload\n\n" for index in range(600))
+        if path == "src/selection_a.py":
+            first = len(text.splitlines()) + 1
+            text += "def noisy(" + ", ".join(f"value_{index}" for index in range(100)) + "):\n"
+            text += "".join(f"    print(value_{index})\n" for index in range(100))
+            fat_ranges[path] = (first, len(text.splitlines()))
+        row = synthetic_source(path.replace("/", "_"), text)
+        row.update(path=path, role=role)
+        sources.append(row)
+    service = synthetic_source("selection_service", "def relay(value):\n    return value\n")
+    sources.append(service)
+    (output / "selection-sources.json").write_text(json.dumps(sources, indent=2) + "\n")
+    first, first_seconds = run_case("selection-first", sources, output)
+    repeated, repeated_seconds = run_case("selection-repeated", sources, output)
+    first_flow, second_flow = (result.get("dataflow_analysis", {}) for result in (first, repeated))
+    batch = first_flow["batches"][0] if first_flow.get("batches") else {}
+    again = second_flow["batches"][0] if second_flow.get("batches") else {}
+    queries = batch.get("queries", {})
+    selection = batch.get("selection", {})
+    endpoints = selection.get("endpoints", [])
+    roles = {row["path"]: row["role"] for row in sources}
+    breadth = Counter(row["path"] for row in endpoints if row["category"] == "breadth")
+    counts = [breadth[path] for path, _ in large_files]
+    categories = {row["category"] for row in endpoints}
+    all_categories = {"named_effect_hint", "lifecycle_name_hint", "source_supported_cross_file", "breadth"}
+    checks = {
+        "scope_exceeds_production_cap": queries.get("sinks_eligible", 0) > 2048,
+        "cap_and_not_selected_are_explicit": queries.get("sinks_selected") == len(endpoints) == 2048
+        and queries.get("sinks_not_selected") == queries.get("sinks_eligible", 0) - 2048,
+        "selected_work_completed": queries.get("sinks_pending") == 0
+        and queries.get("sinks_queried") == queries.get("sinks_selected"),
+        "all_priority_categories_receive_a_turn": categories == all_categories
+        and {row["category"] for row in endpoints[:4]} == all_categories,
+        "files_and_roles_receive_breadth": set(roles) <= {row["path"] for row in endpoints}
+        and {roles[row["path"]] for row in endpoints} == {"production", "test", "tooling"},
+        "breadth_files_rotate_fairly": min(counts) > 0 and max(counts) - min(counts) <= 1,
+        "one_large_method_does_not_consume_file_quota": all(
+            sum(row["path"] == path and start <= row["line"] <= end for row in endpoints
+                if row["category"] == "breadth") <= 1
+            for path, (start, end) in fat_ranges.items()
+        ),
+        "fresh_workspace_plan_is_deterministic": bool(endpoints)
+        and selection == again.get("selection"),
+        "unselected_scope_remains_partial": first_flow.get("status") == second_flow.get("status") == "partial"
+        and batch.get("paths", {}).get("count_is_lower_bound") is True,
+    }
+    return {"case": "selection-breadth", "seconds": {"first": first_seconds, "repeated": repeated_seconds},
+            "checks": checks}
+
+
+def flow_checkpoint_probe(output):
+    """Exit a private query after its first saved witness, before remaining work."""
+    production_path = adapter.QUERY_PATH
+    production = production_path.read_bytes()
+    marker = b"if (rows.count > 0) firstWitnessSaved = true"
+    if production.count(marker) != 1:
+        raise ValueError("Expected one successful first-witness checkpoint hook")
+    fault = production.replace(
+        marker, marker + b"\n          if (rows.count > 0 && sinksQueried < selected.size) System.exit(23)", 1
+    )
+    query = output / "flow-checkpoint-exit.sc"
+    query.write_bytes(fault)
+    query.chmod(0o400)
+    original_run = adapter._run
+
+    def run(argv, **kwargs):
+        status = original_run(argv, **kwargs)
+        if path := kwargs.get("output"):
+            for suffix, name in ((".base.json", "flow-checkpoint-base.json"),
+                                 (".flow.json", "flow-checkpoint-producer.json")):
+                companion = Path(str(path) + suffix)
+                if companion.is_file():
+                    (output / name).write_bytes(companion.read_bytes())
+        return status
+
+    try:
+        adapter.QUERY_PATH, adapter._run = query, run
+        result, seconds = run_case("flow-checkpoint", sources_for("python"), output)
+    finally:
+        adapter.QUERY_PATH, adapter._run = production_path, original_run
+    batches = result.get("coverage", {}).get("batches", [])
+    flow = result.get("dataflow_analysis", {})
+    checkpoint = output / "flow-checkpoint-producer.json"
+    base = output / "flow-checkpoint-base.json"
+    value = json.loads(checkpoint.read_text()) if checkpoint.is_file() else {}
+    checks = {
+        "owned_failure_after_saved_witness": bool(batches)
+        and all(batch["process_status"] != "complete" for batch in batches),
+        "base_and_flow_checkpoint_recovered": bool(batches) and all(
+            batch["base_checkpoint_recovered"] and batch["flow_checkpoint_recovered"] for batch in batches
+        ),
+        "completed_paths_retained_as_partial": bool(flow.get("paths")) and flow.get("status") == "partial",
+        "remaining_selected_work_stays_pending": any(
+            batch.get("queries", {}).get("sinks_pending", 0) > 0 for batch in flow.get("batches", [])
+        ),
+        "checkpoint_bound_to_exact_base": base.is_file()
+        and value.get("base_sha256") == hashlib.sha256(base.read_bytes()).hexdigest(),
+        "no_worker_failure_invented": bool(batches) and all(
+            not batch["producer_diagnostics"]["engine_failed"] for batch in batches
+        ),
+        "metrics_are_labeled_as_base": bool(batches)
+        and all(batch["model_metrics_scope"] == "base_before_dataflow" for batch in batches),
+        "production_query_unchanged": production_path.read_bytes() == production,
+    }
+    return {"case": "flow-checkpoint", "seconds": seconds, "checks": checks,
+            "production_query_sha256": hashlib.sha256(production).hexdigest(),
+            "fault_query_sha256": hashlib.sha256(fault).hexdigest()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path, help="New directory outside checkout")
@@ -368,6 +583,18 @@ def main():
     parser.add_argument(
         "--count-mismatch-probe", action="store_true",
         help="Also force a private worker definition mismatch and verify fail-closed output",
+    )
+    parser.add_argument(
+        "--empty-shortcut-probe", action="store_true",
+        help="Also compare shortcut-on/off paths and inspect excluded zero-DDG starter types",
+    )
+    parser.add_argument(
+        "--selection-breadth-probe", action="store_true",
+        help="Also qualify production-cap selection fairness and fresh-workspace plan stability",
+    )
+    parser.add_argument(
+        "--flow-checkpoint-probe", action="store_true",
+        help="Also exit a private query after its first saved witness and qualify partial recovery",
     )
     args = parser.parse_args()
     output = args.output.expanduser().resolve()
@@ -447,6 +674,15 @@ def main():
         print(json.dumps(receipts[-1]), flush=True)
     if args.count_mismatch_probe:
         receipts.append(count_mismatch_probe(output))
+        print(json.dumps(receipts[-1]), flush=True)
+    if args.empty_shortcut_probe:
+        receipts.append(empty_shortcut_probe(output))
+        print(json.dumps(receipts[-1]), flush=True)
+    if args.selection_breadth_probe:
+        receipts.append(selection_breadth_probe(output))
+        print(json.dumps(receipts[-1]), flush=True)
+    if args.flow_checkpoint_probe:
+        receipts.append(flow_checkpoint_probe(output))
         print(json.dumps(receipts[-1]), flush=True)
     unchanged = all(
         Path(path).is_file() and digest(Path(path).read_bytes()) == value
