@@ -45,6 +45,8 @@ from .javascript_analysis import (
 )
 from .observations import SCHEMA as OBSERVATION_SCHEMA
 from .observations import import_observation
+from .prompting_analysis import VERSION as PROMPTING_VERSION
+from .prompting_analysis import analyze_prompting, is_prompt_asset, python_prompting_facts
 from .provenance import tool_info
 from .review_context import source_area
 from .rubric import RUBRIC_VERSION
@@ -108,7 +110,20 @@ _SECRET_NAMES = {
     "tokens.json",
 }
 _JS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
-_CONFIG = {".toml", ".yaml", ".yml", ".json", ".ini", ".cfg", ".tf", ".sh"}
+_CONFIG = {
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".ini",
+    ".cfg",
+    ".tf",
+    ".sh",
+    ".prompt",
+    ".jinja",
+    ".jinja2",
+    ".j2",
+}
 _SECRET_LINE = re.compile(
     r"(?i)(?:api[_-]?key|secret|password|passwd|credential|authorization|access[_-]?token|auth[_-]?token|token)"
     r"[\w\s\-\"']*\s*[:=]"
@@ -230,6 +245,8 @@ def _kind(path):
         return "manifest"
     if (
         suffix in _CONFIG
+        or suffix == ".txt"
+        and is_prompt_asset(path.as_posix())
         or name in {"dockerfile", ".gitignore", "makefile"}
         or is_delivery_input(path.as_posix())
     ):
@@ -1031,6 +1048,8 @@ def collect(
     control_inventory = ControlInventory()
     evidence_paths = set()
     documentation_texts, python_analysis, javascript_analysis, captured_sources = {}, [], [], {}
+    prompting_texts = {}
+    prompting_python = {}
     ecosystem_manifests, ecosystem_inputs = {}, []
     source_rows = {}
     source_definition_counts, source_analysis_failed = {}, set()
@@ -1270,6 +1289,7 @@ def collect(
                 gaps.append("Unsupported binary input: " + path.as_posix())
                 complete = supported_text_complete = False
                 return
+            prompting_texts[path.as_posix()] = text
             stats = {}
             control_record = None
             inventory = facts["inventory"]
@@ -1283,6 +1303,7 @@ def collect(
                 facts[kind]["files"] += 1
                 if kind == "python":
                     stats, tree = _python(text)
+                    prompting_python[path.as_posix()] = python_prompting_facts(tree)
                     change_gates = _redact_data(
                         analyze_change_gates(
                             path.as_posix(),
@@ -1657,6 +1678,50 @@ def collect(
             deadline=deadline,
         )
     )
+    prompting_seconds = 300 if budget.name == "deep" else 120
+    prompting_sources = {
+        entry["path"]: entry for entry in evidence if entry["path"] in prompting_texts
+    }
+    prompting = _redact_data(
+        analyze_prompting(
+            [
+                {
+                    "path": path,
+                    "text": prompting_texts[path],
+                    "evidence_id": entry["id"],
+                    "digest": entry["digest"],
+                    "kind": entry["kind"],
+                    "role": source_role(path)["role"],
+                }
+                for path, entry in sorted(prompting_sources.items())
+            ],
+            deadline=time.monotonic() + prompting_seconds,
+            python_facts=prompting_python,
+        )
+    )
+    if not supported_text_complete:
+        prompting["status"] = "partial"
+        prompting["gaps"].append(
+            "Source capture is incomplete; prompting evidence does not cover the whole project."
+        )
+    prompting["limits"].update(
+        seconds=prompting_seconds, deadline_mode="dedicated cooperative captured-text pass"
+    )
+    prompting_payload = json.dumps(prompting, sort_keys=True).encode()
+    prompting_id = add_evidence(
+        "<prompting-analysis>", prompting_payload, "prompting-analysis", "", prompting
+    )
+    facts["prompting"] = {
+        key: prompting[key]
+        for key in ("schema_version", "status", "summary", "coverage", "limits", "gaps", "caveat")
+    } | {"evidence_id": prompting_id}
+    facts["prompting"]["coverage"] = {
+        key: value for key, value in prompting["coverage"].items() if key != "files"
+    }
+    facts["prompting"]["coverage"]["files_retained_in_evidence"] = len(
+        prompting["coverage"].get("files", [])
+    )
+    gaps.extend("Prompting: " + gap for gap in prompting["gaps"])
     optional_analyses = {}
 
     def add_optional_evidence(name, result):
@@ -2173,6 +2238,7 @@ def collect(
         if budget.name == "deep"
         else None,
         "ecosystem_fit": {"version": ECOSYSTEM_VERSION, "limits": ecosystem["limits"]},
+        "prompting": {"version": PROMPTING_VERSION, "limits": prompting["limits"]},
     }
     return {
         "schema_version": 1,

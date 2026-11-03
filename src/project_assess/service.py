@@ -33,6 +33,13 @@ from .project_context import (
     project_context_template,
     validate_project_context,
 )
+from .prompting import (
+    PROMPTING_SCHEMA,
+    prompting_profile,
+    prompting_rubric,
+    prompting_template,
+    validate_prompting,
+)
 from .report_identity import _draft_digest, _normalized_ratings, canonical
 from .report_markdown import _ecosystem_fit, _review_coverage
 from .report_markdown import markdown_report as markdown_report
@@ -123,6 +130,20 @@ def _coverage_summary(coverage):
             )
         batches.append(projected)
     return {**coverage, "batches": batches}
+
+
+def _prompting_summary(profile):
+    """Keep brief handoffs bounded; authored rationale and citations stay in the report."""
+    return {
+        **{key: profile[key] for key in ("status", "level", "level_label", "confidence")},
+        "variability": {"status": profile["variability"]["status"]},
+        "intent": {key: profile["intent"][key] for key in ("min", "max", "basis", "provisional")},
+        "fit": {key: profile["fit"][key] for key in ("status", "direction", "provisional")},
+        "collection": {
+            key: profile["collection"].get(key) for key in ("status", "evidence_id", "summary")
+        },
+        "details_view": "report",
+    }
 
 
 def _assessment_method(review, *, compact=False):
@@ -322,6 +343,7 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
         "dimension_inputs": dimension_inputs(assessment),
         "system_map": get_system_map(assessment),
         "project_context": project_context_assessment(assessment, review, goals),
+        "prompting": prompting_profile(assessment, review),
         "plan": plan,
         "planning_status": planning_status,
         "findings": findings,
@@ -608,6 +630,7 @@ REVIEW_SCHEMA = _object(
         "coverage": COVERAGE_SCHEMA,
         "plan": PLAN_SCHEMA,
         "project_context": PROJECT_CONTEXT_SCHEMA,
+        "prompting": PROMPTING_SCHEMA,
         "methodology": METHODOLOGY_SCHEMA,
         "change_traces": {"type": "array", "maxItems": 10, "items": CHANGE_TRACE_SCHEMA},
         "challenge": CHALLENGE_SCHEMA,
@@ -811,7 +834,11 @@ class AssessmentService:
 
     @staticmethod
     def rubric():
-        return {**rubric(), "project_context": project_context_rubric()}
+        return {
+            **rubric(),
+            "project_context": project_context_rubric(),
+            "prompting": prompting_rubric(),
+        }
 
     def scan(self, root, reports=None, *, analysis_profile="standard", analyzers=None):
         root = self._root(root)
@@ -1108,6 +1135,7 @@ class AssessmentService:
             "rubric_version": assessment["rubric_version"],
             "complete": assessment["complete"],
             "project_context": alignment["project_context"],
+            "prompting": _prompting_summary(alignment["prompting"]),
             "gap_count": len(assessment["gaps"]),
             "inventory": facts.get("inventory", {}),
             "static_analysis": {
@@ -1235,6 +1263,7 @@ class AssessmentService:
             "area-dependencies",
             "controls",
             "burden",
+            "prompting",
             "review-plan",
         }
         if view not in views:
@@ -1299,7 +1328,8 @@ class AssessmentService:
         candidate_rows = []
         for entry in (
             entries
-            if (candidate_kind is not None and view != "controls") or view == "candidates"
+            if (candidate_kind is not None and view not in {"controls", "prompting"})
+            or view == "candidates"
             else []
         ):
             stats = entry.get("stats", {})
@@ -1428,6 +1458,15 @@ class AssessmentService:
                 )
             elif view == "candidates":
                 rows.extend(by_evidence.get(entry["id"], []))
+            elif view == "prompting" and entry["kind"] == "prompting-analysis":
+                rows.extend(
+                    {**row, "record_type": "prompting_signal", **common}
+                    for row in stats.get("signals", [])
+                )
+                rows.extend(
+                    {**row, "kind": "file", "record_type": "prompting_file", **common}
+                    for row in stats.get("coverage", {}).get("files", [])
+                )
             elif view == "snippets":
                 windows = entry.get("source_windows", stats.get("source_windows", []))
                 if isinstance(windows, list):
@@ -1484,7 +1523,11 @@ class AssessmentService:
             elif view == "coverage" and "coverage" in stats:
                 rows.append(
                     {
-                        "coverage": _coverage_summary(stats["coverage"]),
+                        "coverage": {
+                            key: value for key, value in stats["coverage"].items() if key != "files"
+                        }
+                        if entry["kind"] == "prompting-analysis"
+                        else _coverage_summary(stats["coverage"]),
                         "status": stats.get("status"),
                         "limits": stats.get("limits", {}),
                         "candidate_counts": stats.get("candidate_counts", {}),
@@ -1570,7 +1613,7 @@ class AssessmentService:
         filtered = []
         seen_snippets = set()
         for row in rows:
-            if view in {"controls", "burden"}:
+            if view in {"controls", "burden", "prompting"}:
                 if dimension is not None and dimension not in row.get("dimensions", []):
                     continue
                 if candidate_kind is not None and row.get("kind") != candidate_kind:
@@ -1610,7 +1653,8 @@ class AssessmentService:
                 continue
             if (
                 candidate_kind
-                and view not in {"candidates", "index", "details", "controls", "burden"}
+                and view
+                not in {"candidates", "index", "details", "controls", "burden", "prompting"}
                 and not any(location in candidate_paths for location in paths)
             ):
                 continue
@@ -1666,6 +1710,9 @@ class AssessmentService:
                     ),
                 }
                 for entry in entries
+                if entry["kind"] != "prompting-analysis"
+                or view in {"prompting", "coverage", "review-plan"}
+                or kind == "prompting-analysis"
                 if entry["kind"]
                 in {
                     "static-analysis",
@@ -1674,6 +1721,7 @@ class AssessmentService:
                     "analyzer-analysis",
                     "control-analysis",
                     "burden-analysis",
+                    "prompting-analysis",
                 }
             ],
         }
@@ -1683,6 +1731,12 @@ class AssessmentService:
                 "not validated provenance, feasible execution or safe deletion. External calls, "
                 "callbacks and execution boundaries can produce spurious paths; verify source "
                 "and library contracts. Empty results leave missing flows unknown."
+            )
+        if view == "prompting":
+            result["caveat"] = (
+                "Captured naming and syntax hints are not observed model execution, AI authorship, "
+                "a prompt reliance level or measured output variability. Inspect actual product "
+                "and host-agent workflows, authority and evaluation evidence before judging fit."
             )
         if documentation_projections and view == "candidates":
             result["documentation_scope"] = {
@@ -2237,6 +2291,7 @@ class AssessmentService:
             "goal_alignment": alignment,
             "test_value_static": inventory,
             "ecosystem_fit": ecosystem,
+            "prompting": alignment["prompting"],
             "burden_analysis": assessment["facts"].get("burden_analysis", {}),
             "gaps": sorted(set(gaps)),
             "verification": "Trace actual callers and choose relevant behavior checks before an authorized edit; rescan afterward to assess the change.",
@@ -2267,6 +2322,7 @@ class AssessmentService:
             },
             "findings": [],
             "project_context": project_context_template(),
+            "prompting": prompting_template(),
             "coverage": {
                 "schema_version": 1,
                 "scope": "whole_project",
@@ -2314,6 +2370,8 @@ class AssessmentService:
         ):
             raise ConflictError("Review identity does not match the captured assessment")
         evidence_ids = {item["id"] for item in assessment["evidence"]}
+        if "prompting" in review:
+            validate_prompting(review["prompting"], assessment["evidence"])
 
         def cites(ids):
             if not ids or not set(ids) <= evidence_ids:
@@ -2526,6 +2584,7 @@ class AssessmentService:
             },
             "rubric": self.rubric(),
             "project_intent": (review.get("project_context") or {}).get("intended"),
+            "prompting_intent": (review.get("prompting") or {}).get("intent"),
             "targets": (goals or {}).get("targets"),
             "instructions": [
                 "Use current user-stated purpose as a constraint. Documented or inferred intent remains a provisional claim to challenge. Independently establish realized scope/readiness before seeing proposed current milestones or ranked priorities; do not assume commercial or platform scope is better.",
@@ -2786,6 +2845,7 @@ class AssessmentService:
                 "confidence_assessment": alignment["confidence_assessment"],
                 "system_map": alignment["system_map"],
                 "project_context": alignment["project_context"],
+                "prompting": alignment["prompting"],
                 "timeline": self._timeline(db, assessment),
             }
         from .badges import badge_assets

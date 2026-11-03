@@ -5,6 +5,10 @@ from collections import Counter, defaultdict
 from .rubric import DIMENSIONS
 
 _PROVIDERS = {
+    "prompting": (
+        ("prompting-analysis",),
+        "Located instruction assets, SDK setup/invocation and output-contract/evaluation hints; distinguish development guidance from product or host-agent behavior and inspect controls without inferring repeatability or a score.",
+    ),
     "source": (
         ("python", "javascript", "source", "configuration"),
         "Captured source/configuration inventory and locations; syntax support varies by language.",
@@ -322,6 +326,7 @@ def dimension_inputs(assessment):
                             "guidance",
                             "dead_code",
                             "burden",
+                            "prompting",
                         ]
                     )
                 ),

@@ -27,6 +27,39 @@ def read(data, manifest=MANIFEST, revision=REVISION, redact=lambda text: text):
 
 
 @pytest.mark.parametrize(
+    "change",
+    [
+        {"trials": 1},
+        {"trials": True},
+        {"distinct_outputs": 4},
+        {"input_digest": "raw prompt"},
+        {"comparison": "schema"},
+    ],
+)
+def test_prompting_observations_reject_insufficient_or_invalid_repeated_metadata(change):
+    data = observation()
+    data["type"] = "prompting"
+    data["prompting"] = {
+        "input_digest": "sha256:" + "a" * 64,
+        "configuration_digest": "sha256:" + "b" * 64,
+        "trials": 3,
+        "distinct_outputs": 1,
+        "comparison": "exact",
+        "criterion": "Exact output bytes.",
+    }
+    data["prompting"].update(change)
+    with pytest.raises(ValueError):
+        read(data)
+
+
+def test_prompting_observation_requires_its_specific_repeat_scenario():
+    data = observation()
+    data["type"] = "prompting"
+    with pytest.raises(ValueError, match="repeated"):
+        read(data)
+
+
+@pytest.mark.parametrize(
     "kind", ["performance", "recovery", "delivery", "change_cost", "security", "extensibility"]
 )
 def test_existing_observation_types_bind_specific_source_without_certifying_execution(kind):

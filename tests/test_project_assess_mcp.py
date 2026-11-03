@@ -57,6 +57,7 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 rubric = await session.call_tool("get_rubric", {})
                 assert not rubric.is_error
                 assert "platform" in rubric.structured_content["project_context"]["milestones"]
+                assert len(rubric.structured_content["prompting"]["levels"]) == 6
                 discovered = await session.list_tools()
                 names = {tool.name for tool in discovered.tools}
                 assert {
@@ -179,6 +180,20 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                 assert value_paths.structured_content["view"] == "dataflow"
                 assert value_paths.structured_content["items"] == []
                 assert value_paths.structured_content["source"] == snapshot["source"]
+                prompting = await session.call_tool(
+                    "query_evidence",
+                    {
+                        "assessment_id": snapshot["id"],
+                        "view": "prompting",
+                        "candidate_kind": "file",
+                    },
+                )
+                assert not prompting.is_error and prompting.structured_content["matched"] >= 2
+                assert all(
+                    row["record_type"] == "prompting_file"
+                    for row in prompting.structured_content["items"]
+                )
+                assert prompting.structured_content["source"] == snapshot["source"]
                 controls = await session.call_tool(
                     "query_evidence",
                     {

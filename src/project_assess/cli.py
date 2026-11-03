@@ -111,6 +111,7 @@ def parser():
             "snippets",
             "graph",
             "dataflow",
+            "prompting",
             "hotspots",
             "coverage",
             "provenance",

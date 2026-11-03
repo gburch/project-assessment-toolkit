@@ -17,6 +17,7 @@ function clearVisuals() {
   $("dimension-map").replaceChildren();
   $("badges").replaceChildren();
   $("project-context").replaceChildren();
+  $("prompting-profile")?.remove();
   $("download-report").removeAttribute("href");
 }
 
@@ -142,6 +143,112 @@ function renderProjectContext(report) {
   }
   if (context?.gaps?.length) textList(parent, "Context gaps", context.gaps);
   parent.append(node("p", context?.profile_note || "Scope milestones are not quality grades or required growth steps. Existing numeric goals remain independent.", "secondary"));
+  renderPrompting(report);
+}
+function renderPrompting(report) {
+  $("prompting-profile")?.remove();
+  const profile = report.prompting;
+  const cite = (parent, ids) => {
+    if (ids?.length) parent.append(node("p", `Evidence: ${ids.join(", ")}`, "evidence-meta"));
+  };
+  const section = node("section");
+  section.id = "prompting-profile";
+  section.setAttribute("aria-labelledby", "prompting-heading");
+  const heading = node("h2", "Prompting and behavior control");
+  heading.id = "prompting-heading";
+  section.append(heading, node("p", "Code-controlled behavior → bounded model steps → prompt-led workflows. The appropriate balance depends on the project's purpose.", "secondary"));
+  const summary = node("div", undefined, "context-summary");
+  const current = node("article");
+  current.id = "prompting-runtime";
+  current.append(node("h3", "Product prompt reliance"));
+  const knownLevel = Number.isInteger(profile?.level) && profile.level >= 0 && profile.level <= 5;
+  current.append(node("p", knownLevel ? `${profile.level} / 5 · ${profile.level_label || "Reviewed level"}` : "Unknown · no runtime reliance level established", "context-milestone"));
+  if (profile?.confidence) current.append(node("p", `Declared confidence: ${profile.confidence}`, "secondary"));
+  current.append(node("p", profile?.rationale || "No prompting judgment is recorded for this snapshot."));
+  cite(current, profile?.evidence_ids);
+  const intended = node("article");
+  intended.id = "prompting-intent";
+  intended.append(node("h3", "Intended balance"));
+  const intent = profile?.intent;
+  const hasMinimum = Number.isInteger(intent?.min) && intent.min >= 0 && intent.min <= 5;
+  const hasMaximum = Number.isInteger(intent?.max) && intent.max >= 0 && intent.max <= 5;
+  const range = hasMinimum && hasMaximum ? `${intent.min === intent.max ? intent.min : `${intent.min}–${intent.max}`} / 5` : hasMinimum ? `At least ${intent.min} / 5` : hasMaximum ? `At most ${intent.max} / 5` : "No intended range recorded";
+  intended.append(node("p", range, "context-milestone"));
+  if (intent) {
+    const basis = intent.basis_label || intent.basis || "Unknown";
+    intended.append(node("p", `Basis: ${basis}${intent.provisional && !basis.toLowerCase().includes("provisional") ? " · provisional" : ""}`, "secondary"));
+    if (intent.rationale) intended.append(node("p", intent.rationale));
+    cite(intended, intent.evidence_ids);
+  }
+  if (profile?.fit?.label) intended.append(node("p", profile.fit.label));
+  intended.append(node("p", "This range is review context. Capability and burden goals remain independent.", "secondary"));
+  summary.append(current, intended);
+  section.append(summary);
+  const variability = profile?.variability;
+  const variation = node("div");
+  variation.id = "prompting-variability";
+  variation.append(node("h3", "Output variability"), node("p", variability?.label || "Unknown · no runtime repeatability evidence"));
+  if (variability?.rationale) variation.append(node("p", variability.rationale));
+  cite(variation, variability?.evidence_ids);
+  section.append(variation);
+  if (profile?.workflows?.length) {
+    const details = node("details");
+    details.append(node("summary", "Behavior by workflow"));
+    const list = node("ul");
+    for (const workflow of profile.workflows) {
+      const item = node("li");
+      item.append(node("p", `${workflow.name}: ${workflow.control_label || workflow.control || "Unknown"}`), node("p", workflow.rationale));
+      cite(item, workflow.evidence_ids);
+      list.append(item);
+    }
+    details.append(list);
+    section.append(details);
+  }
+  const collection = profile?.collection;
+  const detail = node("details");
+  detail.id = "prompting-collected";
+  detail.append(node("summary", "Prompting evidence and coverage"));
+  if (!collection || collection.status === "not_collected") {
+    detail.append(node("p", "Not collected for this snapshot. Scan again to capture prompting evidence."));
+  } else {
+    const facts = collection.summary || {}, counts = facts.counts_by_kind || {};
+    const count = (value) => Number.isInteger(value) && value >= 0 ? value : "unknown";
+    detail.append(node("p", `Collection: ${collection.status}. Development guidance: ${count(facts.guidance_files)} file(s), ${count(counts.development_guidance)} signal(s).`));
+    detail.append(node("p", `Runtime hints: ${count(facts.runtime_prompt_files)} prompt-asset file(s), ${count(counts.model_invocation)} model invocation(s), ${count(counts.agent_orchestration)} orchestration signal(s).`));
+    detail.append(node("p", `Model client setup: ${count(counts.model_client_setup)} signal(s). Setup declarations do not establish a model invocation.`));
+    detail.append(node("p", `Controls and evaluation hints: ${count(counts.output_contract)} output-contract signal(s), ${count(counts.evaluation_signal)} evaluation signal(s).`));
+    detail.append(node("p", "Development skills and signal counts do not establish runtime prompt reliance or repeatable output.", "secondary"));
+    if (collection.gaps?.length) textList(detail, "Collection gaps", collection.gaps);
+    const captured = (report.assessment?.evidence || []).find((entry) => entry.id === collection.evidence_id && entry.kind === "prompting-analysis");
+    if (captured) {
+      const inspect = node("button", "Inspect Prompting evidence");
+      inspect.type = "button";
+      inspect.addEventListener("click", () => {
+        const record = Array.from($("evidence").children).find((entry) => entry.dataset.evidenceId === captured.id);
+        if (!record) return;
+        $("evidence-summary").parentElement.open = true;
+        record.open = true;
+        record.querySelector("summary").focus();
+        record.scrollIntoView({ block: "nearest" });
+      });
+      detail.append(inspect);
+    }
+  }
+  section.append(detail);
+  if (profile?.recommendations?.length) {
+    section.append(node("h3", "Right-size the balance"));
+    const list = node("ul");
+    for (const recommendation of profile.recommendations) {
+      const item = node("li", undefined, "prompting-recommendation");
+      item.append(node("p", `${recommendation.direction_label || recommendation.direction}: ${recommendation.action}`), node("p", recommendation.rationale));
+      cite(item, recommendation.evidence_ids);
+      list.append(item);
+    }
+    section.append(list);
+  }
+  if (profile?.gaps?.length) textList(section, "Judgment gaps", profile.gaps);
+  section.append(node("p", profile?.caveat || "Prompt reliance is a project characteristic. High or low reliance can fit the intended purpose; observed variability needs applicable runtime evidence.", "secondary"));
+  $("project-context").closest("section").after(section);
 }
 function message(text, error = false) {
   $("error").hidden = !error;
