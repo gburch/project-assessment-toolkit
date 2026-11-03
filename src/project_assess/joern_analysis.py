@@ -23,10 +23,11 @@ from pathlib import Path, PurePosixPath
 from .joern_bindings import MAX_BYTES as BINDING_BYTES
 from .joern_bindings import MAX_NODES as BINDING_NODES
 from .joern_bindings import BindingCountercheck
+from .joern_dataflow import normalize_dataflow
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "5"
-QUERY_VERSION = "3"
+VERSION = "6"
+QUERY_VERSION = "4"
 JOERN_VERSION = "4.0.669"
 QUERY_PATH = Path(__file__).parent / "resources" / "joern.sc"
 MAX_INPUT_RECORDS = 20_000
@@ -59,9 +60,9 @@ _PROFILES = {
         "heap_gib": 2,
     },
     "deep": {
-        "seconds": 1800,
-        "files": 4000,
-        "bytes": 128 * 1024**2,
+        "seconds": 7200,
+        "files": 20_000,
+        "bytes": 512 * 1024**2,
         "bytes_per_file": 8 * 1024**2,
         "heap_gib": 8,
     },
@@ -69,8 +70,9 @@ _PROFILES = {
 _CAVEAT = (
     "Joern models captured source, not runtime behavior or complete resolution. "
     "No modeled read is a review lead, not permission to remove a binding, initializer "
-    "or required callback, override or public parameter. No dataflow overlay, constant-guard "
-    "reachability or zero-caller deletion analysis was run."
+    "or required callback, override or public parameter. Deep adds modeled parameter-value "
+    "paths with default library semantics, not runtime taint or authorization proof. "
+    "Constant-guard reachability and zero-caller deletion analysis are not performed."
 )
 _clock = time.monotonic
 
@@ -221,13 +223,24 @@ def joern_limits(analysis_profile):
         raise ValueError("Unknown analysis profile")
     return {
         **_PROFILES[analysis_profile],
+        "thread_stack_mib": 32 if analysis_profile == "deep" else None,
         "active_processors": 2,
-        "workspace_bytes": 8 * 1024**3,
-        "query_json_bytes": 32 * 1024**2,
+        "workspace_bytes": (16 if analysis_profile == "deep" else 8) * 1024**3,
+        "query_json_bytes": (128 if analysis_profile == "deep" else 32) * 1024**2,
         "log_bytes": 8 * 1024**2,
         "candidates": MAX_CANDIDATES,
         "candidate_index": MAX_INDEX,
         "input_records": MAX_INPUT_RECORDS,
+        "dataflow": {
+            "enabled": analysis_profile == "deep",
+            "max_definitions": 50_000,
+            "max_call_depth": 8,
+            "paths": 20_000,
+            "paths_per_sink": 64,
+            "steps_per_path": 64,
+            "max_arguments": 1000,
+            "max_output_argument_expansion": 1000,
+        },
         "javascript_frontend": {
             "bytes_per_file": 5 * 1024**2,
             "lines_per_file": 50_000,
@@ -297,7 +310,7 @@ def _tools():
             )
     if (home / "conf/application.ini").exists():
         paths["repl_config"] = _contained_file(home, "conf/application.ini")
-    for name in ("joern-cli", "semanticcpg", "x2cpg"):
+    for name in ("joern-cli", "semanticcpg", "x2cpg", "dataflowengineoss"):
         paths[name] = _contained_file(home, f"lib/io.joern.{name}-{JOERN_VERSION}.jar")
     arm = platform.machine().lower() in {"arm64", "aarch64"}
     js_binary = (
@@ -339,7 +352,7 @@ def joern_info():
         "license": "Apache-2.0",
         "selection": "explicit",
         "execution": "contained external tool on captured source",
-        "dataflow": "not_run",
+        "dataflow": "deep_profile",
     }
     try:
         _, _, _, jdk_version, hashes = _tools()
@@ -491,6 +504,7 @@ def _environment(paths, java, workspace, limits):
     home, temporary = workspace / "home", workspace / "tmp"
     home.mkdir()
     temporary.mkdir()
+    stack = f" -Xss{limits['thread_stack_mib']}m" if limits.get("thread_stack_mib") else ""
     return {
         "HOME": str(home),
         "TMPDIR": str(temporary),
@@ -498,9 +512,9 @@ def _environment(paths, java, workspace, limits):
         "TEMP": str(temporary),
         "JAVA_HOME": str(java),
         "PATH": str(java / "bin") + ":/usr/bin:/bin",
-        "JAVA_OPTS": f"-Xmx{limits['heap_gib']}g -XX:ActiveProcessorCount={limits['active_processors']}",
+        "JAVA_OPTS": f"-Xmx{limits['heap_gib']}g -XX:ActiveProcessorCount={limits['active_processors']}{stack}",
         "_JAVA_OPTIONS": (
-            f"-Xmx{limits['heap_gib']}g -XX:ActiveProcessorCount={limits['active_processors']} "
+            f"-Xmx{limits['heap_gib']}g -XX:ActiveProcessorCount={limits['active_processors']}{stack} "
             f"-Duser.home={json.dumps(str(home), ensure_ascii=False)} "
             f"-Djava.io.tmpdir={json.dumps(str(temporary), ensure_ascii=False)}"
         ),
@@ -584,6 +598,27 @@ def _stop_group(process):
 def _run(argv, *, workspace, cwd, env, stop, limits, output=None):
     """Discard bounded logs and always reap the whole process group, including orphans."""
     status, logged, next_disk = "complete", 0, 0.0
+    engine_error, tails = False, {}
+
+    def inspect(stream, data):
+        # Joern can catch worker failures and still exit zero with empty paths.
+        # Retain only fixed failure markers, never source, commands or raw logs.
+        nonlocal engine_error
+        combined = tails.get(stream, b"") + data
+        if any(
+            marker in combined
+            for marker in (
+                b"SolveTask failed",
+                b"java.lang.StackOverflowError",
+                b"java.lang.OutOfMemoryError",
+                b"java.util.concurrent.ExecutionException:",
+                b"Too many arguments for parameter:",
+                b"Too many new tasks in expansion of unresolved output arguments",
+            )
+        ):
+            engine_error = True
+        tails[stream] = combined[-128:]
+
     process = subprocess.Popen(
         argv,
         cwd=cwd,
@@ -617,6 +652,7 @@ def _run(argv, *, workspace, cwd, env, stop, limits, output=None):
                     next_disk = now + 0.5
                 for key, _ in selector.select(timeout=min(0.1, max(0, stop - now))):
                     data = os.read(key.fd, 65536)
+                    inspect(key.fd, data)
                     if not data:
                         selector.unregister(key.fileobj)
                     logged += len(data)
@@ -626,8 +662,15 @@ def _run(argv, *, workspace, cwd, env, stop, limits, output=None):
                 if status != "complete":
                     break
             code = process.poll()
-            for key, _ in selector.select(timeout=0):
-                logged += len(os.read(key.fd, 65536))
+            while ready := selector.select(timeout=0):
+                for key, _ in ready:
+                    data = os.read(key.fd, 65536)
+                    inspect(key.fd, data)
+                    logged += len(data)
+                    if not data:
+                        selector.unregister(key.fileobj)
+                if logged > limits["log_bytes"]:
+                    break
             if logged > limits["log_bytes"]:
                 status = "log_limit"
             if status == "complete" and code != 0:
@@ -643,7 +686,7 @@ def _run(argv, *, workspace, cwd, env, stop, limits, output=None):
         and output.lstat().st_size > limits["query_json_bytes"]
     ):
         status = "output_limit"
-    return status
+    return "analysis_engine_error" if status == "complete" and engine_error else status
 
 
 def _read_result(path, maximum):
@@ -675,7 +718,7 @@ def _read_result(path, maximum):
         or result.get("query_version") != QUERY_VERSION
     ):
         raise ValueError("Unsupported query output")
-    if result.get("dataflow") != "not_run":
+    if result.get("dataflow") not in {"not_run", "complete", "partial", "error"}:
         raise ValueError("Unqualified dataflow analysis")
     return result
 
@@ -711,7 +754,7 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
     if (
         not isinstance(files, dict)
         or not isinstance(files.get("rows"), list)
-        or len(files["rows"]) > 4000
+        or len(files["rows"]) > 20_000
     ):
         raise ValueError("Invalid source coverage")
     for row in files.get("rows", []):
@@ -730,7 +773,7 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
         if (
             not isinstance(value, dict)
             or not isinstance(value.get("rows"), list)
-            or len(value["rows"]) > 50_000
+            or len(value["rows"]) > (200_000 if section == "methods" else 50_000)
         ):
             raise ValueError("Invalid query section")
         if value.get("status") != "complete" or value.get("omitted", 0):
@@ -932,17 +975,20 @@ def _normalize(raw, stage, sources, workspace, clean, stop):
     )
 
 
-def _method_sampling_metadata(value, stage, sources):
+def _method_sampling_metadata(value, stage, sources, analysis_profile="standard"):
     """Keep bounded per-file model coverage distinct from retained normalized rows."""
     fields = ("source_files", "retained_files", "omitted_files", "row_byte_limit", "byte_omissions")
+    deep = analysis_profile == "deep"
+    metadata_bytes = (2048 if deep else 256) * 1024
+    row_bytes = (48 if deep else 6) * 1024**2 - metadata_bytes - 4096
     if (
         not isinstance(value, dict)
         or value.get("sampling") != "max_min_per_file_then_round_robin"
         or any(not _integer(value.get(field)) for field in (*fields, "count", "omitted"))
         or value["source_files"] > len(sources)
         or value["retained_files"] + value["omitted_files"] != value["source_files"]
-        or value["row_byte_limit"] != 6 * 1024**2 - 256 * 1024 - 4096
-        or value["byte_omissions"] > 20_000
+        or value["row_byte_limit"] != row_bytes
+        or value["byte_omissions"] > (200_000 if deep else 20_000)
         or value["omitted"] > value["count"]
     ):
         raise ValueError("Invalid method sampling metadata")
@@ -956,7 +1002,7 @@ def _method_sampling_metadata(value, stage, sources):
         )
         or coverage["count"] != value["source_files"]
         or coverage["limit"] != coverage["count"]
-        or coverage["byte_limit"] != 256 * 1024
+        or coverage["byte_limit"] != metadata_bytes
         or not isinstance(coverage.get("rows"), list)
         or len(coverage["rows"]) > len(sources)
         or coverage["omitted"] + len(coverage["rows"]) != coverage["count"]
@@ -1034,8 +1080,15 @@ def _model_metadata(raw, limits):
         ):
             raise ValueError("Invalid bounded model metadata")
         safe_metadata[key] = sorted(values)
-    if any("dataflow" in name.lower() for name in safe_metadata["overlays"]):
+    overlays = [name for name in safe_metadata["overlays"] if "dataflow" in name.lower()]
+    if any(name != "dataflowOss" for name in overlays):
         raise ValueError("Unqualified dataflow overlay")
+    requested = limits["dataflow"]["enabled"]
+    actual = raw.get("dataflow")
+    if not requested and (overlays or actual != "not_run"):
+        raise ValueError("Dataflow was not requested")
+    if requested and (actual == "not_run" or actual in {"complete", "partial"} and not overlays):
+        raise ValueError("Missing requested dataflow analysis or overlay")
     safe_metrics = {}
     for key in ("nodes", "edges", "methods", "calls"):
         value = metrics.get(key)
@@ -1046,7 +1099,13 @@ def _model_metadata(raw, limits):
     if not isinstance(edge_counts, dict):
         raise ValueError("Invalid edge counts")
     safe_metrics["edge_counts"] = {}
-    for key in ("CFG", "REF", "CALL", "CDG"):
+    for key in (
+        "CFG",
+        "REF",
+        "CALL",
+        "CDG",
+        *(["REACHING_DEF"] if "REACHING_DEF" in edge_counts else []),
+    ):
         value = edge_counts.get(key)
         if not _integer(value) or value > 2**53:
             raise ValueError("Invalid model edge count")
@@ -1102,7 +1161,7 @@ def analyze_joern(
             "project_config_loaded": False,
             "dependency_fetch": False,
             "build": False,
-            "dataflow": "not_run",
+            "dataflow": "requested" if analysis_profile == "deep" else "not_run",
             "javascript_type_maps": "not_run",
         },
         "provenance": {
@@ -1123,6 +1182,7 @@ def analyze_joern(
             "batches": [],
         },
         "summary": {"methods": None, "calls": None, "candidate_count": 0, "dataflow": "not_run"},
+        "dataflow_analysis": {"status": "not_run", "batches": [], "paths": []},
         "modules": [],
         "topology": {"complete": False, "edges": [], "methods": [], "calls": [], "caveat": _CAVEAT},
         "candidates": [],
@@ -1184,6 +1244,8 @@ def analyze_joern(
     modeled, batches, successful = set(), [], 0
     method_file_coverage = {}
     edges, inferred_edges = Counter(), Counter()
+    flow_batches, flow_paths = [], []
+    staged = {}
     clean = redact or (lambda value: value)
     try:
         home, java, paths, _, hashes = _tools()
@@ -1277,6 +1339,8 @@ def analyze_joern(
                     "-J-Duser.home=" + env["HOME"],
                     "-J-Djava.io.tmpdir=" + env["TMPDIR"],
                 ]
+                if limits.get("thread_stack_mib"):
+                    flags.append(f"-J-Xss{limits['thread_stack_mib']}m")
                 parser = [str(paths[language]), *flags, str(stage), "--output", str(cpg)]
                 if language == "java":
                     parser.extend(["--delombok-mode", "no-delombok"])
@@ -1320,6 +1384,8 @@ def analyze_joern(
                         "cpgFile=" + str(cpg),
                         "--param",
                         "out=" + str(output),
+                        "--param",
+                        "profile=" + analysis_profile,
                     ]
                     status = _run(
                         _contained_command(command, workspace, original, containment, binary, cwd),
@@ -1333,7 +1399,9 @@ def analyze_joern(
                 process_status = status
                 model_status, modeled_count = "unknown", 0
                 counts, metadata, metrics = {}, {}, {}
-                if status == "complete":
+                detail_status = "unknown"
+                validated = checkpoint_recovered = False
+                if status == "complete" or analysis_profile == "deep" and output.is_file():
                     try:
                         for path, source in batch.items():
                             staged_path = stage / path
@@ -1343,7 +1411,22 @@ def analyze_joern(
                             ):
                                 raise ValueError("Staged source identity changed")
                         raw = _read_result(output, limits["query_json_bytes"])
+                        if process_status != "complete":
+                            checkpoint_recovered = (
+                                raw.get("checkpoint") == "base_before_dataflow"
+                                and raw.get("dataflow") == "error"
+                            )
+                            if process_status == "analysis_engine_error":
+                                raw["dataflow"] = "error"
+                                raw["dataflow_analysis"] = {"status": "error"}
+                            elif not checkpoint_recovered:
+                                raise ValueError(
+                                    "Incomplete process has no qualified base checkpoint"
+                                )
                         metadata, metrics = _model_metadata(raw, limits)
+                        flow, flow_gaps = normalize_dataflow(
+                            raw, stage=stage, sources=batch, clean=clean
+                        )
                         (
                             methods,
                             calls,
@@ -1354,9 +1437,17 @@ def analyze_joern(
                             module_edges,
                             inferred_module_edges,
                             binding_checks,
-                        ) = _normalize(raw, stage, batch, workspace, clean, stop)
+                        ) = _normalize(
+                            raw,
+                            stage,
+                            batch,
+                            workspace,
+                            clean,
+                            _clock() + 120 if process_status != "complete" else stop,
+                        )
+                        model_gaps.update(flow_gaps)
                         method_sampling = _method_sampling_metadata(
-                            raw.get("methods"), stage, batch
+                            raw.get("methods"), stage, batch, analysis_profile
                         )
                         if method_sampling["file_coverage"]["status"] != "complete":
                             model_gaps.add(
@@ -1364,7 +1455,8 @@ def analyze_joern(
                             )
                         counts = {
                             section: {
-                                key: raw.get(section, {}).get(key) for key in ("count", "omitted")
+                                key: raw.get(section, {}).get(key)
+                                for key in ("status", "count", "omitted")
                             }
                             for section in (
                                 "methods",
@@ -1376,6 +1468,17 @@ def analyze_joern(
                             )
                         }
                         counts["methods"].update(method_sampling)
+                        detail_status = (
+                            "partial"
+                            if dropped
+                            or any(
+                                value.get("status") != "complete"
+                                or value.get("omitted")
+                                or value.get("byte_omissions")
+                                for value in counts.values()
+                            )
+                            else "complete"
+                        )
                         for section, fields in (
                             ("methods", ("external_models", "unlocated_models")),
                             ("module_edges", ("occurrences", "omitted_occurrences")),
@@ -1451,6 +1554,9 @@ def analyze_joern(
                         edges.update(module_edges)
                         inferred_edges.update(inferred_module_edges)
                         successful += bool(files)
+                        flow_batches.append({"language": language, **flow})
+                        flow_paths.extend(flow["paths"]["rows"])
+                        validated = True
                     except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
                         status = "unvalidated_output_or_source"
                 if status != "complete":
@@ -1461,8 +1567,11 @@ def analyze_joern(
                     {
                         "language": language,
                         "staged_files": len(batch),
-                        "status": model_status if status == "complete" else status,
+                        "status": model_status if validated else status,
                         "process_status": process_status,
+                        "base_checkpoint_recovered": checkpoint_recovered and validated,
+                        "dataflow_worker_failed": process_status == "analysis_engine_error",
+                        "detail_status": detail_status if validated else "unknown",
                         "modeled_files": modeled_count,
                         "model_sections": counts,
                         "model_metadata": metadata,
@@ -1573,10 +1682,74 @@ def analyze_joern(
     result["coverage"].update(
         modeled_files=len(modeled), batches=batches, omissions=dict(sorted(omissions.items()))
     )
+    expected_batches = {source["language"] for source in staged.values()}
+    ran_batches = {batch["language"] for batch in flow_batches}
+    flow_status = (
+        "not_run"
+        if analysis_profile != "deep"
+        else "complete"
+        if expected_batches
+        and ran_batches == expected_batches
+        and all(batch["status"] == "complete" for batch in flow_batches)
+        else "error"
+        if not flow_batches or all(batch["status"] == "error" for batch in flow_batches)
+        else "partial"
+    )
+    result["dataflow_analysis"] = {
+        "status": flow_status,
+        "batches": flow_batches,
+        "paths": sorted({row["id"]: row for row in flow_paths}.values(), key=lambda row: row["id"]),
+        "caveat": "Modeled value paths with default semantics; missing paths are unknown, not proof of disuse, isolation, authorization or runtime safety.",
+    }
+    result["coverage"]["phases"] = {
+        "input": {
+            "eligible": len(selected),
+            "staged": len(staged),
+            "omitted": len(selected) - len(staged),
+        },
+        "model": {
+            "staged": len(staged),
+            "modeled": len(modeled),
+            "omitted": len(set(staged) - modeled),
+        },
+        "detail": {
+            "status": "complete"
+            if successful and all(batch.get("detail_status") == "complete" for batch in batches)
+            else "partial",
+            "retained_methods": len(all_methods),
+            "retained_calls": len(all_calls),
+        },
+        "dataflow": {
+            "status": flow_status,
+            "retained_paths": len(result["dataflow_analysis"]["paths"]),
+            **{
+                key: sum(batch[field] for batch in flow_batches)
+                if flow_batches and all(type(batch.get(field)) is int for batch in flow_batches)
+                else None
+                for key, field in (
+                    ("methods_analyzed", "methods_analyzed"),
+                    ("methods_skipped", "methods_skipped"),
+                )
+            },
+            **{
+                key: sum(batch["queries"][key] for batch in flow_batches)
+                if flow_batches
+                and all(type(batch.get("queries", {}).get(key)) is int for batch in flow_batches)
+                else None
+                for key in ("sinks_queried", "paths_truncated")
+            },
+            "paths_omitted": sum(batch["paths"]["omitted"] for batch in flow_batches)
+            if flow_batches
+            and all(type(batch["paths"].get("omitted")) is int for batch in flow_batches)
+            else None,
+        },
+    }
     result["summary"].update(
         methods=len(all_methods) if successful else None,
         calls=len(all_calls) if successful else None,
         candidate_count=len(all_candidates),
+        dataflow=flow_status,
+        value_paths=len(result["dataflow_analysis"]["paths"]),
         counts_are_lower_bounds=bool(gaps or omissions),
         count_basis="retained validated source-located rows; producer section totals are in coverage.batches",
     )

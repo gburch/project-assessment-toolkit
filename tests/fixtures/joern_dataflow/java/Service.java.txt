@@ -1,0 +1,6 @@
+final class Service {
+    static String relay(String value) {
+        System.out.println(value);
+        return value;
+    }
+}

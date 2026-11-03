@@ -1,0 +1,29 @@
+from service import relay
+
+
+def entry(payload):
+    return relay(payload)
+
+
+def operation_entry(operation_payload):
+    relay(operation_payload)
+    return "handled"
+
+
+def unrelated(unrelated_payload):
+    return "unchanged"
+
+
+def overwritten(obsolete, replacement):
+    value = obsolete
+    value = replacement
+    return value
+
+
+def callback(unused_context):
+    return "callback contract"
+
+
+def preserve_effect(effect):
+    unused = effect()
+    return "initializer must remain"

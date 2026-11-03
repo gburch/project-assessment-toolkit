@@ -1,22 +1,38 @@
 import io.shiftleft.semanticcpg.language.*
 import io.shiftleft.codepropertygraph.generated.nodes.*
+import io.joern.dataflowengineoss.language.*
+import io.joern.dataflowengineoss.queryengine.{EngineContext, EngineConfig}
+import io.joern.dataflowengineoss.layers.dataflows.{OssDataFlow, OssDataFlowOptions}
+import io.joern.dataflowengineoss.passes.reachingdef.{ReachingDefProblem, ReachingDefTransferFunction}
+import io.shiftleft.semanticcpg.layers.LayerCreatorContext
 import scala.collection.mutable
 import scala.util.control.NonFatal
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Paths}
 import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
 
-// Fixed, trusted query for captured source CPGs. No target code or dataflow runs.
-@main def exec(cpgFile: String, out: String): Unit = {
+// Fixed, trusted query for captured source CPGs. Deep adds modeled dataflow, never target execution.
+@main def exec(cpgFile: String, out: String, profile: String = "standard"): Unit = {
+  require(Set("standard", "deep")(profile), "Unsupported analysis profile")
+  val deep = profile == "deep"
   val errors = Arr()
   val gaps = Arr()
   val caveats = Arr(
     "Graph facts depend on the selected frontend; absent references or call targets are not proof of dead code.",
     "Unread bindings are review leads only; preserve initializer effects and callback, override and public signature contracts.",
-    "No dataflow, reachability/dead-method inference or target-code execution is performed."
+    "Deep dataflow describes modeled parameter influence, not external taint, feasible execution, dead-method proof or target-code execution."
   )
-  val result = Obj("schema_version" -> 1, "query_version" -> "3", "dataflow" -> "not_run",
+  val result = Obj("schema_version" -> 1, "query_version" -> "4", "dataflow" -> "not_run",
     "errors" -> errors, "gaps" -> gaps, "caveats" -> caveats)
+  def writeResult(value: Value): Unit = {
+    val destination = Paths.get(out)
+    val temporary = Files.createTempFile(destination.toAbsolutePath.getParent, ".pat-query-", ".json")
+    try {
+      Files.writeString(temporary, ujson.write(value))
+      Files.move(temporary, destination, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+        java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+    } finally Files.deleteIfExists(temporary)
+  }
   var truncatedValues = 0L
   def text(value: String, limit: Int = 2048): String = {
     val safe = Option(value).getOrElse("")
@@ -243,7 +259,7 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
       }
     }
     attempt("source_files") {
-      val rows = new Bounded(4000, 256 * 1024)
+      val rows = new Bounded(if (deep) 20000 else 4000, if (deep) 2 * 1024 * 1024 else 256 * 1024)
       cpg.file.foreach(file => if (file.name != "<unknown>" && file.name != "<empty>")
         rows.add(identityRow { Obj("path" -> text(file.name)) }))
       rows.output
@@ -373,7 +389,9 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
         else if (!locatedSource(method)) unlocated += 1
         else counts(method.filename) += 1
       }
-      val rows = new FairRows[Method](counts.toMap, 20000, 6 * 1024 * 1024, 256 * 1024)
+      val rows = new FairRows[Method](counts.toMap, if (deep) 200000 else 20000,
+        if (deep) 48 * 1024 * 1024 else 6 * 1024 * 1024,
+        if (deep) 2 * 1024 * 1024 else 256 * 1024)
       // Adapter contract: captured source is beside cpg.bin in a source directory.
       // Remove this private root before hashing, even when filename is relative.
       val sourceRoot = Paths.get(cpgFile).toAbsolutePath.getParent.resolve("source").normalize.toString
@@ -393,7 +411,7 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
       output
     }
     attempt("calls") {
-      val rows = new Bounded(10000, 8 * 1024 * 1024)
+      val rows = new Bounded(if (deep) 50000 else 10000, if (deep) 24 * 1024 * 1024 else 8 * 1024 * 1024)
       val supported = new ModulePairs("Source-supported call targets, validated by callee REF binding, explicit import or exact dispatch to a static Java declaration; not runtime coverage.")
       val inferred = new ModulePairs("Unvalidated producer CALL-target hypotheses; these are not established module dependencies or runtime calls.")
       val classifications = mutable.Map.empty[String, Long].withDefaultValue(0L)
@@ -514,17 +532,171 @@ import ujson.{Arr, Bool, Null, Num, Obj, Str, Value}
         output
       }
     }
+    if (deep) {
+      // Preserve validated base facts if a later expensive flow pass is killed.
+      // The adapter accepts this distinct checkpoint only with failed process
+      // provenance; a normal final result never carries this marker.
+      val checkpoint = ujson.read(ujson.write(result))
+      checkpoint("checkpoint") = Str("base_before_dataflow")
+      checkpoint("status") = Str("partial")
+      checkpoint("dataflow") = Str("error")
+      checkpoint("dataflow_analysis") = Obj("status" -> "error")
+      checkpoint("errors").arr += Obj("section" -> "dataflow_analysis", "error" -> "InterruptedDataflow")
+      writeResult(checkpoint)
+      val maxDefinitions = 50000
+      val maxCallDepth = 8
+      val stepLimit = 64
+      val pathsPerSink = 64
+      val dataflow = Obj("status" -> "error", "max_definitions" -> maxDefinitions,
+        "max_call_depth" -> maxCallDepth, "maximum_definitions_observed" -> 0,
+        "semantics" -> "joern_default",
+        "scope" -> "method_parameters_to_returns_and_selected_operation_arguments",
+        "methods_total" -> 0, "methods_analyzed" -> 0, "methods_skipped" -> 0,
+        "skipped_methods" -> Obj("status" -> "complete", "count" -> 0, "omitted" -> 0, "rows" -> Arr()),
+        "paths" -> Obj("status" -> "complete", "count" -> 0, "omitted" -> 0,
+          "count_is_lower_bound" -> false, "rows" -> Arr()),
+        "queries" -> Obj("sinks_total" -> 0, "sinks_queried" -> 0, "sinks_omitted" -> 0,
+          "paths_truncated" -> 0, "step_limit" -> stepLimit))
+      result("dataflow_analysis") = dataflow
+      try {
+        val methods = cpg.method.filter(locatedSource).toVector.sortBy(method =>
+          (method.filename, method.lineNumber.getOrElse(0), method.fullName))
+        dataflow("methods_total") = methods.size
+        val skippedIds = mutable.Set.empty[Long]
+        val skipped = new Bounded(20000, 2 * 1024 * 1024)
+        var maximumDefinitions = 0
+        methods.foreach { method =>
+          // Use the producer's actual definition accounting. Its default of 4000
+          // otherwise silently leaves the largest methods without DDG edges.
+          val problem = ReachingDefProblem.create(method)
+          val transfer = problem.transferFunction.asInstanceOf[ReachingDefTransferFunction]
+          val definitions = transfer.gen.valuesIterator.map(_.size).sum
+          maximumDefinitions = math.max(maximumDefinitions, definitions)
+          if (definitions > maxDefinitions) {
+            skippedIds += method.id
+            skipped.add(identityRow { Obj("path" -> text(method.filename),
+              "line" -> line(method.lineNumber), "method" -> text(method.fullName, 4096),
+              "definitions" -> definitions, "reason" -> "definition_limit") })
+          }
+        }
+        dataflow("maximum_definitions_observed") = maximumDefinitions
+        dataflow("methods_skipped") = skippedIds.size
+        dataflow("skipped_methods") = skipped.output
+        val options = new OssDataFlowOptions(maxNumberOfDefinitions = maxDefinitions)
+        new OssDataFlow(options).run(new LayerCreatorContext(cpg))
+        if (!cpg.metaData.overlays.exists(_ == "dataflowOss"))
+          throw new IllegalStateException("Dataflow overlay was not established")
+        dataflow("methods_analyzed") = methods.size - skippedIds.size
+        given EngineContext = EngineContext(config = EngineConfig(maxCallDepth = maxCallDepth))
+        val rows = new Bounded(20000, 8 * 1024 * 1024)
+        val operationNames = Set("print", "println", "printf", "log", "warn", "error", "write", "writeFile",
+          "writeFileSync", "appendFile", "open", "readFile", "readFileSync", "unlink", "remove", "rename",
+          "execute", "executemany", "query", "exec", "execFile", "spawn", "run", "Popen", "system",
+          "eval", "send", "sendall", "fetch", "request", "get", "post", "put", "delete")
+        def owner(node: AstNode): Option[Method] = node match {
+          case method: Method => Some(method)
+          case _ => ancestors(node).collectFirst { case method: Method => method }
+        }
+        def flowNode(node: AstNode): Option[Obj] = owner(node).filter(locatedSource).flatMap { method =>
+          val at = node.lineNumber.filter(_ > 0).orElse(node match {
+            case _: MethodReturn => method.lineNumberEnd.filter(_ > 0).orElse(method.lineNumber)
+            case _ => None
+          })
+          at.map { value => identityRow { Obj("path" -> text(method.filename), "line" -> value,
+            "name" -> text(node match {
+              case parameter: MethodParameterIn => parameter.name
+              case identifier: Identifier => identifier.name
+              case call: Call => call.name
+              case _: MethodReturn | _: Return => "return"
+              case _ => node.label
+            }, 256), "method" -> text(method.fullName, 4096), "node_type" -> node.label) } }
+        }
+        // Reuse captured parameter sources across the graph. Restricting these
+        // to each sink's own method loses caller inputs flowing into a callee
+        // operation whose call result is discarded. Zero-parameter methods can
+        // also contain sinks reached through captured values or returned calls.
+        val parameters = methods.filterNot(method => skippedIds(method.id)).flatMap { method =>
+          method.parameter.filter(parameter => parameter.index > 0 &&
+            parameter.lineNumber.exists(_ > 0) && !Set("self", "this", "cls")(parameter.name))
+        }
+        val parameterIds = parameters.iterator.map(_.id).toSet
+        dataflow("source_parameter_count") = parameters.size
+        var sinksTotal = 0L
+        var sinksQueried = 0L
+        var pathsTruncated = 0L
+        methods.foreach { method =>
+          // METHOD_RETURN also receives synthetic dependencies from assignments
+          // that never reach a returned value. Query actual return statements.
+          val returns = method.ast.isReturn.filter(node => owner(node).exists(_.id == method.id))
+            .map(node => ("parameter_to_return", node: CfgNode)).toVector
+          val operations = method.ast.isCall.filter(call => owner(call).exists(_.id == method.id) &&
+              operationNames(call.name))
+            .flatMap(_.argument.filter(_.argumentIndex > 0)).map(node => ("parameter_to_operation", node: CfgNode))
+            .toVector
+          val sinks = (returns ++ operations).sortBy { case (kind, node) =>
+            (node.lineNumber.getOrElse(Int.MaxValue), kind, node.code) }
+          sinksTotal += sinks.size
+          if (!skippedIds(method.id)) sinks.foreach { case (kind, sink) =>
+            sinksQueried += 1
+            // Cap paths for a single endpoint, never the number of methods
+            // considered; over-limit/unknown paths stay visible in coverage.
+            val paths = Iterator.single(sink).reachableByFlows(parameters).take(pathsPerSink + 1).toVector
+            if (paths.size > pathsPerSink) pathsTruncated += 1
+            paths.take(pathsPerSink).foreach { path =>
+              val elements = path.elements.toVector
+              val mapped = elements.take(stepLimit + 1).map(flowNode)
+              if (elements.size > stepLimit || mapped.exists(_.isEmpty) || mapped.size < 2) pathsTruncated += 1
+              else {
+                val steps = mapped.flatten
+                val source = steps.head
+                val endpoint = steps.last
+                // A source must actually be a captured parameter selected
+                // above; no unknown/imported value is silently classified.
+                if (!parameterIds(elements.head.id) || elements.last.id != sink.id) pathsTruncated += 1
+                else rows.add(Obj("kind" -> kind, "source" -> source, "sink" -> endpoint,
+                  "steps" -> Arr.from(steps),
+                  "interprocedural" -> Bool(steps.map(_("method").str).distinct.size > 1)))
+              }
+            }
+          }
+        }
+        val output = rows.output
+        val incomplete = skippedIds.nonEmpty || pathsTruncated > 0 || output("omitted").num > 0
+        output("count_is_lower_bound") = Bool(pathsTruncated > 0)
+        if (incomplete) output("status") = Str("partial")
+        dataflow("paths") = output
+        dataflow("queries") = Obj("sinks_total" -> Num(sinksTotal.toDouble),
+          "sinks_queried" -> Num(sinksQueried.toDouble),
+          "sinks_omitted" -> Num((sinksTotal - sinksQueried).toDouble),
+          "paths_truncated" -> Num(pathsTruncated.toDouble), "step_limit" -> stepLimit)
+        dataflow("status") = Str(if (incomplete) "partial" else "complete")
+        result("dataflow") = dataflow("status")
+        result("metadata")("overlays") = Arr.from(cpg.metaData.overlays.toVector.distinct.sorted)
+        var reachingEdges = 0L
+        var edgesAfterDataflow = 0L
+        cpg.graph.allEdges.foreach { edge =>
+          edgesAfterDataflow += 1
+          if (edge.label == "REACHING_DEF") reachingEdges += 1
+        }
+        result("metrics")("edge_counts")("REACHING_DEF") = Num(reachingEdges.toDouble)
+        result("metrics")("edges") = Num(edgesAfterDataflow.toDouble)
+      } catch { case NonFatal(error) =>
+        result("dataflow") = Str("error")
+        dataflow("status") = Str("error")
+        errors.value += Obj("section" -> "dataflow_analysis", "error" -> error.getClass.getName)
+      }
+    }
   } catch { case NonFatal(error) =>
     errors.value += Obj("section" -> "load_or_overlays", "error" -> error.getClass.getName)
   } finally {
     result("truncated_values") = Num(truncatedValues.toDouble)
     if (truncatedValues > 0) gaps.value += Str("Overlong source-derived names or paths were truncated; identity checks may reject those rows.")
-    val incompleteSections = Seq("source_files", "methods", "calls", "module_edges", "inferred_module_edges", "unread_bindings").filter { name =>
+    val incompleteSections = Seq("source_files", "methods", "calls", "module_edges", "inferred_module_edges", "unread_bindings", "dataflow_analysis").filter { name =>
       result.obj.get(name).exists(value => value.obj.get("status").exists(_.str != "complete"))
     }
     incompleteSections.foreach(name => gaps.value += Str(s"$name is incomplete or unsupported; inspect its status and omission counts."))
     val partial = errors.value.nonEmpty || truncatedValues > 0 || incompleteSections.nonEmpty
     result("status") = Str(if (partial) "partial" else "complete")
-    Files.writeString(Paths.get(out), ujson.write(result))
+    writeResult(result)
   }
 }

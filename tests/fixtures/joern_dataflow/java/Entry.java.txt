@@ -1,0 +1,29 @@
+final class Entry {
+    static String entry(String payload) {
+        return Service.relay(payload);
+    }
+
+    static String operationEntry(String operationPayload) {
+        Service.relay(operationPayload);
+        return "handled";
+    }
+
+    static String unrelated(String unrelatedPayload) {
+        return "unchanged";
+    }
+
+    static String overwritten(String obsolete, String replacement) {
+        String value = obsolete;
+        value = replacement;
+        return value;
+    }
+
+    static String callback(Object unusedContext) {
+        return "callback contract";
+    }
+
+    static String preserveEffect(Runnable effect) {
+        effect.run();
+        return "initializer must remain";
+    }
+}
