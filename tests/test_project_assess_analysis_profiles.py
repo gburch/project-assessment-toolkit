@@ -63,6 +63,45 @@ def test_equivalent_deep_provider_selection_keeps_scope_but_preserves_provenance
         assert explicit["facts"]["optional_analysis"][name]["analyzer"]["selection"] == "explicit"
 
 
+@pytest.mark.parametrize(
+    "variable,value,limit_key",
+    [("PAT_JOERN_TIMEOUT_SECONDS", "21600", "seconds"), ("PAT_JOERN_HEAP_GIB", "16", "heap_gib")],
+)
+def test_operator_joern_budget_changes_comparison_scope_without_changing_source(
+    tmp_path, monkeypatch, variable, value, limit_key
+):
+    from project_assess.comparison import compare_assessments
+
+    root, service = project(tmp_path)
+    baseline = service.scan(root, analyzers=["joern"])
+    plain = service.scan(root)
+    monkeypatch.setenv(variable, value)
+    changed = service.scan(root, analyzers=["joern"])
+    repeated = service.scan(root, analyzers=["joern"])
+    assert baseline["source"] == changed["source"] == repeated["source"]
+    assert baseline["scope_digest"] != changed["scope_digest"] == repeated["scope_digest"]
+    assert not compare_assessments(baseline, changed, None, None, None)["comparable"]
+    limits = changed["facts"]["collection"]["limits"]["dedicated_analyzer_phases"]["joern"]
+    receipt = changed["facts"]["optional_analysis"]["joern"]
+    assert limits[limit_key] == receipt["limits"][limit_key] == int(value)
+    assert receipt["provenance"]["operator_overrides"][limit_key]["environment_variable"] == variable
+    assert plain["scope_digest"] == service.scan(root)["scope_digest"]
+
+
+def test_explicit_default_joern_budget_preserves_scope_and_records_operator_choice(
+    tmp_path, monkeypatch
+):
+    root, service = project(tmp_path)
+    baseline = service.scan(root, analyzers=["joern"])
+    monkeypatch.setenv("PAT_JOERN_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("PAT_JOERN_HEAP_GIB", "2")
+    explicit = service.scan(root, analyzers=["joern"])
+    assert baseline["scope_digest"] == explicit["scope_digest"]
+    assert baseline["facts"]["optional_analysis"]["joern"]["provenance"]["operator_overrides"] == {}
+    overrides = explicit["facts"]["optional_analysis"]["joern"]["provenance"]["operator_overrides"]
+    assert {key: row["value"] for key, row in overrides.items()} == {"seconds": 120, "heap_gib": 2}
+
+
 def test_java_swift_sarif_uses_shared_evidence_doctor_and_digest_context(tmp_path):
     root, service = project(tmp_path)
     supplied = tmp_path / "findings.sarif"

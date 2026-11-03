@@ -212,7 +212,7 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("metadata launched Java"))
     info = analysis.joern_info()
     assert info["available"] and info["version"] == "4.0.669"
-    assert info["adapter_version"] == "7"
+    assert info["adapter_version"] == "8"
     assert info["query_version"] == "5" and info["dataflow"] == "deep_profile"
     assert qualified["root"] not in json.dumps(info)
     deep = analysis.joern_limits("deep")
@@ -224,6 +224,85 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
         info["javascript_transport"]["sha256"]
         == hashlib.sha256(analysis._ASTGEN_TRANSPORT.encode()).hexdigest()
     )
+
+
+@pytest.mark.parametrize("profile,seconds,heap", [("standard", 120, 2), ("deep", 7200, 8)])
+@pytest.mark.parametrize("timeout_override,heap_override", [(None, None), (21600, None), (None, 16), (21600, 16)])
+def test_host_budget_overrides_are_independent_of_profile_defaults(
+    monkeypatch, profile, seconds, heap, timeout_override, heap_override
+):
+    baseline = analysis.joern_limits(profile)
+    for variable, value in (
+        ("PAT_JOERN_TIMEOUT_SECONDS", timeout_override),
+        ("PAT_JOERN_HEAP_GIB", heap_override),
+    ):
+        if value is not None:
+            monkeypatch.setenv(variable, str(value))
+    limits = analysis.joern_limits(profile)
+    assert baseline["seconds"] == seconds and baseline["heap_gib"] == heap
+    assert limits["seconds"] == (timeout_override or seconds)
+    assert limits["heap_gib"] == (heap_override or heap)
+    assert {key: value for key, value in limits.items() if key not in {"seconds", "heap_gib"}} == {
+        key: value for key, value in baseline.items() if key not in {"seconds", "heap_gib"}
+    }
+
+
+@pytest.mark.parametrize("variable", ["PAT_JOERN_TIMEOUT_SECONDS", "PAT_JOERN_HEAP_GIB"])
+@pytest.mark.parametrize("value", ["", "0", "-1", "1.5", "nan", "inf", "1e309", " 16", "16 ", "true", "1_000", "16g", "16;echo budget-secret", "$(echo budget-secret)"])
+def test_invalid_host_budgets_fail_before_starting_analyzer(monkeypatch, variable, value):
+    monkeypatch.setenv(variable, value)
+    monkeypatch.setattr(analysis, "_run", lambda *a, **k: pytest.fail("invalid budget ran Joern"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("invalid budget started a process"))
+    with pytest.raises(ValueError, match=variable) as raised:
+        analysis.analyze_joern([source()])
+    assert "budget-secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize("variable,value", [("PAT_JOERN_TIMEOUT_SECONDS", "86401"), ("PAT_JOERN_HEAP_GIB", "65")])
+def test_host_budget_overrides_remain_bounded(monkeypatch, variable, value):
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(ValueError, match=variable):
+        analysis.joern_limits("deep")
+
+
+def test_host_budget_controls_process_deadline_heap_and_receipt(qualified, monkeypatch):
+    monkeypatch.setenv("PAT_JOERN_TIMEOUT_SECONDS", "21600")
+    monkeypatch.setenv("PAT_JOERN_HEAP_GIB", "16")
+    monkeypatch.setattr(analysis, "_clock", lambda: 100.0)
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        assert kwargs["stop"] == 21700.0
+        assert "-J-Xmx16g" in argv
+        assert kwargs["env"]["JAVA_OPTS"] == "-Xmx16g -XX:ActiveProcessorCount=2 -Xss32m"
+        assert kwargs["env"]["_JAVA_OPTIONS"].startswith("-Xmx16g ")
+        assert not {"PAT_JOERN_TIMEOUT_SECONDS", "PAT_JOERN_HEAP_GIB"} & kwargs["env"].keys()
+        status = fake_run(argv, **kwargs)
+        if output := kwargs.get("output"):
+            raw = json.loads(output.read_text())
+            raw["metadata"]["max_heap_bytes"] = 16 * 1024**3
+            output.write_text(json.dumps(raw))
+        return status
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified, analysis_profile="deep")
+    assert len(calls) == 2 and result["status"] == "complete"
+    assert result["limits"]["seconds"] == 21600 and result["limits"]["heap_gib"] == 16
+    assert result["provenance"]["operator_overrides"] == {
+        "seconds": {
+            "environment_variable": "PAT_JOERN_TIMEOUT_SECONDS",
+            "value": 21600,
+            "profile_default": 7200,
+        },
+        "heap_gib": {
+            "environment_variable": "PAT_JOERN_HEAP_GIB",
+            "value": 16,
+            "profile_default": 8,
+        },
+    }
+    assert result["coverage"]["batches"][0]["model_metadata"]["max_heap_bytes"] == 16 * 1024**3
+    assert not result["configuration"]["project_config_loaded"]
 
 
 @pytest.mark.parametrize(
@@ -508,7 +587,18 @@ def test_invalid_model_suppression_counts_do_not_become_validated_output(
     assert result["coverage"]["batches"][0]["status"] == "unvalidated_output_or_source"
 
 
-@pytest.mark.parametrize("config", [{"script": "project.sc"}, {"argv": []}, False])
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"script": "project.sc"},
+        {"argv": []},
+        {"seconds": 21600},
+        {"heap_gib": 16},
+        {"PAT_JOERN_TIMEOUT_SECONDS": "21600"},
+        {"PAT_JOERN_HEAP_GIB": "16"},
+        False,
+    ],
+)
 def test_caller_cannot_select_scripts_or_commands(config):
     with pytest.raises(ValueError):
         analysis.analyze_joern([], config=config)
@@ -603,6 +693,24 @@ def test_effective_runtime_limits_are_verified_not_inferred_from_requested_flags
     monkeypatch.setattr(analysis, "_run", run)
     result = analysis.analyze_joern([source()], snapshot=qualified)
     assert result["status"] == "partial" and result["summary"]["methods"] is None
+    assert result["candidate_index"] == []
+
+
+def test_runtime_metadata_cannot_exceed_operator_selected_heap(qualified, monkeypatch):
+    monkeypatch.setenv("PAT_JOERN_HEAP_GIB", "16")
+
+    def run(argv, *, output=None, **kwargs):
+        if output:
+            raw = raw_result("src/app.py")
+            raw["metadata"]["max_heap_bytes"] = 16 * 1024**3 + 1
+            output.write_text(json.dumps(raw))
+        return "complete"
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified)
+    assert result["limits"]["heap_gib"] == 16
+    assert result["status"] == "partial" and result["summary"]["methods"] is None
+    assert result["coverage"]["batches"][0]["status"] == "unvalidated_output_or_source"
     assert result["candidate_index"] == []
 
 

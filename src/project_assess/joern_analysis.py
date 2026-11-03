@@ -26,7 +26,7 @@ from .joern_bindings import BindingCountercheck
 from .joern_dataflow import normalize_dataflow
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "7"
+VERSION = "8"
 QUERY_VERSION = "5"
 JOERN_VERSION = "4.0.669"
 QUERY_PATH = Path(__file__).parent / "resources" / "joern.sc"
@@ -219,9 +219,13 @@ for row in settings["files"]:
 
 
 def joern_limits(analysis_profile):
+    return _joern_configuration(analysis_profile)[0]
+
+
+def _joern_configuration(analysis_profile):
     if not isinstance(analysis_profile, str) or analysis_profile not in _PROFILES:
         raise ValueError("Unknown analysis profile")
-    return {
+    limits = {
         **_PROFILES[analysis_profile],
         "thread_stack_mib": 32 if analysis_profile == "deep" else None,
         "active_processors": 2,
@@ -250,6 +254,28 @@ def joern_limits(analysis_profile):
         },
         "deadline_mode": "dedicated hard subprocess deadline; bounded normalization",
     }
+    overrides = {}
+    for name, field, maximum in (
+        ("PAT_JOERN_TIMEOUT_SECONDS", "seconds", 86_400),
+        ("PAT_JOERN_HEAP_GIB", "heap_gib", 64),
+    ):
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        if (
+            not isinstance(raw, str)
+            or len(raw) > len(str(maximum))
+            or re.fullmatch(r"[1-9][0-9]*", raw) is None
+            or int(raw) > maximum
+        ):
+            raise ValueError(f"{name} must be a positive decimal integer from 1 to {maximum}")
+        limits[field] = int(raw)
+        overrides[field] = {
+            "environment_variable": name,
+            "value": limits[field],
+            "profile_default": _PROFILES[analysis_profile][field],
+        }
+    return limits, overrides
 
 
 def _hash_file(path):
@@ -1122,7 +1148,7 @@ def analyze_joern(
 ):
     if config is not None and (not isinstance(config, dict) or config):
         raise ValueError("Joern accepts no caller scripts, arguments or project configuration")
-    limits = joern_limits(analysis_profile)
+    limits, operator_overrides = _joern_configuration(analysis_profile)
     began = _clock()
     if deadline is not None and (type(deadline) not in {int, float} or not math.isfinite(deadline)):
         raise ValueError("Analyzer deadline must be finite")
@@ -1169,6 +1195,7 @@ def analyze_joern(
             "javascript_type_maps": "not_run",
         },
         "provenance": {
+            "operator_overrides": operator_overrides,
             "snapshot": {
                 key: snapshot[key]
                 for key in ("revision", "manifest_digest")
