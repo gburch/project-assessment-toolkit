@@ -2,6 +2,9 @@
 
 PAT (Project Assessment Toolkit) is a standalone local tool for assessing software projects. The distribution is `pat-assess`; the canonical CLI is `pat`, also available as `project-assess`. The assessment skill is `project-assess` and the Python package is `project_assess`. No AI service is required: the tool collects facts, and a person or optional agent adds evidence-backed judgment. Scans do not execute the assessed repository or assign ratings from file counts.
 
+See [concrete use cases](USE_CASES.md) for CI review triggers, third-party evaluation,
+changes in intended purpose, Evolve roadmaps and steering an optional AI maintainer.
+
 Each dimension has two independent integer ratings from 0 to 5:
 
 | Dimension | Capability examples | Excess burden examples |

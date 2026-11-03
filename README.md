@@ -9,6 +9,7 @@
 </p>
 <p align="center">
   <a href="docs/PROJECT_ASSESS.md">Guide</a> ·
+  <a href="docs/USE_CASES.md">Use cases</a> ·
   <a href="CONTRIBUTING.md">Contribute</a> ·
   <a href="https://github.com/gburch/project-assessment-toolkit/issues">Issues</a> ·
   <a href="SECURITY.md">Security</a>
