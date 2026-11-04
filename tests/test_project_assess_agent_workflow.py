@@ -307,6 +307,12 @@ def test_brief_and_doctor_stay_inside_hard_budgets_on_a_large_project(tmp_path):
     assert "goal_alignment" in doctor and "plan" not in doctor["goal_alignment"]
 
 
+def test_brief_keeps_analyzer_status_when_budget_omits_their_detail(scanned):
+    service, _, snapshot = scanned
+    brief = service.overview(snapshot["id"])
+    assert set(brief["analyzer_status"]) == set(snapshot["facts"].get("optional_analysis", {}))
+
+
 def test_source_context_accepts_an_exact_path(scanned):
     service, _, snapshot = scanned
     result = service.source_context(snapshot["id"], path="src/app.py", end_line=1)
