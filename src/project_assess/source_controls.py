@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 
 from .static_analysis import source_role
 
-VERSION = "2"
+VERSION = "3"
 DIMENSIONS = ("security", "delivery", "operability", "extensibility", "performance")
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 _SCOPES = (*_FUNCTIONS, ast.ClassDef)
@@ -51,6 +51,23 @@ _CLOCKS = {
     for name in ("perf_counter", "monotonic", "time", "process_time")
     for suffix in ("", "_ns")
 }
+_HANDLER_LOGGING = {
+    "capture_exception",
+    "capture_message",
+    "critical",
+    "debug",
+    "error",
+    "exception",
+    "fatal",
+    "format_exc",
+    "info",
+    "log",
+    "print",
+    "print_exc",
+    "warn",
+    "warning",
+}
+_HANDLER_COUNTERS = {"add", "count", "gauge", "inc", "incr", "increment", "observe", "record"}
 _CAVEAT = "Observed syntax and conservative name binding only; controls may be bypassed, intentional or ineffective. Runtime, complete call resolution and absence claims are unsupported."
 
 
@@ -190,6 +207,63 @@ def _inventory(tree, limit):
                     (child, scope, repeated, in_handler or isinstance(node, ast.ExceptHandler))
                 )
     return rows, scopes, bool(stack)
+
+
+def _call_terminal(function):
+    """Read a call's final name even through a chain such as get_logger().error()."""
+    if isinstance(function, ast.Attribute):
+        return function.attr
+    return function.id if isinstance(function, ast.Name) else ""
+
+
+def _handler_outcome(node):
+    """Classify a handler's direct effects; a silent outcome stays a lead, never a finding."""
+    pending, nodes = list(node.body), []
+    while pending:
+        current = pending.pop()
+        nodes.append(current)
+        if not isinstance(current, _SCOPES):
+            pending.extend(ast.iter_child_nodes(current))
+    terminals = [_call_terminal(item.func) for item in nodes if isinstance(item, ast.Call)]
+    logs = any(terminal in _HANDLER_LOGGING for terminal in terminals)
+    raises = any(isinstance(item, ast.Raise) for item in nodes)
+    forwards = any(
+        isinstance(item, ast.Name) and item.id == node.name and isinstance(item.ctx, ast.Load)
+        for item in nodes
+    )
+    effects, simple = set(), True
+    for statement in node.body:
+        if isinstance(statement, ast.AugAssign):
+            effects.add("count")
+        elif isinstance(statement, ast.Assign):
+            effects.add("flag")
+        elif isinstance(statement, ast.Continue):
+            effects.add("continue")
+        elif isinstance(statement, (ast.Pass, ast.Break)):
+            effects.add("pass" if isinstance(statement, ast.Pass) else "break")
+        elif isinstance(statement, ast.Return):
+            effects.add("return")
+        elif (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and _call_terminal(statement.value.func) in _HANDLER_COUNTERS
+        ):
+            effects.add("count")
+        else:
+            simple = False
+    types = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
+    broad = any(item is None or _name(item) in {"Exception", "BaseException"} for item in types)
+    return {
+        "logs": logs,
+        "raises": raises,
+        "only": sorted(effects),
+        "silent": simple
+        and not logs
+        and not raises
+        and not forwards
+        and all(terminal in _HANDLER_COUNTERS for terminal in terminals)
+        and (broad or bool(effects & {"count", "continue"})),
+    }
 
 
 def analyze_python_controls(path, tree, node_limit=200_000, signal_limit=64):
@@ -400,6 +474,19 @@ def analyze_python_controls(path, tree, node_limit=200_000, signal_limit=64):
                         maxsize="implicit_default",
                     )
         if isinstance(node, ast.ExceptHandler):
+            outcome = _handler_outcome(node)
+            if outcome["silent"]:
+                emit(
+                    "operability.silent_exception_handler",
+                    ["operability"],
+                    node,
+                    scope,
+                    loop,
+                    handler,
+                    "name_hint",
+                    exception_type=(_name(node.type) or "bare_or_composite")[:160],
+                    only=outcome["only"],
+                )
             emit(
                 "operability.exception_boundary",
                 ["operability"],
@@ -413,6 +500,8 @@ def analyze_python_controls(path, tree, node_limit=200_000, signal_limit=64):
                 and all(isinstance(statement, ast.Pass) for statement in node.body),
                 direct_return=any(isinstance(statement, ast.Return) for statement in node.body),
                 direct_raise=any(isinstance(statement, ast.Raise) for statement in node.body),
+                logs=outcome["logs"],
+                raises=outcome["raises"],
                 bare_reraise=any(
                     isinstance(statement, ast.Raise) and statement.exc is None
                     for statement in node.body

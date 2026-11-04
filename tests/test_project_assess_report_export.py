@@ -325,7 +325,17 @@ def test_private_bundle_is_complete_same_snapshot_and_relocatable(report, tmp_pa
     assert result["source_digest"] == report["assessment"]["source"]["manifest_digest"]
     assert result["goal_revision"] == report["goals"]["revision"]
     assert set(result["badges"]) == {"summary", *DIMENSIONS}
-    assert json.loads(Path(result["json"]).read_text()) == report
+    exported = json.loads(Path(result["json"]).read_text())
+    assert result["review_status"] == "reviewed" and result["warnings"] == []
+    assert exported["export"] == {"review_status": "reviewed", "evidence_bodies": "omitted"}
+    assert all(
+        "stats" not in entry and "excerpt" not in entry
+        for entry in exported["assessment"]["evidence"]
+    )
+    assert {entry["id"] for entry in exported["assessment"]["evidence"]} == {
+        entry["id"] for entry in report["assessment"]["evidence"]
+    }
+    assert exported["review"] == report["review"]
     assert "[Interactive 3D report](report.html)" in Path(result["markdown"]).read_text()
     for name, detail in result["files"].items():
         path = folder / name
@@ -363,7 +373,7 @@ def test_concurrent_exports_are_complete_and_unique(report, tmp_path):
     assert len({result["directory"] for result in results}) == 4
     assert len(list((state / "exports").iterdir())) == 4
     for result in results:
-        assert json.loads(Path(result["json"]).read_text()) == report
+        assert json.loads(Path(result["json"]).read_text())["review"] == report["review"]
         assert all((Path(result["directory"]) / name).is_file() for name in result["files"])
 
 

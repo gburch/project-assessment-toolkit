@@ -14,18 +14,20 @@ from .collector import (
     _redact,
 )
 
+SOURCE_CONTEXT_KINDS = {
+    "python",
+    "javascript",
+    "source",
+    "documentation",
+    "manifest",
+    "configuration",
+}
+
 
 def _matched_lines(root, entry):
     """Return redacted lines only after checking the complete captured file."""
     path = PurePosixPath(entry["path"])
-    if entry["kind"] not in {
-        "python",
-        "javascript",
-        "source",
-        "documentation",
-        "manifest",
-        "configuration",
-    }:
+    if entry["kind"] not in SOURCE_CONTEXT_KINDS:
         raise ValueError("Source context requires a captured source evidence ID")
     if path.is_absolute() or not path.parts or any(part in {"..", "."} for part in path.parts):
         raise ValueError("Source path is not a captured relative path")

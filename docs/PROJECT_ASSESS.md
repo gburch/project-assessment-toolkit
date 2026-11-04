@@ -189,6 +189,10 @@ HTML, Markdown, JSON and summary plus eight dimension SVG badge paths. Each expo
 creates a new private directory beneath `STATE/exports`; it never overwrites a
 previous report or writes into an assessed project. Display the badges and the
 substantive assessment in the response, with the interactive HTML link alongside.
+`report.md` leads with the verdict, scorecard, findings and plan; supporting detail
+follows under Appendices. `report.json` lists evidence without bodies unless you pass
+`--include-evidence`. Exporting before a review succeeds, but prints a warning, sets
+`review_status: unreviewed` in the manifest and `report.json`, and marks the report.
 Keep assessed source outside the state directory too; state and its exports are
 reserved for PAT's own writes.
 
@@ -243,14 +247,24 @@ uv run --locked pat --state-dir /path/outside/repos/assessment-state evidence-qu
 uv run --locked pat --state-dir /path/outside/repos/assessment-state evidence-query ASSESSMENT_ID --view candidates --limit 20
 uv run --locked pat --state-dir /path/outside/repos/assessment-state evidence-query ASSESSMENT_ID --view burden --dimension maintainability --limit 20
 uv run --locked pat --state-dir /path/outside/repos/assessment-state source-context ASSESSMENT_ID EVIDENCE_ID --line 120 --end-line 160
+uv run --locked pat --state-dir /path/outside/repos/assessment-state source-context ASSESSMENT_ID --path src/app.py --line 120 --end-line 160
 uv run --locked pat --state-dir /path/outside/repos/assessment-state doctor ASSESSMENT_ID
 uv run --locked pat --state-dir /path/outside/repos/assessment-state evolve ASSESSMENT_ID
 uv run --locked pat --state-dir /path/outside/repos/assessment-state rubric
 uv run --locked pat --state-dir /path/outside/repos/assessment-state review-template ASSESSMENT_ID --mode fresh
+uv run --locked pat review-schema
+uv run --locked pat --state-dir /path/outside/repos/assessment-state review-template ASSESSMENT_ID --full
+uv run --locked pat --state-dir /path/outside/repos/assessment-state review ASSESSMENT_ID --input /path/outside/repos/review.json --check
 uv run --locked pat --state-dir /path/outside/repos/assessment-state challenge-template ASSESSMENT_ID --input /path/outside/repos/review.json
 uv run --locked pat --state-dir /path/outside/repos/assessment-state review ASSESSMENT_ID --input /path/outside/repos/review.json
 uv run --locked pat --state-dir /path/outside/repos/assessment-state serve
 ```
+
+`review --check` runs every final check, saves nothing and exits 2 with all failing burden dimensions, fields and IDs. `challenge-template` applies the same checks except the challenge's own binding, so a draft that passes needs no reviewer rerun for a check it could have failed earlier. `review-schema` is the exact contract; `review-template --full` includes each optional section.
+
+`scan --brief`, `report --brief`, `doctor` and `challenge-template` have hard size budgets. When a view would exceed its budget, its least useful sections become `{omitted_for_budget, chars, read_with}` references and `output_budget` lists them. `report ID --section NAME` reads one omitted section of a brief. `doctor --full` returns the unbounded form. An empty `candidates` query adds a `hint` when another view reports that kind.
+
+`scan` prints each phase, including Joern stages, to stderr with elapsed time and repeats the current phase every 30 seconds. Stdout stays JSON; MCP and browser use print nothing.
 
 Start with `info` and brief output rather than dumping a large report into an agent's context. Installation identity and available instruction hashes do not prove which instructions an agent read. `evidence-query` supports index, details, candidates, snippets, graph, hotspots, coverage, provenance, areas, area-dependencies, controls and burden views; narrow by supported `--path`, `--role`, `--kind`, `--candidate-kind` or `--dimension` filters. Follow `next_offset` with `--offset`; `--limit` and `--max-chars` bound each response. Full `report`/`evidence` exports remain available. Captured snippets are redacted, bounded windows; `source-context` reads another bounded range only when current complete file bytes match that snapshot's digest, otherwise rescan or locate the matching source. None of these operations executes target code.
 
@@ -383,6 +397,12 @@ The read-only MCP tool `get_badge(assessment_id, dimension="summary")` returns t
 
 Exports omit private evidence content, rationale and local paths, but publish ratings, assessment date, confidence, burden basis, source revision/digest and assessment metadata. Inspect the artifact before sharing it. Badges reflect the saved assessment and review: they have no live host or automatic review, and only update when regenerated. To reflect changed code, scan and review it first, then export the new assessment. Unknown ratings remain unknown.
 
+### Source roles
+
+`source_role` is a transparent heuristic that a reviewer can correct. Minified or hashed build output (`.min.js`, `index-BxY12z3a.js`, long-line bundles) is `generated_hint` with an unknown role. `src`, `lib` or `app` beneath a nested manifest such as `console/package.json` is production, unless the path sits under an example, sample, fixture or demo directory.
+
+Correct a project's roles from outside its repository with `scan ROOT --role-overrides FILE`, where the file holds `{"schema_version": 1, "rules": [{"path": "console/*", "role": "production"}]}`. Roles are `production`, `test`, `tooling`, `unknown` or `generated`; the first matching glob wins and the rules are part of the scope digest. `--display-name` names the report; otherwise the origin repository name, then the directory name, is used.
+
 ## Doctor and Evolve
 
 `doctor ASSESSMENT_ID` groups captured static-analysis candidates into **reuse**, **quality** and **efficiency**, with source locations, evidence references and suggested verification. Its bounded sample shares space across evidence families; use `--limit 20` for a compact first pass and `evidence-query` for the larger captured index. The Python equivalent is `AssessmentService.doctor(assessment_id)`; the same read-only operation is available over MCP. It reads the saved snapshot without executing or editing the assessed project. Missing facts are reported as not collected; rescan when needed.
@@ -427,13 +447,14 @@ PAT uses Vulture's [`scan` and `get_unused_code` API](https://github.com/jendrik
 Deep requests a fixed [Joern 4.0.669](https://github.com/joernio/joern/releases/tag/v4.0.669) adapter for captured Python, JavaScript/TypeScript and Java source; standard scans select it with `--analyzer joern`. Swift is unsupported and is not invoked; metadata reports `unqualified_languages` and scans retain an explicit unsupported gap. Prepare a trusted installation outside the assessed project, with [JDK 21](https://github.com/joernio/joern/blob/v4.0.669/README.md#requirements), then configure its absolute roots in PAT's environment:
 
 ```bash
+uv run --locked pat setup-joern /absolute/path/to/tools  # optional: verified 1.8 GiB download
 export PAT_JOERN_HOME=/absolute/path/to/joern-cli
 export PAT_JOERN_JAVA_HOME=/absolute/path/to/jdk-home
 uv run --locked pat analyzers
 uv run --locked pat --state-dir /path/outside/repos/assessment-state scan /path/to/project --analysis-profile deep --brief
 ```
 
-Deep requests both fixed providers without extra flags. Standard scans can select `--analyzer joern` and repeat `--analyzer vulture`. The UI shows the providers included by Deep and preserves manual Standard selection. No Python extra installs Joern or its JDK; PAT never downloads them during scanning. Joern remains a separate [Apache-2.0-licensed tool](https://github.com/joernio/joern/blob/v4.0.669/LICENSE), with separate JDK distribution terms.
+Deep requests both fixed providers without extra flags. Standard scans can select `--analyzer joern` and repeat `--analyzer vulture`. The UI shows the providers included by Deep and preserves manual Standard selection. No Python extra installs Joern or its JDK; PAT never downloads them during scanning. `setup-joern` is the one explicit download: it fetches the pinned release asset for this platform and checks its SHA-256 before extracting. The JDK remains yours to install. Joern remains a separate [Apache-2.0-licensed tool](https://github.com/joernio/joern/blob/v4.0.669/LICENSE), with separate JDK distribution terms.
 
 The requested adapter stages only bounded captured source in a private temporary workspace and runs PAT's bundled query. It does not run assessed code, builds, dependency installers, project configuration, scripts or plugins. Execution requires a working `sandbox-exec` on macOS or `bwrap` on Linux; missing tools or unavailable sandboxing produce explicit unavailable/unsupported evidence. It does not fall back to unsandboxed execution or arbitrary user queries.
 

@@ -9,12 +9,18 @@ import subprocess
 import time
 from collections import Counter
 from datetime import datetime
+from pathlib import PurePosixPath
 
-VERSION = "1"
+from .static_analysis import source_role
+
+VERSION = "2"
 MAX_COMMITS = 30
 MAX_OUTPUT_BYTES = 512 * 1024
 MAX_PATHS_PER_COMMIT = 128
 MAX_COCHANGES = 2000
+MAX_DELETION_COMMITS = 200
+MAX_DELETED_DOCUMENTS = 50
+_DOCUMENT_SUFFIXES = {".md", ".mdx", ".mdc", ".rst", ".adoc", ".txt"}
 _OBJECT_ID = re.compile(r"[0-9a-f]{40,64}")
 _CAVEAT = (
     "Bounded local first-parent commit metadata, not required edit sites, effort, runtime cost "
@@ -97,6 +103,63 @@ def _parse_history(payload):
     return rows
 
 
+def _deleted_documents(prefix, environment, current, tip, deadline, gaps):
+    """Record paths only; deleted content is never read or retained."""
+    try:
+        payload = _read_git(
+            prefix,
+            environment,
+            [
+                "log",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-show-signature",
+                "--no-notes",
+                "--find-renames",
+                "--diff-filter=D",
+                "--first-parent",
+                "--diff-merges=first-parent",
+                "-z",
+                "--format=%x00%H%x00%cI%x00%P%x00",
+                "--name-only",
+                f"--max-count={MAX_DELETION_COMMITS}",
+                tip,
+                "--",
+            ],
+            deadline,
+            MAX_OUTPUT_BYTES,
+        )
+        rows = _parse_history(payload)
+    except (OSError, UnicodeError, ValueError, subprocess.TimeoutExpired):
+        gaps.append("Deleted-document history could not be read within its bounds")
+        return [], 0
+    found = {}
+    for row in rows:
+        for path in row["paths"]:
+            role = source_role(path)
+            if (
+                PurePosixPath(path).suffix.lower() in _DOCUMENT_SUFFIXES
+                and path not in current
+                and not role["vendor_hint"]
+                and not role["generated_hint"]
+            ):
+                found.setdefault(
+                    path,
+                    {
+                        "path": path,
+                        "deleted_at": row["committed_at"],
+                        "revision": row["revision"],
+                    },
+                )
+    ordered = sorted(
+        found.values(), key=lambda item: (item["deleted_at"], item["path"]), reverse=True
+    )
+    if len(ordered) > MAX_DELETED_DOCUMENTS:
+        gaps.append("Deleted-document retention is partial")
+    return ordered[:MAX_DELETED_DOCUMENTS], max(0, len(ordered) - MAX_DELETED_DOCUMENTS)
+
+
 def collect_change_history(
     prefix,
     environment,
@@ -123,6 +186,7 @@ def collect_change_history(
         "head_observed": None,
         "commits": [],
         "cochanges": [],
+        "deleted_documents": [],
         "coverage": {
             "selection": "local_first_parent_HEAD",
             "commit_limit": max_commits,
@@ -252,5 +316,9 @@ def collect_change_history(
         {"paths": list(pair), "commits": count}
         for pair, count in sorted(pairs.items(), key=lambda item: (-item[1], item[0]))
     ]
+    result["deleted_documents"], omitted = _deleted_documents(
+        prefix, environment, known, tip, deadline, result["gaps"]
+    )
+    coverage["deleted_documents_omitted"] = omitted
     result["status"] = "partial" if result["gaps"] else "complete"
     return result

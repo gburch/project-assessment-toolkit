@@ -28,11 +28,13 @@ MAX_REFERENCES = 1000
 MAX_COMMAND_REFERENCES = 200
 MAX_AUTHORITY_CLAIMS = 100
 MAX_MAINTENANCE_LEADS = 200
-DRIFT_VERSION = "1"
+DRIFT_VERSION = "2"
 _PATH_REFERENCE = re.compile(
     r"(?<![\w/.-])(?:[\w.-]+/)*[\w.-]+\.(?:md|mdx|mdc|rst|adoc|py|js|jsx|ts|tsx|java|swift|go|rs|sh|json|toml|ya?ml|ini|cfg)(?![\w/.-])",
     re.I,
 )
+_MARKDOWN_LINK = re.compile(r"\[[^\]\n]*\]\(\s*(?:<([^>\n]*)>|([^)\s]*))(?:\s+[\"'][^)\n]*)?\s*\)")
+_REFERENCE_LINK = re.compile(r"\[[^\]\n]*\]\[[^\]\n]*\]")
 _SCRIPT_COMMAND = re.compile(
     r"^(?:\$\s*)?(?:npm|pnpm)(?:\s+--prefix\s+(?P<prefix>[\w./-]+))?\s+run\s+(?P<script>[\w:-]+)(?:\s|$)"
 )
@@ -57,7 +59,30 @@ def _document_priority(path):
     return (rank, path)
 
 
-def _path_check(path, raw, captured, inventory):
+def _literal_path_text(path, line):
+    """A Markdown link's label is prose: only its target asserts a path."""
+    if PurePosixPath(path).suffix.lower() not in {".md", ".mdx", ".mdc"}:
+        return line
+
+    # Path checks cannot express a target with spaces, and a fragment of one is no claim.
+    def target(match):
+        value = match.group(1) if match.group(1) is not None else match.group(2)
+        return " " if " " in value else f" {value} "
+
+    return _REFERENCE_LINK.sub(" ", _MARKDOWN_LINK.sub(target, line))
+
+
+def _path_suffixes(paths):
+    """Index each trailing path so a partial mention can be matched to one real file."""
+    result = defaultdict(list)
+    for path in sorted(paths):
+        parts = path.split("/")
+        for index in range(1, len(parts)):
+            result["/".join(parts[index:])].append(path)
+    return result
+
+
+def _path_check(path, raw, captured, inventory, suffixes=None):
     targets = {raw, posixpath.normpath(posixpath.join(posixpath.dirname(path), raw))}
     targets = {
         target
@@ -69,6 +94,9 @@ def _path_check(path, raw, captured, inventory):
         status = "captured" if len(matches) == 1 else "ambiguous_captured_target"
     elif inventory is not None and (matches := sorted(targets.intersection(inventory))):
         status = "present_not_captured" if len(matches) == 1 else "ambiguous_inventory_target"
+    elif suffixes is not None and len(suffixes.get(raw, ())) == 1:
+        # `sso.py` naming src/auth/sso.py is a loose reference, not a broken one.
+        matches, status = list(suffixes[raw]), "partial_path_match"
     else:
         matches = sorted(targets)
         status = (
@@ -228,6 +256,7 @@ def _reference_evidence(
     path_checks, path_observed, authority_claims, authority_observed = [], 0, [], 0
     commands_observed = 0
     inventory = set(inventory_paths) if inventory_paths is not None else None
+    suffixes = _path_suffixes(captured | (inventory or set()))
     seen_paths = set()
 
     def add(row):
@@ -257,11 +286,12 @@ def _reference_evidence(
                         "basis": "declared authority hint, not verified authority",
                     }
                 )
-            for match in _PATH_REFERENCE.finditer(content):
+            literal = _literal_path_text(path, content)
+            for match in _PATH_REFERENCE.finditer(literal):
                 raw = match.group()
                 signature = (path, line, raw)
                 # URL/variable fragments are not literal local file assertions.
-                token = content[max(0, match.start() - 200) : match.end()].rsplit(maxsplit=1)[-1]
+                token = literal[max(0, match.start() - 200) : match.end()].rsplit(maxsplit=1)[-1]
                 if signature not in seen_paths and not any(
                     marker in token for marker in ("://", "${", "{{", "*", "<")
                 ):
@@ -272,7 +302,7 @@ def _reference_evidence(
                             {
                                 "path": path,
                                 "line": line,
-                                **_path_check(path, raw, captured, inventory),
+                                **_path_check(path, raw, captured, inventory, suffixes),
                                 "agentGuidance": is_agent_guidance(path),
                                 "basis": "literal path compared with captured and supplied inspected inventory; exclusions and physical existence remain unverified",
                             }

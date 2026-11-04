@@ -495,20 +495,21 @@ def service_draft(tmp_path):
 
 
 def complete_service_challenge(service, assessment, review):
-    packet = service.challenge_template(assessment["id"], review)
+    # These tests inspect the final gate on drafts the earlier gates would refuse.
+    digest = service.check_review(assessment["id"], review)["draft_digest"]
     review["challenge"] = {
         "schema_version": 1,
         "status": "completed",
         "reviewer_id": "challenger",
         "independence": "declared",
-        "draft_digest": packet["draft_digest"],
+        "draft_digest": digest,
         "summary": "Independently inspected the testing scope, source trace and experience limits.",
         "evidence_ids": review["ratings"]["testing"]["evidence_ids"],
         "burden_dimensions": ["testing"],
         "gaps": ["Experience and independence remain attributed declarations."],
         "items": [],
     }
-    return packet
+    return {"draft_digest": digest}
 
 
 def rows(service):
@@ -523,7 +524,8 @@ def test_service_prepares_high_draft_before_challenge_and_accepts_exact_final_su
     service_draft,
 ):
     service, assessment, review = service_draft
-    packet = complete_service_challenge(service, assessment, review)
+    packet = service.challenge_template(assessment["id"], review)
+    complete_service_challenge(service, assessment, review)
     assert packet["draft_digest"] == _draft_digest(assessment, review)
     assert rows(service) == (0, 0)
     saved = service.submit_review(assessment["id"], review, request_id="supported-high")

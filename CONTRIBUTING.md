@@ -46,6 +46,8 @@ Use a **new directory outside the checkout**. The command builds one wheel, expo
 
 `receipt.json` records the source revision/manifest, wheel digest, checks and any failed step. A pass requires source identity to remain unchanged. Retain the wheel, constraints and private receipt together; this is a local proof, not publication or deployment. A missing offline dependency fails rather than downloading it. `--allow-dirty` is only for development rehearsals and labels the receipt accordingly; it does not prove a committed release. See the [update and rollback procedure](docs/PROJECT_ASSESS.md#local-state-and-updates) before changing an installation or real state.
 
+Each merged version bump is a release: tag its commit `vX.Y.Z` so `pat info` and "latest" have a fixed reference. `pat info` reports `source_revision`, how it was established (`git_checkout` or `embedded_at_build`), and for a checkout whether tracked files are `dirty` and how far it is `behind_origin_main` by local refs.
+
 ## Preserve the boundaries
 
 - Keep scans read-only: do not execute assessed code, import its plugins, install its dependencies or contact its services. Separate test-value runtime collectors run only when explicitly requested.

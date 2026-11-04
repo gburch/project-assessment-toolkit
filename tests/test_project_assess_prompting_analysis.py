@@ -25,7 +25,7 @@ def counts(result):
 
 
 @pytest.mark.parametrize("validator", ["Draft7Validator", "Draft202012Validator"])
-def test_validator_construction_is_a_contract_hint_without_a_model_call(validator):
+def test_validator_without_model_use_is_not_an_output_contract(validator):
     result = analysis.analyze_prompting(
         [
             source(
@@ -34,8 +34,50 @@ def test_validator_construction_is_a_contract_hint_without_a_model_call(validato
             )
         ]
     )
-    assert counts(result)["output_contract"] == 1
+    assert counts(result)["output_contract"] == 0
+    assert result["coverage"]["schema_validation_without_model_context"] == 1
     assert counts(result)["model_invocation"] == counts(result)["model_client_setup"] == 0
+
+
+def test_validator_beside_model_use_is_an_output_contract():
+    result = analysis.analyze_prompting(
+        [
+            source(
+                "src/agent/check.py",
+                "from jsonschema import validate\nvalidate(reply, schema)\n",
+            ),
+            source(
+                "src/agent/model.py",
+                "import anthropic\nclient = anthropic.Anthropic()\n",
+            ),
+            source(
+                "src/billing/rules.py",
+                "from jsonschema import validate\nvalidate(invoice, schema)\n",
+            ),
+        ]
+    )
+    assert counts(result)["output_contract"] == 1
+    assert [row["path"] for row in result["signals"] if row["kind"] == "output_contract"] == [
+        "src/agent/check.py"
+    ]
+    assert result["coverage"]["schema_validation_without_model_context"] == 1
+    checked = next(
+        row for row in result["coverage"]["files"] if row["path"] == "src/agent/check.py"
+    )
+    assert checked["signal_counts"] == {"output_contract": 1}
+
+
+def test_validator_in_a_sibling_package_directory_is_an_output_contract():
+    result = analysis.analyze_prompting(
+        [
+            source(
+                "src/pkg/schemas/output.py", "from jsonschema import validate\nvalidate(a, b)\n"
+            ),
+            source("src/pkg/llm/model.py", "import anthropic\nclient = anthropic.Anthropic()\n"),
+        ]
+    )
+    assert counts(result)["output_contract"] == 1
+    assert result["coverage"]["schema_validation_without_model_context"] == 0
 
 
 def test_guidance_can_be_development_or_product_instruction_without_runtime_grade():

@@ -25,6 +25,7 @@ from .joern_bindings import MAX_BYTES as BINDING_BYTES
 from .joern_bindings import MAX_NODES as BINDING_NODES
 from .joern_bindings import BindingCountercheck
 from .joern_dataflow import normalize_dataflow
+from .progress import report as report_progress
 from .static_analysis import _retained_candidates, source_role
 
 VERSION = "14"
@@ -1833,6 +1834,7 @@ def analyze_joern(
                 compatibility = None
                 parse_began = time.perf_counter()
                 operation = "parser_process"
+                report_progress(f"joern: parsing {language}")
                 status = _run(
                     _contained_command(parser, workspace, original, containment, binary, cwd),
                     workspace=workspace,
@@ -1902,6 +1904,7 @@ def analyze_joern(
                             # Reuse the validated graph, never the SDK's mutable prior workspace.
                             shutil.rmtree(cwd / "workspace", ignore_errors=True)
                         query_attempts += 1
+                        report_progress(f"joern: querying {language}")
                         status = _run(
                             _contained_command(
                                 attempt_command, workspace, original, containment, binary, cwd
@@ -2012,6 +2015,7 @@ def analyze_joern(
                     )
                 process_status = status
                 operation = "model_normalization"
+                report_progress(f"joern: normalizing {language}")
                 producer_diagnostics = {
                     "terminal_status": getattr(status, "terminal_status", str(status)),
                     "engine_failed": getattr(

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import subprocess
 from importlib import metadata
 from pathlib import Path
 
@@ -42,6 +44,47 @@ def _revision(package):
     except (OSError, ValueError):
         pass
     return None
+
+
+def _embedded_revision(package):
+    """Read the identity stamped into a wheel or a git-archive export."""
+    from ._build_revision import REVISION
+
+    if re.fullmatch(r"[0-9a-f]{40,64}", REVISION):
+        return REVISION
+    stamped = package / "_build_revision.txt"
+    try:
+        value = stamped.read_text().strip() if stamped.is_file() else ""
+    except OSError:
+        return None
+    return value if re.fullmatch(r"[0-9a-f]{40,64}", value) else None
+
+
+def _checkout_state(package, revision):
+    """Compare a source checkout with local refs only; this never contacts a remote."""
+    repository = package.parents[1]
+    if not (repository / ".git").exists() or not revision:
+        return {"dirty": None, "behind_origin_main": None}
+
+    def git(*arguments):
+        completed = subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+        return completed.stdout.strip() if completed.returncode == 0 else None
+
+    try:
+        status = git("status", "--porcelain", "--untracked-files=no")
+        behind = git("rev-list", "--count", f"{revision}..refs/remotes/origin/main")
+    except (OSError, subprocess.SubprocessError):
+        return {"dirty": None, "behind_origin_main": None}
+    return {
+        "dirty": None if status is None else bool(status),
+        "behind_origin_main": int(behind) if behind and behind.isdigit() else None,
+    }
 
 
 def tool_info():
@@ -98,13 +141,21 @@ def tool_info():
         wheel_hash = direct.get("archive_info", {}).get("hashes", {}).get("sha256")
     except (metadata.PackageNotFoundError, ValueError, OSError):
         pass
+    git_revision = _revision(package)
+    revision = git_revision or _embedded_revision(package)
     return {
         "schema_version": 1,
         "name": "PAT",
         "distribution": "pat-assess",
         "version": versions["pat-assess"],
         "package_root": str(package),
-        "source_revision": _revision(package),
+        "source_revision": revision,
+        "revision_source": "git_checkout"
+        if git_revision
+        else "embedded_at_build"
+        if revision
+        else None,
+        **_checkout_state(package, git_revision),
         "code_digest": "sha256:"
         + hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest(),
         "installed_wheel_sha256": wheel_hash,

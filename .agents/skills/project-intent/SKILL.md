@@ -86,8 +86,8 @@ Preserve `project_context.current` and use the selected context `schema_version`
 Fill `project_context.alignment` with a direction (`maintain`, `strengthen`,
 `simplify`, `rebalance` or `clarify`), rationale, ordered `priorities` and
 `deferred` work. Each priority names a unique engineering `dimension`, a direction
-(`strengthen`, `simplify`, `rebalance`, `maintain` or `investigate`), rationale and
-the related existing `plan.initiatives` IDs. Keep engineering actions, preserved
+(`strengthen`, `simplify`, `rebalance`, `maintain` or `investigate`), `rationale` and
+`initiative_ids`, which lists the `id` of each related existing `plan.initiatives` row. Keep engineering actions, preserved
 guarantees, acceptance and first slices in that existing plan, rather than creating
 a second roadmap. Priority order is judgment, not an automatically computed score.
 

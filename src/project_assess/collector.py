@@ -45,6 +45,7 @@ from .javascript_analysis import (
 )
 from .observations import SCHEMA as OBSERVATION_SCHEMA
 from .observations import import_observation
+from .progress import report as report_progress
 from .prompting_analysis import VERSION as PROMPTING_VERSION
 from .prompting_analysis import analyze_prompting, is_prompt_asset, python_prompting_facts
 from .provenance import tool_info
@@ -54,7 +55,15 @@ from .source_controls import analyze_python_controls
 from .static_analysis import MAX_FILES as MAX_STATIC_FILES
 from .static_analysis import MAX_SYMBOLS as MAX_STATIC_SYMBOLS
 from .static_analysis import VERSION as STATIC_VERSION
-from .static_analysis import analyze_python, ruff_report, source_role
+from .static_analysis import (
+    analyze_python,
+    note_directory,
+    note_javascript_text,
+    role_scope,
+    ruff_report,
+    source_role,
+    validate_role_overrides,
+)
 from .static_analysis import summarize as summarize_static
 from .test_value.assessment import summarize as summarize_test_value
 
@@ -118,12 +127,16 @@ _CONFIG = {
     ".ini",
     ".cfg",
     ".tf",
+    ".hcl",
+    ".guard",
     ".sh",
     ".prompt",
     ".jinja",
     ".jinja2",
     ".j2",
 }
+_PER_FILE_GAP_PREFIXES = ("Pattern analysis ", "Unsupported Markdown link markup")
+_REPEATED_GAP_EXAMPLES = 3
 _SECRET_LINE = re.compile(
     r"(?i)(?:api[_-]?key|secret|password|passwd|credential|authorization|access[_-]?token|auth[_-]?token|token)"
     r"[\w\s\-\"']*\s*[:=]"
@@ -939,6 +952,59 @@ def _git_inventory(root):
         process.stdout.close()
 
 
+def _repository_name(root):
+    """Name a checkout from its origin remote; temporary worktrees rename the directory."""
+    prefix, environment = _git_configuration(root)
+
+    def read(*arguments):
+        completed = subprocess.run(
+            prefix + list(arguments), capture_output=True, text=True, timeout=5, env=environment
+        )
+        return completed.stdout.strip() if completed.returncode == 0 else ""
+
+    try:
+        # A scanned subdirectory is its own project, not the repository that holds it.
+        if Path(read("rev-parse", "--show-toplevel")).resolve() != Path(root).resolve():
+            return None
+        url = read("config", "--get", "remote.origin.url").rstrip("/")
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        return None
+    # The basename alone is kept; the URL may carry credentials.
+    name = re.split(r"[/:]", url)[-1].removesuffix(".git")
+    return name if re.fullmatch(r"[A-Za-z0-9][\w.-]{0,99}", name) else None
+
+
+def _collapse_repeated_gaps(gaps):
+    """A per-file limit is one condition; its locations remain in the analysis evidence."""
+    groups, others = defaultdict(list), set()
+    for gap in set(gaps):
+        prefix, separator, location = gap.partition(": ")
+        if separator and prefix.startswith(_PER_FILE_GAP_PREFIXES):
+            groups[prefix].append(location)
+        else:
+            others.add(gap)
+    for prefix, locations in groups.items():
+        if len(locations) > _REPEATED_GAP_EXAMPLES:
+            examples = ", ".join(sorted(locations)[:_REPEATED_GAP_EXAMPLES])
+            others.add(f"{prefix}: {len(locations)} locations, including {examples}")
+        else:
+            others.update(f"{prefix}: {location}" for location in locations)
+    return sorted(others)
+
+
+def _check_display_name(requested):
+    if requested is not None and (
+        not isinstance(requested, str) or not 1 <= len(requested) <= 100 or not requested.strip()
+    ):
+        raise ValueError("Display name must be 1 to 100 characters")
+
+
+def _display_name(root, requested, git_snapshot):
+    if requested is not None:
+        return requested.strip()
+    return _repository_name(git_snapshot["repository"] if git_snapshot else root) or Path(root).name
+
+
 def collect(
     root: Path,
     reports: list[Path] | None = None,
@@ -946,6 +1012,8 @@ def collect(
     analysis_profile="standard",
     analyzers=None,
     git_snapshot=None,
+    role_overrides=None,
+    display_name=None,
 ) -> dict:
     """Collect facts without running target code or changing target files.
 
@@ -954,6 +1022,30 @@ def collect(
     ``git_snapshot`` ({revision, paths, repository}) collects a private tree that
     was extracted from committed objects; Git is then read only from ``repository``.
     """
+    rules = validate_role_overrides(role_overrides) if role_overrides is not None else []
+    _check_display_name(display_name)
+    with role_scope(rules):
+        snapshot = _collect(
+            root,
+            reports,
+            analysis_profile=analysis_profile,
+            analyzers=analyzers,
+            git_snapshot=git_snapshot,
+            role_overrides=rules,
+        )
+    snapshot["source"]["display_name"] = _display_name(root, display_name, git_snapshot)
+    return snapshot
+
+
+def _collect(
+    root,
+    reports=None,
+    *,
+    analysis_profile="standard",
+    analyzers=None,
+    git_snapshot=None,
+    role_overrides=(),
+):
     from .test_value import static as static_tool
 
     budget = get_budget(analysis_profile)
@@ -1148,6 +1240,7 @@ def collect(
                         )
                         complete = False
                         return
+                note_directory(relative.as_posix(), names)
                 names.sort(key=lambda name: (_priority(relative / name), name))
         except OSError:
             gaps.append("Unable to list a source directory")
@@ -1296,6 +1389,8 @@ def collect(
             inventory["files"] += 1
             inventory["bytes"] += len(payload)
             inventory["lines"] += len(text.splitlines())
+            if kind == "javascript":
+                note_javascript_text(path.as_posix(), text)
             if kind in {"python", "javascript"}:
                 captured_sources[path.as_posix()] = text
                 inventory["source_files"] += 1
@@ -1446,7 +1541,9 @@ def collect(
             omit(path, _kind(path), expected[3], "read-or-parse-error")
 
     try:
+        report_progress("capturing source files")
         walk(descriptor, Path("."), 0)
+        report_progress("analyzing captured source")
         discovery_complete = complete
         for path, _, _, kind in inputs:
             if kind in {"python", "javascript", "source"}:
@@ -1768,6 +1865,7 @@ def collect(
         for name in analyzers:
             if name in dedicated:
                 continue
+            report_progress(f"running analyzer: {name}")
             optional_analyses[name] = _redact_data(
                 run_analyzer(
                     name,
@@ -2107,6 +2205,7 @@ def collect(
     # bounded budgets; Joern enforces a hard process deadline, Vulture a
     # cooperative deadline between bounded AST/API operations. Run lighter work first.
     for name in sorted(dedicated, key=lambda name: (name == "joern", name)):
+        report_progress(f"running analyzer: {name}")
         result = _redact_data(
             run_analyzer(
                 name,
@@ -2153,6 +2252,7 @@ def collect(
             key: history[key] for key in ("version", "status", "coverage", "gaps", "caveat")
         }
         facts["change_history"]["evidence_id"] = history_id
+        facts["change_history"]["deleted_documents"] = len(history["deleted_documents"])
     burden = _redact_data(
         summarize_burden({"evidence": evidence, "facts": facts}, limit=budget.burden_leads)
     )
@@ -2169,8 +2269,10 @@ def collect(
     facts["burden_analysis"]["evidence_id"] = burden_id
     from .review_plan import VERSION as review_plan_version
 
+    report_progress("summarizing evidence")
     scope = {
-        "collector_version": 13,
+        "collector_version": 14,
+        "role_overrides": list(role_overrides),
         "review_plan_version": review_plan_version,
         "burden_analysis_version": burden["version"],
         "control_inventory_version": controls["version"],
@@ -2260,7 +2362,7 @@ def collect(
         "scope_digest": _digest(scope),
         "facts": facts,
         "evidence": sorted(evidence, key=lambda item: (item["path"], item["id"])),
-        "gaps": sorted(set(gaps)),
+        "gaps": _collapse_repeated_gaps(gaps),
         "findings": findings,
         "complete": complete,
     }

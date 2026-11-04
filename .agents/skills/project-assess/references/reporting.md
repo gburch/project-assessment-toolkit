@@ -5,7 +5,8 @@
 For an ordinary "run PAT" request, carry collection through to a reviewed assessment.
 The normal CLI path is `scan` → inspect captured evidence and rubric →
 `review-template --mode fresh` → author ratings, coverage, change traces and plan →
-the applicable `challenge-template` / independent review → `review --input FILE` →
+`review --input FILE --check` → the applicable `challenge-template` / independent review →
+`review --input FILE` →
 read back `report --format json` and `report --format markdown` →
 `export-report ASSESSMENT_ID`. Use the shared MCP operations, including
 `export_report`, when connected instead. These are phases of the same assessment, not
@@ -99,7 +100,10 @@ The export operation creates a fresh private bundle beneath the configured state
 directory. It returns `report.html`, `report.md`, `report.json` and the summary plus
 dimension badge SVGs. The Markdown report links its sibling HTML view and badge
 files; use the returned absolute paths when returning local assets in chat. Keep
-the substantive verdict, scores and recommendations in the response alongside
+`report.md` puts decisions first and detail under Appendices. `report.json` omits
+evidence bodies unless `--include-evidence` is passed; `source-context` and
+`evidence-query` read them. Check `review_status` before presenting a bundle as reviewed.
+Keep the substantive verdict, scores and recommendations in the response alongside
 those visuals. A badge records saved ratings, not certification or live status.
 Exporting a report does not publish it; review captured source, paths and other
 private evidence before any separately authorized sharing.

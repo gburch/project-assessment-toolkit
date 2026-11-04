@@ -420,6 +420,7 @@ def test_initial_packet_excludes_authored_prose_in_every_review_surface(captured
         "context",
         "rubric",
         "instructions",
+        "output_budget",
     }
     assert packet["draft_digest"] != baseline["draft_digest"]
     assert {key: value for key, value in packet.items() if key != "draft_digest"} == {
