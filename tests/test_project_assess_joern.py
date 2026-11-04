@@ -401,7 +401,7 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("metadata launched Java"))
     info = analysis.joern_info()
     assert info["available"] and info["version"] == "4.0.669"
-    assert info["adapter_version"] == "14"
+    assert info["adapter_version"] == "15"
     assert info["query_version"] == "10" and info["dataflow"] == "deep_profile"
     assert qualified["root"] not in json.dumps(info)
     deep = analysis.joern_limits("deep")
@@ -945,7 +945,8 @@ def test_staging_is_captured_only_with_clean_environment_and_independent_languag
     assert not os.path.exists(sentinel)
     assert result["coverage"]["staged_files"] == 2 and result["coverage"]["modeled_files"] == 2
     assert len({kwargs["cwd"] for _, kwargs in calls}) == 2
-    assert "--delombok-mode" in calls[2][0] and "--fetch-dependencies" not in calls[2][0]
+    java_parser = next(argv for argv, _ in calls if "--delombok-mode" in argv)
+    assert "--fetch-dependencies" not in java_parser
     assert result["topology"]["complete"] is False
     assert all(row["count"] == 7 for row in result["topology"]["edges"])
     assert all(row["confidence"] == "low" for row in result["candidates"])
@@ -1402,6 +1403,35 @@ def test_process_runner_enforces_timeout_and_discards_sensitive_logs(tmp_path, c
     assert result == "log_limit"
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""
+
+
+def test_signal_group_treats_an_exited_unreaped_leader_as_gone():
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time;time.sleep(30)"], start_new_session=True
+    )
+    os.killpg(process.pid, signal.SIGKILL)
+    time.sleep(0.2)
+    analysis._signal_group(process, signal.SIGKILL)
+    assert process.wait(timeout=2) is not None
+
+
+def test_signal_group_still_raises_a_persistent_refusal(monkeypatch):
+    class Leader:
+        pid = 12345
+        polls = 0
+
+        def poll(self):
+            self.polls += 1
+
+    def refuse(_pid, _sig):
+        raise PermissionError("refused")
+
+    leader = Leader()
+    monkeypatch.setattr(os, "killpg", refuse)
+    monkeypatch.setattr(analysis.time, "sleep", lambda _seconds: None)
+    with pytest.raises(PermissionError):
+        analysis._signal_group(leader, signal.SIGKILL)
+    assert leader.polls == analysis._SIGNAL_RETRIES + 1
 
 
 def test_process_reap_failure_keeps_safe_subphase_and_closes_pipes(tmp_path, monkeypatch):
@@ -2636,7 +2666,40 @@ def test_language_budget_reserves_javascript_time_and_rolls_forward_unused_time(
     else:
         assert batches["python"]["process_status"] == "timeout"
         assert result["status"] == "partial"
-    assert result["limits"]["language_scheduling"]
+    assert result["limits"]["language_scheduling"] == "smallest_first_equal_remaining_time_v2"
+
+
+def test_smallest_language_runs_first_so_the_largest_inherits_unused_time(qualified, monkeypatch):
+    clock, calls = [100.0], []
+    monkeypatch.setattr(analysis, "_clock", lambda: clock[0])
+
+    def run(argv, *, cwd, output=None, **kwargs):
+        calls.append((cwd.name, bool(output), kwargs["stop"]))
+        status = fake_run(argv, cwd=cwd, output=output, **kwargs)
+        clock[0] += 1
+        return status
+
+    monkeypatch.setattr(analysis, "_run", run)
+    python = source(text=source()["text"] + "# padding\n" * 500)
+    result = analysis.analyze_joern(
+        [
+            python,
+            source(
+                "src/app.js",
+                "function call(context) {\n  return context;\n}\n",
+            ),
+        ],
+        snapshot=qualified,
+        analysis_profile="deep",
+        deadline=1000.0,
+    )
+    assert [row[0] for row in calls][0] == "javascript"
+    batches = {row["language"]: row for row in result["coverage"]["batches"]}
+    assert (
+        batches["python"]["time_budget"]["assigned_seconds"]
+        > batches["javascript"]["time_budget"]["assigned_seconds"]
+    )
+    assert batches["python"]["time_budget"]["assigned_seconds"] > 800
 
 
 @pytest.mark.parametrize(

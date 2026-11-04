@@ -1263,6 +1263,11 @@ class AssessmentService:
                 else provider
                 for name, provider in facts.get("optional_analysis", {}).items()
             },
+            # Budgets can omit optional_analysis; a partial analyzer must stay visible.
+            "analyzer_status": {
+                name: provider.get("status") if isinstance(provider, dict) else None
+                for name, provider in facts.get("optional_analysis", {}).items()
+            },
             "collection_scope": {
                 key: value
                 for key, value in facts.get("collection", {}).items()
@@ -2022,6 +2027,9 @@ class AssessmentService:
                         "omitted": (
                             f"Row exceeds this output budget; raise max_chars above {size}."
                             if size + 2000 <= MAX_QUERY_CHARS
+                            else f"Row exceeds the {MAX_QUERY_CHARS}-character query maximum. "
+                            "Use the coverage, dataflow or graph view for analyzer detail."
+                            if row.get("kind") == "analyzer-analysis"
                             else f"Row exceeds the {MAX_QUERY_CHARS}-character query maximum; "
                             "read it whole with the evidence command (--evidence-id)."
                         ),

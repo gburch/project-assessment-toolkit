@@ -28,7 +28,7 @@ from .joern_dataflow import normalize_dataflow
 from .progress import report as report_progress
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "14"
+VERSION = "15"
 QUERY_VERSION = "10"
 JOERN_VERSION = "4.0.669"
 QUERY_PATH = Path(__file__).parent / "resources" / "joern.sc"
@@ -252,7 +252,7 @@ def _joern_configuration(analysis_profile):
             "selection_policy": "priority_file_method_round_robin_v1",
         },
         "flow_checkpoint_bytes": 32 * 1024**2,
-        "language_scheduling": "equal_remaining_time_v1",
+        "language_scheduling": "smallest_first_equal_remaining_time_v2",
         "javascript_frontend": {
             "bytes_per_file": 5 * 1024**2,
             "lines_per_file": 50_000,
@@ -623,12 +623,28 @@ def _workspace_size(workspace):
     return size
 
 
-def _stop_group(process):
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+def _signal_group(process, sig):
+    """Signal a group, treating one that holds only an exited leader as already gone.
+
+    Darwin answers EPERM rather than ESRCH while the only member is an unreaped zombie.
+    Reaping settles that case; a refusal that persists is real and still raises.
+    """
+    for attempt in range(_SIGNAL_RETRIES, -1, -1):
         try:
             os.killpg(process.pid, sig)
+            return
         except ProcessLookupError:
-            pass
+            return
+        except PermissionError:
+            process.poll()
+            if not attempt:
+                raise
+            time.sleep(0.02)
+
+
+def _stop_group(process):
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        _signal_group(process, sig)
         if sig == signal.SIGTERM:
             try:
                 process.wait(timeout=0.2)
@@ -649,6 +665,7 @@ class _ProcessStatus(str):
         return value
 
 
+_SIGNAL_RETRIES = 25
 _UNKNOWN_ENDPOINT = object()
 _INVALID_ENDPOINT = object()
 
@@ -1788,11 +1805,15 @@ def analyze_joern(
                 staged[source["path"]] = {**source, "lines": source["text"].splitlines()}
                 result["coverage"]["input_bytes"] += len(raw)
             result["coverage"]["staged_files"] = len(staged)
-            languages = [
-                language
-                for language in _FRONTENDS
-                if any(source["language"] == language for source in staged.values())
-            ]
+            # Unused time only rolls forward, so the smallest batch runs first and the
+            # largest can use whatever the others did not need.
+            batch_sizes = Counter()
+            for source in staged.values():
+                batch_sizes[source["language"]] += len(source["text"])
+            languages = sorted(
+                (language for language in _FRONTENDS if batch_sizes[language]),
+                key=lambda language: (batch_sizes[language], language),
+            )
             for language_index, language in enumerate(languages):
                 active_language = language
                 batch = {
@@ -1904,7 +1925,10 @@ def analyze_joern(
                             # Reuse the validated graph, never the SDK's mutable prior workspace.
                             shutil.rmtree(cwd / "workspace", ignore_errors=True)
                         query_attempts += 1
-                        report_progress(f"joern: querying {language}")
+                        report_progress(
+                            f"joern: querying {language} (attempt {query_attempts}, "
+                            f"{len(endpoint_timeouts)} endpoint timeouts)"
+                        )
                         status = _run(
                             _contained_command(
                                 attempt_command, workspace, original, containment, binary, cwd
@@ -2329,7 +2353,7 @@ def analyze_joern(
                         if checkpoint_recovered
                         else "query_final",
                         "time_budget": {
-                            "policy": "equal_remaining_time_v1",
+                            "policy": "smallest_first_equal_remaining_time_v2",
                             "assigned_seconds": round(assigned_seconds, 3),
                             "remaining_languages": len(languages) - language_index - 1,
                             "query_body_allowance_seconds": query_work_seconds,
