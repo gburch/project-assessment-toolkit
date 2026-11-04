@@ -728,6 +728,26 @@ def markdown_report(report):
             "review_coverage": report.get("review_coverage") or _review_coverage(report["review"]),
         }
     )
+    decisions = [
+        item for item in report.get("finding_status", {}).get("items", []) if item["event_count"]
+    ]
+    if decisions:
+        lines += [
+            "",
+            "## Finding verification and accepted debt",
+            "",
+            report["finding_status"]["caveat"],
+            "",
+        ]
+        for item in decisions:
+            lines.append(
+                "- "
+                + _markdown_text(
+                    f"{item['finding']['severity']}: {item['finding']['title']} — {item['status']} ({item['verification_label']})"
+                )
+            )
+            if item.get("verification"):
+                lines.append("  " + _markdown_text(item["verification"]["acceptance"]))
     lines += [
         "",
         "## Goals and progress",

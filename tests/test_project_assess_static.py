@@ -110,6 +110,52 @@ def test_type_only_imports_do_not_make_a_runtime_cycle():
     assert result["topology"]["complete"]
 
 
+def test_imports_include_captured_regular_package_initializers_with_original_phase():
+    result = summary(
+        record("src/outer/__init__.py", ""),
+        record("src/outer/pkg/__init__.py", "from . import child\n"),
+        record("src/outer/pkg/child.py", "import outer.pkg\nvalue = 1\n"),
+        record("consumer.py", "def load():\n    import outer.pkg.child\n"),
+    )
+    consumer_edges = [row for row in result["topology"]["edges"] if row["source"] == "consumer.py"]
+    assert {row["target"] for row in consumer_edges} == {
+        "src/outer/__init__.py",
+        "src/outer/pkg/__init__.py",
+        "src/outer/pkg/child.py",
+    }
+    assert all(row["phase"] == "deferred" and row["line"] == 2 for row in consumer_edges)
+    assert {
+        row["target"] for row in consumer_edges if row.get("basis") == "package_initializer"
+    } == {"src/outer/__init__.py", "src/outer/pkg/__init__.py"}
+    cycle = candidates(result, "dependency_cycle")[0]
+    assert cycle["metrics"]["modules"] == ["src/outer/pkg/__init__.py", "src/outer/pkg/child.py"]
+
+
+def test_namespace_packages_do_not_invent_initializer_edges_and_type_edges_stay_type_only():
+    result = summary(
+        record("src/ns/child.py", "value = 1\n"),
+        record(
+            "consumer.py",
+            "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import ns.child\n",
+        ),
+    )
+    assert result["topology"]["edges"] == [
+        {"source": "consumer.py", "target": "src/ns/child.py", "phase": "type_checking", "line": 3}
+    ]
+    assert result["topology"]["complete"]
+
+
+def test_a_captured_flat_module_cannot_initialize_a_same_named_submodule_package():
+    result = summary(
+        record("pkg.py", "value = 1\n"),
+        record("pkg/child.py", "value = 2\n"),
+        record("consumer.py", "import pkg.child\n"),
+    )
+    assert result["topology"]["edges"] == []
+    assert result["topology"]["resolution"]["non_package_parents"] == 1
+    assert not result["topology"]["complete"]
+
+
 def test_type_checking_else_keeps_its_runtime_dependency():
     a = record(
         "src/pkg/a.py",

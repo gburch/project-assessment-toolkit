@@ -79,7 +79,7 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
     "Unread bindings are review leads only; preserve initializer effects and callback, override and public signature contracts.",
     "Deep dataflow describes modeled parameter influence, not external taint, feasible execution, dead-method proof or target-code execution."
   )
-  val result = Obj("schema_version" -> 1, "query_version" -> "8", "run_token" -> runToken, "dataflow" -> "not_run",
+  val result = Obj("schema_version" -> 1, "query_version" -> "9", "run_token" -> runToken, "dataflow" -> "not_run",
     "errors" -> errors, "gaps" -> gaps, "caveats" -> caveats)
   def writeResult(value: Value, name: String = out): Unit = {
     val destination = Paths.get(name)
@@ -96,7 +96,7 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
     // Aggregate timings only: no source names, paths, code or error messages.
     phases.value += Obj("phase" -> name,
       "elapsed_seconds" -> Num((System.nanoTime() - began).toDouble / 1e9))
-    writeResult(Obj("schema_version" -> 1, "query_version" -> "8", "phases" -> phases), out + ".phases.json")
+    writeResult(Obj("schema_version" -> 1, "query_version" -> "9", "phases" -> phases), out + ".phases.json")
   }
   var truncatedValues = 0L
   def text(value: String, limit: Int = 2048): String = {
@@ -378,6 +378,18 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
           .foreach(identifier => bind(identifier, reference.methodFullName))
       case _ => ()
     }}
+    // REF identifies a declaration, not the reaching value at a particular call.
+    // Never promote the union of old/new callable assignments to source proof.
+    val bindingWrites = mutable.LongMap.empty[mutable.Map[Long, Option[Int]]]
+    cpg.identifier.foreach { identifier => identifier.astParentOption match {
+      case Some(assignment: Call) if assignment.name.startsWith("<operator>.assignment") &&
+        identifier.argumentIndex == 1 =>
+        identifier.refsTo.flatMap(canonical).foreach { declaration =>
+          bindingWrites.getOrElseUpdate(declaration.id, mutable.Map.empty[Long, Option[Int]])
+            (assignment.id) = assignment.lineNumber
+        }
+      case _ => ()
+    }}
     // Explicit source imports, resolved only against captured file identities.
     // A same-named parameter does not inherit the imported declaration's binding.
     val imports = mutable.Map.empty[(Long, String, Int), String]
@@ -389,9 +401,13 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
         imports((owner.id, name, at)) = imported
     }
     val importedBindings = mutable.LongMap.empty[String]
+    val importedBindingLines = mutable.LongMap.empty[Int]
     cpg.local.foreach { local =>
       for (at <- local.lineNumber; owner <- local.method;
-           entity <- imports.get((owner.id, local.name, at))) importedBindings(local.id) = entity
+           entity <- imports.get((owner.id, local.name, at))) {
+        importedBindings(local.id) = entity
+        importedBindingLines(local.id) = at
+      }
     }
     def matchesImport(entity: String, caller: Method, target: Method): Boolean = {
       val split = entity.lastIndexOf(':')
@@ -436,15 +452,22 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
     def qualification(call: Call, target: Method, bindings: Vector[Declaration], receiverTypes: Set[String]): (String, String, String) = {
       if (!locatedSource(target)) ("unresolved", "external_or_unlocated_target", "low")
       else {
+        val ambiguousBinding = bindings.map(_.id).distinct.size > 1 || bindings.exists { declaration =>
+          val writes = bindingWrites.get(declaration.id).toVector.flatMap(_.values)
+          writes.size > 1 || boundMethods.get(declaration.id).exists(_.size > 1) ||
+            (importedBindings.contains(declaration.id) &&
+              writes.exists(_ != importedBindingLines.get(declaration.id)))
+        }
         val binding = bindings.exists { declaration =>
-          boundMethods.get(declaration.id).exists(_(target.fullName)) ||
+          boundMethods.get(declaration.id).exists(names => names.size == 1 && names(target.fullName)) ||
             importedBindings.get(declaration.id).exists(matchesImport(_, call.method, target))
         }
         val receiver = target.astParentOption.exists {
           case owner: TypeDecl => receiverTypes(owner.fullName)
           case _ => false
         }
-        if (binding) ("source_supported", "callee_REF_to_definition_or_explicit_import", "medium")
+        if (ambiguousBinding) ("producer_inferred", "callee_binding_reassigned_or_ambiguous", "low")
+        else if (binding) ("source_supported", "callee_REF_to_definition_or_explicit_import", "medium")
         else if (receiver) ("producer_inferred", "modeled_receiver_type_matches_owner_annotation_unverified", "low")
         else if (languages.exists(name => name == "JAVA" || name == "JAVASRC") &&
           call.dispatchType == "STATIC_DISPATCH" && call.methodFullName == target.fullName &&
@@ -879,7 +902,7 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
           result("dataflow") = dataflow("status")
         }
         def progress(stage: String): Unit = {
-          writeResult(Obj("schema_version" -> 1, "query_version" -> "8", "run_token" -> runToken,
+          writeResult(Obj("schema_version" -> 1, "query_version" -> "9", "run_token" -> runToken,
             "base_sha256" -> baseSha256, "plan_digest" -> planDigest, "stage" -> stage,
             "source_parameter_count" -> parameters.size, "sinks_total" -> number(sinksTotal),
             "sinks_eligible" -> eligible.size, "sinks_selected" -> selected.size,
@@ -899,7 +922,7 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
         def flowCheckpoint(): Unit = {
           updateFlow(false)
           val snapshot = ujson.read(ujson.write(dataflow))
-          writeResult(Obj("schema_version" -> 1, "query_version" -> "8", "checkpoint" -> "dataflow_progress",
+          writeResult(Obj("schema_version" -> 1, "query_version" -> "9", "checkpoint" -> "dataflow_progress",
             "run_token" -> runToken, "base_sha256" -> baseSha256,
             "overlays" -> Arr.from(cpg.metaData.overlays.toVector.distinct.sorted),
             "truncated_values" -> number(truncatedValues), "dataflow_analysis" -> snapshot), out + ".flow.json")

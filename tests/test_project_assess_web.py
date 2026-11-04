@@ -43,7 +43,7 @@ class Service:
     def rubric(self):
         return {"version": "1", "dimensions": {}, "profiles": {}}
 
-    def get_report(self, assessment_id):
+    def get_report(self, assessment_id, *, compact=False):
         if assessment_id != "a1":
             raise ValueError("Assessment not found")
         return {"assessment": {"id": assessment_id}, "review": None, "goals": self.targets}
@@ -746,7 +746,7 @@ def test_transport_uses_typed_errors_and_sanitizes_internal_failures(
 ):
     service, server = running_report
 
-    def fail(_):
+    def fail(_, **options):
         raise error
 
     monkeypatch.setattr(service, "get_report", fail)
@@ -808,8 +808,12 @@ def test_real_history_response_omits_snapshot_bodies_and_reports_retain_selected
                 server, path="/api/report?assessment_id=" + first["id"]
             )
             assert report_status == 200
-            assert json.loads(report_body)["assessment"] == first
-            assert b"First captured content" in report_body
+            assert (
+                json.loads(report_body)["assessment"]
+                == service.get_report(first["id"], compact=True)["assessment"]
+            )
+            assert b"First captured content" not in report_body
+            assert "First captured content" in json.dumps(service.evidence(first["id"]))
             assert service.history(first["project_id"])["assessments"] == [first, second]
         finally:
             server.shutdown()

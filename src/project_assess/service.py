@@ -289,7 +289,7 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
             next_step = "Plan to reduce the demonstrated upkeep to the selected ceiling while preserving the full capability minimum, required behavior and safeguards; do not weaken a contract merely to lower burden."
         else:
             action = "maintain"
-            next_step = "Preserve the demonstrated fit. Capability above the selected minimum needs no reduction, and meeting a goal alone does not justify adding machinery."
+            next_step = "The saved scores meet these targets within the reviewed scope and stated confidence. Preserve useful capability; meeting a goal alone does not justify adding machinery."
         dimensions[dimension] = {
             "current": {axis: rating.get(axis) for axis in ("capability", "burden")},
             "target": {axis: target.get(axis) for axis in ("capability_min", "burden_max")},
@@ -749,6 +749,10 @@ class AssessmentService:
                 ("id", "operation", "payload", "result"),
                 "CREATE TABLE requests (id TEXT PRIMARY KEY, operation TEXT NOT NULL, payload TEXT NOT NULL, result TEXT NOT NULL)",
             ),
+            "finding_events": (
+                ("seq", "id", "project_id", "finding_id", "data"),
+                "CREATE TABLE finding_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id), finding_id TEXT NOT NULL, data TEXT NOT NULL)",
+            ),
         }
         # Serialize first creation with other constructors. Individual statements
         # retain this transaction; executescript would implicitly commit it.
@@ -767,19 +771,24 @@ class AssessmentService:
                     raise ValueError("Incomplete assessment state schema") from None
                 if version is None:
                     raise ValueError("Unversioned assessment state schema")
-                if version[0] != "1":
+                if version[0] not in {"1", "2"}:
                     raise ValueError("Unsupported assessment state schema version")
                 for name, (columns, _) in schema.items():
+                    if version[0] == "1" and name == "finding_events":
+                        continue
                     actual = tuple(row[1] for row in db.execute(f"PRAGMA table_info({name})"))
                     if (name, "table") not in objects or actual != columns:
                         raise ValueError("Incomplete or incompatible assessment state schema")
                 for (root,) in db.execute("SELECT root FROM projects"):
                     if self.state_dir.is_relative_to(Path(root)):
                         raise ValueError("State directory must be outside assessed projects")
+                if version[0] == "1":
+                    db.execute(schema["finding_events"][1])
+                    db.execute("UPDATE metadata SET value='2' WHERE key='schema_version'")
             else:
                 for _, statement in schema.values():
                     db.execute(statement)
-                db.execute("INSERT INTO metadata VALUES ('schema_version', '1')")
+                db.execute("INSERT INTO metadata VALUES ('schema_version', '2')")
         os.chmod(self.db_path, 0o600)
 
     @contextmanager
@@ -852,12 +861,16 @@ class AssessmentService:
                 raise PermissionError("Report is outside configured allowed roots")
             report_paths.append(path)
         started = time.monotonic()
+        captured_at = now()
         snapshot = collect(
             root, reports=report_paths, analysis_profile=analysis_profile, analyzers=analyzers
         )
-        snapshot["collection"] = {"seconds": round(time.monotonic() - started, 4)}
+        snapshot["collection"] = {
+            "seconds": round(time.monotonic() - started, 4),
+            "completed_at": now(),
+        }
         project_id = "p_" + hashlib.sha256(str(root).encode()).hexdigest()[:24]
-        snapshot.update(id=_id("a_"), project_id=project_id, created_at=now())
+        snapshot.update(id=_id("a_"), project_id=project_id, created_at=captured_at)
         with self._db(write=True) as db:
             db.execute(
                 "INSERT OR IGNORE INTO projects VALUES (?,?,?)", (project_id, str(root), root.name)
@@ -1510,9 +1523,14 @@ class AssessmentService:
                     for row in batch.get("skipped_methods", {}).get("rows", [])
                 )
                 rows.extend(
-                    {**row, "record_type": "dataflow_endpoint", "language": batch["language"],
-                     "selection_policy": batch["selection"]["policy"],
-                     "plan_digest": batch["selection"]["plan_digest"], **common}
+                    {
+                        **row,
+                        "record_type": "dataflow_endpoint",
+                        "language": batch["language"],
+                        "selection_policy": batch["selection"]["policy"],
+                        "plan_digest": batch["selection"]["plan_digest"],
+                        **common,
+                    }
                     for batch in flow.get("batches", [])
                     for row in batch.get("selection", {}).get("endpoints", [])
                 )
@@ -1712,12 +1730,19 @@ class AssessmentService:
                             .get("status", "not_collected"),
                             "phases": entry["stats"].get("coverage", {}).get("phases", {}),
                             "query_coverage": [
-                                {"language": batch["language"], "status": batch["status"],
-                                 "queries": batch.get("queries", {}),
-                                 "selection_policy": batch.get("selection", {}).get("policy"),
-                                 "plan_digest": batch.get("selection", {}).get("plan_digest"),
-                                 "checkpoint_recovered": batch.get("checkpoint_recovered", False)}
-                                for batch in entry["stats"].get("dataflow_analysis", {}).get("batches", [])
+                                {
+                                    "language": batch["language"],
+                                    "status": batch["status"],
+                                    "queries": batch.get("queries", {}),
+                                    "selection_policy": batch.get("selection", {}).get("policy"),
+                                    "plan_digest": batch.get("selection", {}).get("plan_digest"),
+                                    "checkpoint_recovered": batch.get(
+                                        "checkpoint_recovered", False
+                                    ),
+                                }
+                                for batch in entry["stats"]
+                                .get("dataflow_analysis", {})
+                                .get("batches", [])
                             ],
                         }
                         if view == "dataflow"
@@ -1888,13 +1913,21 @@ class AssessmentService:
         if baseline_id == assessment["id"]:
             baseline = assessment
         elif baseline_id:
-            baseline = self._assessment(db, baseline_id, missing_ok=True)
-        return _goal_alignment(
+            try:
+                baseline = self._assessment(db, baseline_id, missing_ok=True)
+            except (PermissionError, OSError):
+                pass
+        result = _goal_alignment(
             assessment,
             self._review(db, assessment["id"]),
             goals,
             baseline["rubric_version"] if baseline else None,
         )
+        if baseline_id and baseline is None:
+            result["comparison_unavailable"] = (
+                "Historical goal baseline is unavailable under current access; saved goals are unchanged."
+            )
+        return result
 
     def evolve(self, assessment_id):
         """Align a captured judgment with selected goals; make no state or source changes."""
@@ -2759,7 +2792,14 @@ class AssessmentService:
         ]
         result["missing_targets"] = missing_targets
         self._authorize_assessment(db, latest)
-        baseline = self._assessment(db, goals["baseline_assessment_id"])
+        try:
+            baseline = self._assessment(db, goals["baseline_assessment_id"])
+        except (PermissionError, OSError):
+            result.update(
+                event="comparison_unavailable",
+                reason="Historical goal baseline is unavailable under current access; saved goals are unchanged.",
+            )
+            return result
         current_review = self._review(db, latest["id"])
         first_row = db.execute(
             "SELECT data FROM reviews WHERE assessment_id=? ORDER BY seq LIMIT 1", (latest["id"],)
@@ -2845,7 +2885,154 @@ class AssessmentService:
         with self._db() as db:
             return self._progress(db, project_id)
 
-    def get_report(self, assessment_id):
+    def ci_delta(self, before_id, after_id, *, fail_on_kinds=()):
+        """Compare deterministic leads, without assigning grades or closing findings."""
+        from .ci_delta import build_ci_delta
+
+        with self._db() as db:
+            before = self._assessment(db, before_id)
+            after = self._assessment(db, after_id)
+            if before["project_id"] != after["project_id"]:
+                raise ValueError("CI delta requires two snapshots of the same project")
+            return build_ci_delta(before, after, fail_on_kinds=fail_on_kinds)
+
+    def _origin_review(self, db, assessment, review_id):
+        if review_id is None:
+            return None
+        row = db.execute(
+            "SELECT data FROM reviews WHERE id=? AND assessment_id=?", (review_id, assessment["id"])
+        ).fetchone()
+        if row is None:
+            raise ValueError("Unknown origin review")
+        return json.loads(row[0])
+
+    def _finding_status(self, db, assessment):
+        from .finding_closure import CAVEAT, finding_reference, project_finding
+
+        events = [
+            json.loads(row[0])
+            for row in db.execute(
+                "SELECT data FROM finding_events WHERE project_id=? ORDER BY seq",
+                (assessment["project_id"],),
+            )
+        ]
+        visible_events = []
+        unavailable_events = 0
+        unavailable_latest = set()
+        authorized = {assessment["id"]: True}
+        for event in events:
+            basis_id = event["assessment_id"]
+            if basis_id not in authorized:
+                try:
+                    self._assessment(db, basis_id)
+                    authorized[basis_id] = True
+                except (PermissionError, OSError):
+                    authorized[basis_id] = False
+            if authorized[basis_id]:
+                visible_events.append(event)
+                unavailable_latest.discard(event["finding_id"])
+            else:
+                unavailable_events += 1
+                unavailable_latest.add(event["finding_id"])
+        events = visible_events
+        origins = {(assessment["id"], None)}
+        review = self._review(db, assessment["id"])
+        if review:
+            origins.add((assessment["id"], review["id"]))
+        origins.update(
+            (event["origin"]["assessment_id"], event["origin"]["review_id"]) for event in events
+        )
+        items, unavailable = [], 0
+        for assessment_id, review_id in sorted(origins, key=lambda pair: (pair[0], pair[1] or "")):
+            try:
+                origin = (
+                    assessment
+                    if assessment_id == assessment["id"]
+                    else self._assessment(db, assessment_id)
+                )
+            except (PermissionError, OSError):
+                unavailable += 1
+                continue
+            origin_review = self._origin_review(db, origin, review_id)
+            for index in range(len((origin_review or origin).get("findings", []))):
+                reference = finding_reference(origin, origin_review, index)
+                # Historical findings enter this ledger only through explicit decisions.
+                if assessment_id != assessment["id"] and not any(
+                    event["finding_id"] == reference["finding_id"] for event in events
+                ):
+                    continue
+                item = project_finding(reference, events, assessment)
+                if reference["finding_id"] in unavailable_latest:
+                    item.update(
+                        status="needs_recheck",
+                        recorded_status="unavailable",
+                        last_event_id=None,
+                        verification=None,
+                        verification_label="unavailable",
+                        rationale=None,
+                    )
+                items.append(item)
+        return {
+            "assessment_id": assessment["id"],
+            "items": items,
+            "unavailable_origins": unavailable,
+            "unavailable_events": unavailable_events,
+            "caveat": CAVEAT,
+        }
+
+    def finding_status(self, assessment_id):
+        with self._db() as db:
+            return self._finding_status(db, self._assessment(db, assessment_id))
+
+    def record_finding(
+        self,
+        origin_assessment_id,
+        event,
+        *,
+        origin_review_id=None,
+        expected_event_id=None,
+        request_id=None,
+    ):
+        from .finding_closure import validate_event
+
+        if not isinstance(event, dict):
+            raise ValueError("Finding event must be an object")
+        with self._db(write=True) as db:
+            origin = self._assessment(db, origin_assessment_id)
+            current = self._assessment(db, event.get("assessment_id"))
+            origin_review = self._origin_review(db, origin, origin_review_id)
+            payload = {
+                "origin_assessment_id": origin_assessment_id,
+                "origin_review_id": origin_review_id,
+                "event": event,
+                "expected_event_id": expected_event_id,
+            }
+            replay = self._replay(db, request_id, "finding", payload)
+            if replay:
+                return replay
+            if self._latest(db, current["project_id"])["id"] != current["id"]:
+                raise ConflictError("Finding verification requires the latest captured source")
+            row = db.execute(
+                "SELECT data FROM finding_events WHERE project_id=? AND finding_id=? ORDER BY seq DESC LIMIT 1",
+                (current["project_id"], event.get("finding_id")),
+            ).fetchone()
+            previous = json.loads(row[0]) if row else None
+            if (previous or {}).get("id") != expected_event_id:
+                raise ConflictError("Finding changed in another session")
+            result = {
+                **validate_event(event, origin, origin_review, current, previous),
+                "id": _id("fe_"),
+                "created_at": now(),
+                "origin": {"assessment_id": origin_assessment_id, "review_id": origin_review_id},
+            }
+            db.execute(
+                "INSERT INTO finding_events(id,project_id,finding_id,data) VALUES (?,?,?,?)",
+                (result["id"], current["project_id"], result["finding_id"], canonical(result)),
+            )
+            self._record_request(db, request_id, "finding", payload, result)
+            return result
+
+    def get_report(self, assessment_id, *, compact=False):
         with self._db() as db:
             assessment = self._assessment(db, assessment_id)
             alignment = self._alignment(db, assessment)
@@ -2862,12 +3049,48 @@ class AssessmentService:
                 "project_context": alignment["project_context"],
                 "prompting": alignment["prompting"],
                 "timeline": self._timeline(db, assessment),
+                "finding_status": self._finding_status(db, assessment),
             }
         from .badges import badge_assets
         from .report_export import dimension_map_data
 
         report["badges"] = badge_assets(report)
         report["dimension_map"] = dimension_map_data(report)
+        if compact:
+            # Keep the scorecard small. Captured detail remains in the bounded
+            # evidence browser and explicit full JSON/export operations.
+            facts = assessment["facts"]
+            report["assessment"] = {
+                **assessment,
+                "facts": {
+                    key: facts[key]
+                    for key in ("collection", "inventory", "maintainability", "ecosystem_fit")
+                    if key in facts
+                },
+                "evidence": [
+                    {
+                        **{
+                            key: value
+                            for key, value in entry.items()
+                            if key not in {"stats", "excerpt", "source_windows"}
+                        },
+                        "stats": {
+                            key: value
+                            for key, value in entry.get("stats", {}).items()
+                            if key
+                            in {
+                                "schema_version",
+                                "forwarding_functions",
+                                "abstract_classes",
+                                "candidate_counts",
+                            }
+                        },
+                        "details_deferred": True,
+                    }
+                    for entry in assessment["evidence"]
+                ],
+            }
+            report["details_deferred"] = True
         return report
 
     def export_report(self, assessment_id):

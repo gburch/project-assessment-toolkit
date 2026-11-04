@@ -565,6 +565,16 @@ function renderFindings(report) {
     }
     $("findings").append(item);
   }
+  const decisions = report.finding_status?.items?.filter((item) => item.event_count) || [];
+  if (decisions.length) {
+    const detail = node("details");
+    detail.append(node("summary", "Finding verification and accepted debt"), node("p", report.finding_status.caveat));
+    for (const item of decisions) {
+      detail.append(node("p", `${item.finding.severity}: ${item.finding.title} · ${item.status} · ${item.verification_label}`));
+      if (item.verification) detail.append(node("p", item.verification.acceptance));
+    }
+    $("findings").append(detail);
+  }
   const recommendations = dims.flatMap((d) => (report.review?.ratings?.[d]?.recommendations || []).map((text) => `${titles[d]}: ${text}`));
   $("recommendations").replaceChildren(...recommendations.map((text) => node("li", text)));
   $("findings-empty").textContent = !report.review ? "An evidence-backed skill review can add ratings and recommendations. File counts alone do not establish maturity or excess burden." : findings.length || recommendations.length ? "" : "No findings or recommendations recorded. This is not a certification.";
@@ -861,7 +871,27 @@ function renderEvidence(assessment) {
     const detail = node("details");
     detail.dataset.evidenceId = evidence.id;
     detail.append(node("summary", `${evidence.path} · ${evidence.kind}`), node("p", `${evidence.id} · ${evidence.digest}`, "evidence-meta"));
-    if (evidence.stats) detail.append(node("pre", jsonText(evidence.stats)));
+    if (evidence.details_deferred) {
+      const explanation = node("p", "Details load when opened. Large records can be explored through the bounded evidence browser below.");
+      detail.append(explanation);
+      let pending = false, loaded = false;
+      detail.addEventListener("toggle", async () => {
+        if (!detail.open || pending || loaded) return;
+        pending = true;
+        const load = state.load;
+        explanation.textContent = "Loading bounded evidence details…";
+        try {
+          const params = new URLSearchParams({ assessment_id: assessment.id, view: "details", kind: evidence.kind, path: evidence.path, limit: "20", max_chars: "16000" });
+          const result = await api(`/api/evidence-query?${params}`);
+          if (load !== state.load) return;
+          const item = result.items.find((item) => item.evidence_id === evidence.id);
+          explanation.textContent = item ? "Captured details (bounded)." : "This record exceeds the detail budget or is outside this page. Use the evidence browser with narrower candidate, graph, snippet or coverage filters.";
+          if (item) detail.append(node("pre", jsonText(item)));
+          loaded = true;
+        } catch (error) { if (load === state.load) explanation.textContent = error.message; }
+        finally { pending = false; }
+      });
+    } else if (evidence.stats) detail.append(node("pre", jsonText(evidence.stats)));
     if (evidence.excerpt) detail.append(node("pre", evidence.excerpt));
     $("evidence").append(detail);
   }

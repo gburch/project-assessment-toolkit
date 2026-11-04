@@ -346,7 +346,7 @@ def test_interrupted_initialization_rolls_back_every_table_and_reopens(tmp_path,
     with original_connect(reopened.db_path) as connection:
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchall() == [("1",)]
+        ).fetchall() == [("2",)]
 
 
 def test_fresh_state_initialization_is_safe_for_concurrent_constructors(tmp_path):
@@ -362,14 +362,22 @@ def test_fresh_state_initialization_is_safe_for_concurrent_constructors(tmp_path
     assert all(service.list_projects() == [] for service in services)
     with sqlite3.connect(services[0].db_path) as connection:
         assert connection.execute("SELECT key,value FROM metadata").fetchall() == [
-            ("schema_version", "1")
+            ("schema_version", "2")
         ]
         assert {
             row[0]
             for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
-        } == {"metadata", "projects", "assessments", "reviews", "goals", "requests"}
+        } == {
+            "metadata",
+            "projects",
+            "assessments",
+            "reviews",
+            "goals",
+            "requests",
+            "finding_events",
+        }
 
 
 def test_compatible_state_reopens_without_schema_or_data_writes(assessed, monkeypatch):

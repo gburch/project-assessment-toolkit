@@ -12,41 +12,35 @@ and use matching assessment/project IDs for the project you intend to review.
 
 ## 1. Turn a CI threshold into a reviewable report
 
-Use a threshold to request inspection, rather than equating a metric with a quality
-score. For example, an existing complexity rule can flag a change for review:
+Use Standard collection for fast whole-inventory context and compare native leads
+between two trusted commits. The CI runner chooses both refs; PAT never executes
+the assessed build or its configuration. Fetch the base Git objects through your
+existing CI checkout first, then capture both commits with the same installed PAT:
 
 ```bash
-PAT_STATE="$(mktemp -d "${RUNNER_TEMP:-/tmp}/pat-ci.XXXXXX")"
-pat --state-dir "$PAT_STATE" scan "$PWD" --brief > "$PAT_STATE/scan.json"
-python3 - "$PAT_STATE/scan.json" "$PAT_STATE/review-requested" <<'PY'
-import json, sys
-from pathlib import Path
-scan = json.load(open(sys.argv[1]))
-counts = scan.get("static_analysis", {}).get("candidate_counts", {}).get("by_kind", {})
-if counts.get("complex_function", 0) or not scan["complete"]:
-    Path(sys.argv[2]).write_text(scan["assessment_id"] + "\n")
-    print("PAT review requested:", scan["assessment_id"])
-PY
-if [ -f "$PAT_STATE/review-requested" ]; then
-    PAT_ASSESSMENT="$(cat "$PAT_STATE/review-requested")"
-    pat --state-dir "$PAT_STATE" doctor "$PAT_ASSESSMENT" --limit 20 > "$PAT_STATE/doctor.json"
-    pat --state-dir "$PAT_STATE" export-report "$PAT_ASSESSMENT" > "$PAT_STATE/export.json"
-    python3 - "$PAT_STATE/export.json" <<'PY'
-import json, sys
-manifest = json.load(open(sys.argv[1]))
-print("Unreviewed facts report:", manifest["html"])
-print("Private artifact directory:", manifest["directory"])
-PY
-fi
+PAT_STATE="${RUNNER_TEMP:-/tmp}/pat-ci-state"
+pat --state-dir "$PAT_STATE" backfill "$PWD" --revision "$BASE_SHA" --revision "$HEAD_SHA" > "$PAT_STATE-captures.json"
+# Use the base/head assessment IDs returned by backfill, in that order.
+pat --state-dir "$PAT_STATE" ci-delta BASE_ASSESSMENT_ID HEAD_ASSESSMENT_ID --format markdown > "$PAT_STATE/delta.md"
+pat --state-dir "$PAT_STATE" ci-delta BASE_ASSESSMENT_ID HEAD_ASSESSMENT_ID --format json > "$PAT_STATE/delta.json"
 ```
 
-This illustrative trigger reports raw Python complexity leads or incomplete
-collection. Choose thresholds for your own review needs. It does not fail a build
-for a burden score, establish a defect or replace existing behavior/security tests.
-The trigger generates Doctor output and an **unreviewed facts report**. Its export
-manifest supplies the actual HTML, Markdown, JSON and badge paths; it has no authored
-scores until a review is saved. Retain that directory and the manifest through your
-existing private artifact mechanism; source and exports can contain sensitive data.
+The report distinguishes new, worsening, existing, improving and no-longer-observed
+leads; it includes changed areas, captured import callers, coverage and incompatible
+or incomplete evidence. Identity ignores line movement. Ambiguous matches remain
+unknown. Disappearance is **not verified closure**. Grades require a cited review.
+Both Git captures share a selection scope; mixing a Git capture with a worktree scan
+can be incompatible. Standard is the collection profile, not `scan --brief`, which
+only shortens output. Reuse a saved baseline only when scope and analyzer versions
+match; never reuse a grade across changed source.
+
+Default exit status is advisory (0), including unknown comparisons. An owner can
+select supported native lead kinds explicitly, for example
+`--fail-on-kind complex_function`: new or worsening selected leads return 1;
+invalid inputs return 2. Policy uncertainty stays visible in the JSON/Markdown and
+is not a passing quality certification. This does not fail on human burden grades
+or every item of existing debt. Retain reports privately through your existing CI
+artifact mechanism. PAT does not install a hosted workflow or AI maintenance loop.
 
 An optional **external host AI loop** can read that snapshot, use `project-assess`
 to author and challenge a source-bound review, and propose one useful maintenance

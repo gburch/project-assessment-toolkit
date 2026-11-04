@@ -648,12 +648,13 @@ Update to the intended application revision and its locked dependencies, then us
 
 For a source installation, run `uv sync --locked` at the selected revision (add optional `--extra analysis`, `--extra vulture` or `--extra mcp` when wanted), then check `uv run --locked pat info` and `uv run --locked pat analyzers`. Rescan and review when evidence is missing. A changed profile, analyzer or collection scope prevents an incompatible engineering-progress comparison; updates do not silently reset goals or rewrite the baseline.
 
-There is no automatic state-schema migration. Startup validates existing state
-before writing, rejects unsupported, unversioned or incomplete schemas, and
-initializes empty state in one transaction. An interrupted initialization rolls
-back; compatible version 1 state reopens without schema changes. If a version
-rejects the state schema, use the application version that created it or restore
-a compatible backup. Do not hand-edit schema metadata or delete history to
+Startup validates existing state before writing and rejects unsupported, unversioned
+or incomplete schemas. Valid schema 1 state migrates transactionally to schema 2
+by adding the append-only finding ledger; assessment, review and goal records are
+unchanged. Interrupted initialization or migration rolls back. Schema 2 reopens
+without schema changes. Older PAT versions cannot read schema 2: roll back using
+the stopped-state backup and its compatible application, not the migrated database.
+Do not hand-edit schema metadata or delete history to
 bypass the check.
 
 ### Local delivery and rollback proof
@@ -669,7 +670,7 @@ uv pip install --offline --python /path/outside/repos/pat-rollback/bin/python \
 /path/outside/repos/pat-rollback/bin/pat --state-dir /path/to/fresh-restored-state list
 ```
 
-Restore the complete stopped-state backup into that fresh state directory before the last command; keep the later state and application environment for investigation. Use an artifact compatible with the backup's schema. This is a manual local rollback, with no automatic migration or provider operation.
+Restore the complete stopped-state backup into that fresh state directory before the last command; keep the later state and application environment for investigation. Use an artifact compatible with the backup's schema. This is a manual local rollback; it does not invoke a provider operation.
 
 For common problems:
 
@@ -681,3 +682,61 @@ For common problems:
 ## Development checks
 
 See [CONTRIBUTING.md](https://github.com/gburch/project-assessment-toolkit/blob/main/CONTRIBUTING.md) for Python, Ruff, browser and skill checks. The guide above uses the core runtime; add the optional `mcp` extra when connecting an MCP host.
+
+
+## CI deltas and finite finding verification
+
+See [the CI use case](USE_CASES.md#1-turn-a-ci-threshold-into-a-reviewable-report)
+for `ci-delta BEFORE_ID AFTER_ID`. It compares deterministic native leads, not
+scores, and never treats an absent lead as a verified fix.
+
+`finding-status ASSESSMENT_ID` returns stable finding IDs, origin assessment/review
+references, current source scope and the latest explicit decision. To record a
+change, pass `finding-event ORIGIN_ASSESSMENT_ID --origin-review-id REVIEW_ID
+--input event.json`; omit the review option for a collector finding. The input is:
+
+```json
+{
+  "finding_id": "f_<id from finding-status>",
+  "assessment_id": "a_<latest captured assessment>",
+  "source_digest": "sha256:<current manifest digest>",
+  "status": "verified",
+  "actor": "reviewer name or agent identity",
+  "rationale": "What changed and why it resolves this finite finding",
+  "evidence_ids": ["e-<current source evidence>"],
+  "scope": [{"path": "src/example.py", "digest": "sha256:<current file digest>"}],
+  "verification": {
+    "basis": "source_review",
+    "acceptance": "The invariant checked and its concrete result",
+    "limitations": ["Source inspection; runtime behavior was not executed"]
+  }
+}
+```
+
+Statuses are `open`, `implemented`, `verified` and `accepted`. Implemented/verified
+remediation requires changed relevant captured source. Include all originally
+cited source files and the relevant changed files in `scope`. Verification requires
+current citations and explicit acceptance; `source_review` is labeled reviewer
+verification, never authenticated runtime proof. `execution_report` requires an
+imported passed, source-matched observation covering the declared scope and remains
+a supplied claim. Omitted or deleted source is not proof of closure.
+
+For a subsequent decision supply `--expected-event-id` from `finding-status`;
+conflicting writers fail rather than overwrite. Optional `--request-id` supports
+exact replay. Relevant source changes project decisions as `needs_recheck`;
+unrelated edits preserve them. Accepted high/critical debt stays visible. Finding
+decisions do not change ratings, goals or engineering progress. The ledger is a
+finite acceptance record, not automatic issue matching across similarly titled
+findings. Start from an origin finding cited to captured source.
+
+Worktree freshness uses scan start/capture time, separately from collection
+completion. Source inventory capture is bounded, not an atomic filesystem snapshot;
+use a frozen checkout for reproducible assessment. Current authorized reports
+remain available when an old goal baseline loses access; comparison is unavailable
+and goals stay unchanged. Direct reads of that baseline remain denied.
+
+The live report transfers metadata and summaries first. Opening evidence requests
+bounded detail; oversized records remain queryable through candidate, graph,
+snippet and coverage views. Full JSON and offline export remain explicit operations.
+Joern containment restricts network, writes and reads of the original assessed root;
+it is not a general host-file read sandbox for a compromised trusted SDK.

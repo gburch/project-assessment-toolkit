@@ -208,6 +208,35 @@ def create_mcp(service):
         """Read immutable assessment, review and goal history."""
         return service.history(project_id)
 
+    @server.tool(annotations={"readOnlyHint": True})
+    def ci_delta(
+        before_id: str, after_id: str, fail_on_kinds: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Compare saved deterministic leads across equivalent source scopes; advisory by default, never verified closure or grades."""
+        return service.ci_delta(before_id, after_id, fail_on_kinds=fail_on_kinds or ())
+
+    @server.tool(annotations={"readOnlyHint": True})
+    def finding_status(assessment_id: str) -> dict[str, Any]:
+        """Read explicit finding decisions and source-scoped verification, including needs-recheck and accepted debt."""
+        return service.finding_status(assessment_id)
+
+    @server.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    def record_finding(
+        origin_assessment_id: str,
+        event: dict,
+        origin_review_id: str | None = None,
+        expected_event_id: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Append a source-bound finding decision with concurrent-update checks. Source review verifies a declared scope, not authenticated runtime execution; no grades or goals change."""
+        return service.record_finding(
+            origin_assessment_id,
+            event,
+            origin_review_id=origin_review_id,
+            expected_event_id=expected_event_id,
+            request_id=request_id,
+        )
+
     return server
 
 

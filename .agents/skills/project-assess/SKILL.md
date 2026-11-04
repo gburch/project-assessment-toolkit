@@ -125,3 +125,17 @@ Report current capability, burden, confidence, evidence gaps, goals and comparab
 ## Interfaces
 
 `serve` prints the local app URL (`--open` also opens a browser). An MCP host can launch `uv --directory /path/to/project-assessment-toolkit run --extra mcp --locked pat --state-dir STATE_DIR mcp --allowed-root ROOT`, repeating allowed roots when needed. The SDK is optional and no cloud credentials are needed. Follow the host's configuration format; do not change global agent configuration. For setup, commands, goal defaults and progress details, read [the user guide](../../../docs/PROJECT_ASSESS.md).
+
+## CI deltas and verified closure
+
+Use `ci-delta BEFORE_ID AFTER_ID` for deterministic native-lead comparisons under
+matching source scope and analyzer versions; Standard captures preserve whole-project
+context. Default is advisory. New/worsening/existing/improving leads are not grades,
+and an absent lead is never a verified fix. Do not reuse old scores on changed source.
+Read [the verification workflow](https://github.com/gburch/project-assessment-toolkit/blob/main/docs/PROJECT_ASSESS.md#ci-deltas-and-finite-finding-verification)
+for `finding-status` and `finding-event`. Bind a finite decision to current captured
+source, explicit acceptance, citations and relevant file identities. Distinguish
+implemented, reviewer-verified, supplied execution evidence and accepted debt.
+Recheck relevant source changes, preserve unknowns and show remaining high findings.
+Closing a finding does not award rubric progress or alter goals. Unavailable old
+baselines limit comparison; they do not justify widening access or resetting goals.

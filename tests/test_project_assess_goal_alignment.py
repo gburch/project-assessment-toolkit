@@ -376,11 +376,11 @@ def test_evolve_rechecks_source_and_import_authority_before_returning_saved_advi
     restricted = AssessmentService(owner.state_dir, [allowed])
     before = rows(owner)
 
-    # A clean current scan also retains the authorization boundary of the
-    # imported snapshot used as the saved goal's rubric baseline.
-    for snapshot in (forbidden_root, forbidden_import, clean):
+    # Direct revoked snapshots remain denied; a clean current view degrades comparison.
+    for snapshot in (forbidden_root, forbidden_import):
         with pytest.raises(PermissionError):
             restricted.evolve(snapshot["id"])
+    assert restricted.evolve(clean["id"])["goal_alignment"]["comparison_unavailable"]
     assert rows(owner) == before
 
 

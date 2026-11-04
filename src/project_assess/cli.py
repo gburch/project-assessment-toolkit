@@ -68,6 +68,23 @@ def parser():
         help="An explicit commit, tag or branch name; repeat for up to 12",
     )
     backfill.add_argument("--analysis-profile", choices=("standard", "deep"), default="standard")
+    delta = commands.add_parser(
+        "ci-delta", help="Compare saved native leads; advisory unless explicit kinds are selected"
+    )
+    delta.add_argument("before_id")
+    delta.add_argument("after_id")
+    delta.add_argument("--format", choices=("json", "markdown"), default="markdown")
+    delta.add_argument("--fail-on-kind", action="append", default=[])
+    finding = commands.add_parser("finding-status", help="Read source-bound finding decisions")
+    finding.add_argument("assessment_id")
+    decision = commands.add_parser(
+        "finding-event", help="Append an explicit finding decision or verification"
+    )
+    decision.add_argument("origin_assessment_id")
+    decision.add_argument("--origin-review-id")
+    decision.add_argument("--input", required=True)
+    decision.add_argument("--expected-event-id")
+    decision.add_argument("--request-id")
     commands.add_parser("list")
     commands.add_parser("rubric")
     for name in (
@@ -235,6 +252,28 @@ def main(argv=None):
                 tags=args.tags,
                 revisions=args.revisions,
                 analysis_profile=args.analysis_profile,
+            )
+        elif args.command == "ci-delta":
+            from .ci_delta import render_ci_markdown
+
+            output = service.ci_delta(
+                args.before_id, args.after_id, fail_on_kinds=args.fail_on_kind
+            )
+            print(
+                render_ci_markdown(output)
+                if args.format == "markdown"
+                else json.dumps(output, indent=2, allow_nan=False)
+            )
+            return output["policy"]["exit_code"]
+        elif args.command == "finding-status":
+            output = service.finding_status(args.assessment_id)
+        elif args.command == "finding-event":
+            output = service.record_finding(
+                args.origin_assessment_id,
+                _input(args.input),
+                origin_review_id=args.origin_review_id,
+                expected_event_id=args.expected_event_id,
+                request_id=args.request_id,
             )
         elif args.command == "list":
             output = service.list_projects()

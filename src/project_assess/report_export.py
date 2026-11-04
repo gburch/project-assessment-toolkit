@@ -741,6 +741,30 @@ def _prompting_html(report):
     return "".join(lines) + "</div></details>"
 
 
+def _finding_decisions_html(report):
+    decisions = [
+        item for item in report.get("finding_status", {}).get("items", []) if item["event_count"]
+    ]
+    if not decisions:
+        return ""
+    lines = [
+        '<section class="more"><h2>Finding verification and accepted debt</h2><p>'
+        + _text(report["finding_status"]["caveat"])
+        + "</p><ul>"
+    ]
+    for item in decisions:
+        lines.append(
+            "<li>"
+            + _text(
+                f"{item['finding']['severity']}: {item['finding']['title']} · {item['status']} · {item['verification_label']}"
+            )
+            + "</li>"
+        )
+        if item.get("verification"):
+            lines.append("<li>" + _text(item["verification"]["acceptance"]) + "</li>")
+    return "".join([*lines, "</ul></section>"])
+
+
 def report_html(report):
     """Render an offline document with no external resources or executable report text."""
     model = dimension_map_data(report)
@@ -838,6 +862,7 @@ def report_html(report):
     lines += [
         "</tbody></table></div></noscript></section>",
         _findings_html(assessment, review),
+        _finding_decisions_html(report),
         '<section class="more" aria-label="Plan, context and evidence">',
         _plan_html(plan),
         _context_html(context),

@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 
 from .analysis_patterns import function_patterns, pattern_candidates
 
-VERSION = "3"
+VERSION = "4"
 MAX_FILES = 1000
 MAX_OVERVIEW_FILES = 20_000
 MAX_SYMBOLS = 20_000
@@ -246,6 +246,18 @@ def analyze_python(
         node.id for node in nodes if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
     }
     attributes = {node.attr for node in nodes if isinstance(node, ast.Attribute)}
+    qualified_references, qualified_names, qualified_limited = set(), {}, False
+    for node in reversed(nodes):
+        if isinstance(node, ast.Name):
+            qualified_names[id(node)] = node.id
+        elif isinstance(node, ast.Attribute) and id(node.value) in qualified_names:
+            name = qualified_names[id(node.value)] + "." + node.attr
+            if len(name) <= MAX_MODULE_LENGTH:
+                qualified_names[id(node)] = name
+                if isinstance(node.ctx, ast.Load):
+                    qualified_references.add(name)
+            else:
+                qualified_limited = True
     dynamic = any(
         isinstance(node, ast.Call)
         and (
@@ -286,6 +298,11 @@ def analyze_python(
         for node in definitions[:MAX_SYMBOLS]
     ]
     record["references"] = sorted(loads | attributes)[:MAX_SYMBOLS]
+    record["qualified_references"] = sorted(qualified_references)[:MAX_SYMBOLS]
+    if len(qualified_references) > MAX_SYMBOLS:
+        record["gaps"].append(f"Module qualified reference limit reached: {path}")
+    if qualified_limited:
+        record["gaps"].append(f"Module qualified reference length limit reached: {path}")
     record["module"] = {
         "lines": max((getattr(node, "end_lineno", 0) or 0 for node in tree.body), default=0),
         "function_count": len(functions),
@@ -407,6 +424,7 @@ def analyze_python(
                     "module": node.module if isinstance(node, ast.ImportFrom) else None,
                     "level": node.level if isinstance(node, ast.ImportFrom) else 0,
                     "names": [alias.name for alias in node.names],
+                    "aliases": [alias.asname for alias in node.names],
                     "phase": phase,
                     "location": _location(path, node),
                 }
@@ -444,29 +462,35 @@ def _module(path):
     return ".".join(parts)
 
 
+def _import_base(record, item):
+    """Resolve relative spelling without importing the captured package."""
+    base = item["module"]
+    if item["level"]:
+        package = _module(record["path"]).split(".")
+        if PurePosixPath(record["path"]).name != "__init__.py":
+            package = package[:-1]
+        if item["level"] > len(package):
+            return None
+        base = ".".join(package[: len(package) - item["level"] + 1] + ([base] if base else []))
+    return base
+
+
 def _edges(records, import_target_limit):
     modules = defaultdict(list)
     for record in records:
         modules[_module(record["path"])].append(record["path"])
     edges, cache = [], {}
-    attempted, cached, skipped, ambiguous = 0, 0, 0, 0
+    attempted, cached, skipped, ambiguous, nonpackages = 0, 0, 0, 0, 0
     oversized, attempts_limited = False, False
     attempt_limit = min(1_000_000, max(1000, import_target_limit * 10))
     depth = max((name.count(".") + 1 for name in modules), default=1)
 
     def targets(record):
         path = record["path"]
-        package = _module(path).split(".")
-        if PurePosixPath(path).name != "__init__.py":
-            package = package[:-1]
         for item in record["imports"]:
-            base = item["module"]
-            if item["level"]:
-                if item["level"] > len(package):
-                    continue
-                base = ".".join(
-                    package[: len(package) - item["level"] + 1] + ([base] if base else [])
-                )
+            base = _import_base(record, item)
+            if item["level"] and base is None:
+                continue
             if base is not None and len(base) > MAX_MODULE_LENGTH:
                 yield path, item, None
                 continue
@@ -489,7 +513,7 @@ def _edges(records, import_target_limit):
             continue
         if target in cache:
             cached += 1
-            destination = cache[target]
+            destinations = cache[target]
         elif len(cache) >= import_target_limit:
             skipped += 1
             continue
@@ -504,20 +528,37 @@ def _edges(records, import_target_limit):
                     prefix = name
                     break
             matches = modules.get(prefix, [])
-            ambiguous += len(matches) > 1
-            destination = matches[0] if len(matches) == 1 else None
-            cache[target] = destination
+            # Importing a regular submodule also initializes every captured
+            # regular parent package. Namespace packages have no initializer.
+            parents = [
+                modules.get(".".join(parts[:end]), []) for end in range(1, len(prefix.split(".")))
+            ]
+            blocked = any(
+                len(rows) == 1 and PurePosixPath(rows[0]).name != "__init__.py" for rows in parents
+            )
+            ambiguous += len(matches) > 1 or any(len(rows) > 1 for rows in parents)
+            nonpackages += blocked
+            destinations = []
+            if len(matches) == 1 and not blocked and not any(len(rows) > 1 for rows in parents):
+                destinations.append((matches[0], None))
+                for rows in parents:
+                    if len(rows) == 1 and PurePosixPath(rows[0]).name == "__init__.py":
+                        if rows[0] != matches[0]:
+                            destinations.append((rows[0], "package_initializer"))
+            cache[target] = destinations
         # Resolve captured modules only. Captured depth bounds prefix work for
         # hostile imports containing thousands of unresolved dotted segments.
-        if destination is not None and destination != path:
-            edges.append(
-                {
+        for destination, basis in destinations:
+            if destination != path:
+                edge = {
                     "source": path,
                     "target": destination,
                     "phase": item["phase"],
                     "line": item["location"]["line"],
                 }
-            )
+                if basis:
+                    edge["basis"] = basis
+                edges.append(edge)
     return sorted(
         {json.dumps(edge, sort_keys=True): edge for edge in edges}.values(),
         key=lambda row: (row["source"], row["target"], row["line"]),
@@ -532,7 +573,8 @@ def _edges(records, import_target_limit):
         "attempt_limit_reached": attempts_limited,
         "qualified_name_limit_reached": oversized,
         "ambiguous_targets": ambiguous,
-        "complete": not (skipped or attempts_limited or oversized or ambiguous),
+        "non_package_parents": nonpackages,
+        "complete": not (skipped or attempts_limited or oversized or ambiguous or nonpackages),
     }
 
 
@@ -607,8 +649,44 @@ def _retained_candidates(candidates, limit=None):
 
 def _dead_candidates(records, edges, *, graph_complete):
     """Unused is a closed-world lead; only syntactic unreachable code is proven."""
-    references = {name for row in records for name in row.get("references", [])}
-    references.update(name for row in records for item in row["imports"] for name in item["names"])
+    owners = defaultdict(list)
+    references = {row["path"]: set(row.get("references", [])) for row in records}
+    for row in records:
+        owners[_module(row["path"])].append(row["path"])
+
+    def reference(target):
+        module, _, name = target.rpartition(".")
+        paths = owners.get(module, [])
+        if len(paths) == 1:
+            references[paths[0]].add(name)
+
+    for row in records:
+        bindings = {}
+        for item in row["imports"]:
+            base = _import_base(row, item)
+            if item["level"] and base is None:
+                continue
+            for name, alias in zip(
+                item["names"], item.get("aliases", [None] * len(item["names"])), strict=True
+            ):
+                if name == "*":
+                    continue
+                if base is None:
+                    bound, target = (
+                        alias or name.split(".")[0],
+                        name if alias else name.split(".")[0],
+                    )
+                else:
+                    bound, target = alias or name, f"{base}.{name}" if base else name
+                    reference(target)
+                if bound in bindings and bindings[bound] != target:
+                    bindings[bound] = None  # Ambiguous aliases cannot establish a reference.
+                else:
+                    bindings[bound] = target
+        for name in row.get("qualified_references", []):
+            bound, _, suffix = name.partition(".")
+            if target := bindings.get(bound):
+                reference(f"{target}.{suffix}")
     inbound = {edge["target"] for edge in edges}
     paths = {row["path"] for row in records}
     candidates = []
@@ -619,7 +697,7 @@ def _dead_candidates(records, edges, *, graph_complete):
             if (
                 name.startswith("_")
                 and not name.startswith("__")
-                and name not in references
+                and name not in references[path]
                 and not symbol["referenced"]
                 and not symbol["decorated"]
                 and not symbol["exported"]
@@ -634,6 +712,7 @@ def _dead_candidates(records, edges, *, graph_complete):
                             "symbol": name,
                             "definition_kind": symbol["kind"],
                             "observed_references": 0,
+                            "reference_scope": "own module and statically resolved captured imports",
                             "dynamic_resolution": module.get("dynamic_resolution", False),
                             "overview_partial": module.get("overview_partial", False),
                             "exports_unknown": module.get("exports_unknown", False),
@@ -737,7 +816,9 @@ def summarize(
         gaps.append("Static import graph is incomplete; unreferenced-module leads are withheld")
     candidates, clones, hotspots = [], defaultdict(list), []
     if edges_limited:
-        gaps.append("Static import target count or qualified-name limit reached")
+        gaps.append(
+            "Static import target count, qualified-name limit or module-resolution ambiguity reached"
+        )
     for record in selected:
         for function in record["functions"]:
             hotspots.append(
@@ -942,7 +1023,7 @@ def summarize(
             "complete": graph_complete,
             "resolution": resolution,
             "source_complete": source_complete,
-            "caveat": "Captured static imports, including type-checking, conditional and deferred phases; type-checking edges are excluded from runtime-cycle leads. Not a runtime call graph, reachability proof or verified entrypoint inventory.",
+            "caveat": "Captured static imports and regular package initializers, including type-checking, conditional and deferred phases; type-checking edges are excluded from runtime-cycle leads. From-imports may resolve package attributes/reexports instead of submodules. Not a runtime call graph, reachability proof or verified entrypoint inventory.",
         },
         "hotspots": sorted(
             hotspots,

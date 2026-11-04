@@ -164,8 +164,45 @@ def public():
         "src/pkg/routing/__init__.py",
     }
     assert shadowed[0]["counterevidence"]
-    assert leads(result, "unreferenced_module")
-    assert all(row["confidence"] == "low" for row in leads(result, "unreferenced_module"))
+    assert not result["topology"]["complete"]
+    assert leads(result, "unreferenced_module") == []
+
+
+def test_unrelated_module_names_do_not_hide_unused_private_symbols():
+    result = scan(
+        {
+            "src/abandoned.py": "def _helper():\n    return 1\n",
+            "src/used.py": "def _helper():\n    return 2\n\ndef main():\n    return _helper()\n",
+            "src/other.py": "def run(obj):\n    return obj._helper()\n",
+        }
+    )
+    unused = leads(result, "unused_symbol")
+    assert [(row["locations"][0]["path"], row["metrics"]["symbol"]) for row in unused] == [
+        ("src/abandoned.py", "_helper")
+    ]
+
+
+def test_resolved_imports_aliases_and_package_access_keep_real_private_consumers():
+    result = scan(
+        {
+            "src/pkg/__init__.py": "",
+            "src/pkg/a.py": "def _helper():\n    return 1\n",
+            "src/pkg/b.py": "def _helper():\n    return 2\n",
+            "src/pkg/c.py": "def _helper():\n    return 3\n",
+            "src/pkg/d.py": "def _helper():\n    return 4\n",
+            "src/consumer.py": (
+                "from pkg.a import _helper as first\n"
+                "import pkg.b as second\n"
+                "import pkg.c\n"
+                "from pkg import d as fourth\n"
+                "def run():\n    return first(), second._helper(), pkg.c._helper(), fourth._helper()\n"
+            ),
+            "src/unrelated.py": "def _helper():\n    return 5\n",
+        }
+    )
+    assert [row["locations"][0]["path"] for row in leads(result, "unused_symbol")] == [
+        "src/unrelated.py"
+    ]
 
 
 def test_index_exposes_leads_beyond_rich_sample_with_explicit_denominators(monkeypatch):
@@ -183,7 +220,7 @@ def test_index_exposes_leads_beyond_rich_sample_with_explicit_denominators(monke
     assert counts["omitted_from_index"] == 2
     assert counts["by_kind"] == {"unreferenced_module": 1, "unused_symbol": 3}
     assert counts["by_role"] == {"production": 4}
-    assert result["analyzer"]["version"] == "3"
+    assert result["analyzer"]["version"] == "4"
     assert any("index limit" in gap for gap in result["gaps"])
 
 

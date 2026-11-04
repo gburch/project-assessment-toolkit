@@ -80,7 +80,7 @@ def raw_result(path):
 
     return {
         "schema_version": 1,
-        "query_version": "8",
+        "query_version": "9",
         "run_token": TEST_RUN_TOKEN,
         "dataflow": "not_run",
         "errors": [],
@@ -296,7 +296,7 @@ def progress_checkpoint_files(output):
     base_path.write_text(json.dumps(base))
     flow_path = Path(str(output) + ".flow.json")
     envelope = {
-        "schema_version": 1, "query_version": "8", "checkpoint": "dataflow_progress",
+        "schema_version": 1, "query_version": "9", "checkpoint": "dataflow_progress",
         "run_token": raw["run_token"],
         "base_sha256": hashlib.sha256(base_path.read_bytes()).hexdigest(),
         "overlays": sorted(raw["metadata"]["overlays"]), "truncated_values": 0,
@@ -311,7 +311,7 @@ def flow_progress_result(flow, base_sha256, stage):
     counters = ("sinks_total", "sinks_eligible", "sinks_selected", "sinks_not_selected",
                 "sinks_skipped", "sinks_queried", "sinks_pending", "engine_queries", "sinks_proven_empty")
     return {
-        "schema_version": 1, "query_version": "8", "run_token": TEST_RUN_TOKEN,
+        "schema_version": 1, "query_version": "9", "run_token": TEST_RUN_TOKEN,
         "base_sha256": base_sha256, "plan_digest": flow["selection"]["plan_digest"],
         "stage": stage, "source_parameter_count": flow["source_parameter_count"],
         **{key: flow["queries"][key] for key in counters},
@@ -326,7 +326,7 @@ def flow_progress_result(flow, base_sha256, stage):
 def phase_result(*events):
     return {
         "schema_version": 1,
-        "query_version": "8",
+        "query_version": "9",
         "phases": [
             {"phase": phase, "elapsed_seconds": elapsed} for phase, elapsed in events
         ],
@@ -349,8 +349,8 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("metadata launched Java"))
     info = analysis.joern_info()
     assert info["available"] and info["version"] == "4.0.669"
-    assert info["adapter_version"] == "11"
-    assert info["query_version"] == "8" and info["dataflow"] == "deep_profile"
+    assert info["adapter_version"] == "12"
+    assert info["query_version"] == "9" and info["dataflow"] == "deep_profile"
     assert qualified["root"] not in json.dumps(info)
     deep = analysis.joern_limits("deep")
     assert deep["seconds"] == 3600 and deep["heap_gib"] == 8
@@ -1123,8 +1123,8 @@ def test_standard_phase_progress_rejects_deep_events_and_excess_rows(tmp_path):
     [
         b"source-secret: not JSON",
         b"\xffsource-secret",
-        b'{"schema_version":1,"query_version":"8","phases":[],"phases":[{"phase":"import_started","elapsed_seconds":0}]}',
-        b'{"schema_version":1,"query_version":"8","phases":[{"phase":"import_started","elapsed_seconds":0,"elapsed_seconds":1}]}',
+        b'{"schema_version":1,"query_version":"9","phases":[],"phases":[{"phase":"import_started","elapsed_seconds":0}]}',
+        b'{"schema_version":1,"query_version":"9","phases":[{"phase":"import_started","elapsed_seconds":0,"elapsed_seconds":1}]}',
     ],
 )
 def test_phase_progress_rejects_invalid_encoding_and_ambiguous_json(tmp_path, payload):
@@ -1238,9 +1238,9 @@ def test_process_runner_enforces_timeout_and_discards_sensitive_logs(tmp_path, c
 @pytest.mark.parametrize(
     "payload",
     [
-        '{"schema_version":1,"query_version":"8","schema_version":1}',
-        '{"schema_version":true,"query_version":"8","dataflow":"not_run"}',
-        '{"schema_version":1,"query_version":"8","dataflow":"run"}',
+        '{"schema_version":1,"query_version":"9","schema_version":1}',
+        '{"schema_version":true,"query_version":"9","dataflow":"not_run"}',
+        '{"schema_version":1,"query_version":"9","dataflow":"run"}',
     ],
 )
 def test_unqualified_or_ambiguous_query_output_is_rejected(tmp_path, payload):

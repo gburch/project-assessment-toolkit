@@ -1141,12 +1141,14 @@ try {
   const hostileInventory = async (route) => {
     const response = await route.fetch();
     const report = await response.json();
-    const record = report.assessment.evidence.find((entry) => entry.kind === "ecosystem-analysis");
-    assert(record.stats.dependencies.length > 0, "fixture must capture a real dependency declaration");
-    record.stats.dependencies[0].name = hostileDependency;
+    const record = report.items.find((entry) => entry.kind === "ecosystem-analysis");
+    if (record) {
+      assert(record.stats.dependencies.length > 0, "fixture must capture a real dependency declaration");
+      record.stats.dependencies[0].name = hostileDependency;
+    }
     await route.fulfill({ response, json: report });
   };
-  await page.route("**/api/report?assessment_id=*", hostileInventory);
+  await page.route("**/api/evidence-query?*", hostileInventory);
   await page.goto(origin);
   await expect(page.locator("#ratings .rating")).toHaveCount(dimensions.length);
   await expect(page.locator("#goal-state")).toContainText("No goals saved");
@@ -1174,7 +1176,7 @@ try {
   await expect(ecosystemRecord).toContainText(hostileDependency);
   await expect(ecosystemRecord.locator("summary")).toBeFocused();
   assert.equal(await page.evaluate(() => window.ecosystemPwned), undefined);
-  await page.unroute("**/api/report?assessment_id=*", hostileInventory);
+  await page.unroute("**/api/evidence-query?*", hostileInventory);
 
   assert.equal(await page.evaluate(() => window.pwned), undefined);
   assert.equal(await page.locator("main img[src='x']").count(), 0, "hostile names must remain text");
@@ -1227,7 +1229,11 @@ try {
   await page.locator("#history .event").filter({ hasText: "Source scan" }).last().getByRole("button").click();
   await expect(page.locator("#progress-summary")).toContainText("Progress uses the latest assessment");
   await page.locator("#history .event").filter({ hasText: "Source scan" }).first().getByRole("button").click();
-  // The source's HTML is displayed as text in captured evidence.
+  // Closed evidence stays deferred; opening loads captured HTML as text.
+  const readmeRecord = page.locator("#evidence details").filter({ has: page.getByText("README.md · documentation", { exact: true }) });
+  await expect(page.locator("#profile")).toBeEnabled();
+  await page.locator("#evidence-summary").evaluate((element) => { element.parentElement.open = true; });
+  await readmeRecord.locator("summary").click();
   await expect(page.locator("#evidence")).toContainText("<img src=x onerror=window.pwned=1>");
   assert.equal(await page.evaluate(() => window.pwned), undefined);
   await checkLegacyTargets(page, origin, frameworkProfile);
@@ -1251,6 +1257,7 @@ try {
   await scrollingRecord.locator("summary").click();
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "expanded evidence must fit mobile");
   const evidenceBlocks = scrollingRecord.locator("pre");
+  await expect(evidenceBlocks.first()).toBeVisible();
   const scrollableIndex = await evidenceBlocks.evaluateAll((elements) => elements.findIndex((element) => element.scrollHeight > element.clientHeight));
   assert(scrollableIndex >= 0, "fixture must exercise a vertically scrollable evidence block");
   const scrollableEvidence = evidenceBlocks.nth(scrollableIndex);

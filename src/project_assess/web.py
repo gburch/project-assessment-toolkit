@@ -120,7 +120,9 @@ def create_server(service, port=0):
 
                     result = list_analyzers()
                 elif parsed.path == "/api/report":
-                    result = service.get_report(self._query(parsed.query, "assessment_id"))
+                    result = service.get_report(
+                        self._query(parsed.query, "assessment_id"), compact=True
+                    )
                 elif parsed.path == "/api/report-download":
                     from .report_export import report_html
 
