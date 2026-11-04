@@ -31,7 +31,7 @@ def snapshot(rows=(), *, identity="a", complete=True, status="complete"):
                 "path": "<static-analysis>",
                 "stats": {
                     "schema_version": 1,
-                    "analyzer": {"name": "python-ast", "version": "1"},
+                    "analyzer": {"name": "project-assess-python-ast", "version": "4"},
                     "status": status,
                     "coverage": {"python_files": 1},
                     "candidates": [],  # Rich sample is deliberately empty.

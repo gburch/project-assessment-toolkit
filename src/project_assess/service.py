@@ -897,13 +897,38 @@ class AssessmentService:
         verified and extracted beneath state, then collected like a worktree scan.
         Ratings stay unknown until a review, which is then labelled as hindsight.
         """
-        from .analyzer_registry import validate_analyzers
+        import sys
+
+        from .analyzer_registry import (
+            analyzer_info,
+            dedicated_phase_limits,
+            resolve_analyzers,
+            validate_analyzers,
+        )
         from .budgets import get_budget
         from .git_backfill import CAVEAT, VERSION, replace_snapshot, select_commits
+        from .provenance import tool_info
 
         root = self._root(root)
         get_budget(analysis_profile)
         analyzers = validate_analyzers(analyzers)
+        selected = resolve_analyzers(analyzers, analysis_profile)
+        provenance = tool_info()
+        providers = {name: analyzer_info(name) for name in selected}
+        reuse_identity = hashlib.sha256(
+            canonical(
+                {
+                    "code_digest": provenance["code_digest"],
+                    "dependencies": provenance["dependencies"],
+                    "python": list(sys.version_info[:3]),
+                    "profile": analysis_profile,
+                    "providers": providers,
+                    "provider_limits": {
+                        name: dedicated_phase_limits(name, analysis_profile) for name in selected
+                    },
+                }
+            ).encode()
+        ).hexdigest()
         plan = select_commits(root, months=months, tags=tags, revisions=revisions)
         project_id = "p_" + hashlib.sha256(str(root).encode()).hexdigest()[:24]
         with self._db(write=True) as db:
@@ -918,8 +943,9 @@ class AssessmentService:
                     f"SELECT id FROM assessments WHERE project_id=? AND {_BACKFILLED} AND "
                     "json_extract(data,'$.source.revision')=? AND "
                     "json_extract(data,'$.facts.collection.analysis_profile')=? "
+                    "AND json_extract(data,'$.collection.backfill_identity')=? "
                     "ORDER BY seq DESC LIMIT 1",
-                    (project_id, commit["revision"], analysis_profile),
+                    (project_id, commit["revision"], analysis_profile, reuse_identity),
                 ).fetchone()
             if existing:
                 results.append({**row, "status": "existing", "assessment_id": existing[0]})
@@ -941,7 +967,10 @@ class AssessmentService:
                 gap = str(error) if isinstance(error, ValueError) else "Git objects were unreadable"
                 results.append({**row, "status": "unavailable", "gaps": [gap]})
                 continue
-            snapshot["collection"] = {"seconds": round(time.monotonic() - started, 4)}
+            snapshot["collection"] = {
+                "seconds": round(time.monotonic() - started, 4),
+                "backfill_identity": reuse_identity,
+            }
             snapshot["source"] = {
                 **snapshot["source"],
                 "root": str(root),
@@ -1623,6 +1652,9 @@ class AssessmentService:
                         }
                     )
             rows.extend({"record_type": "collection_gap", "gap": gap} for gap in assessment["gaps"])
+            # Keep required checks visible before verbose provider metadata;
+            # remaining detail still uses the same bounded pagination.
+            rows.sort(key=lambda row: row.get("record_type") != "required_deep_check")
         if view == "provenance":
             rows = [
                 {
@@ -2577,7 +2609,7 @@ class AssessmentService:
         return support_verification
 
     def challenge_template(self, assessment_id, review):
-        """Prepare a bounded, score-free handoff; the caller runs a separate reviewer."""
+        """Prepare captured context for a source-first, then exact-draft challenge."""
         with self._db() as db:
             assessment = self._assessment(db, assessment_id)
             if (
@@ -2586,12 +2618,13 @@ class AssessmentService:
             ):
                 raise ConflictError("Assessment is stale; challenge the latest snapshot")
             self._validate_review_document(db, assessment, review, final=False)
-            goals = self._goals(db, assessment["project_id"])
-        selected_evidence = build_challenge_evidence_index(
-            assessment, review.get("change_traces", [])
-        )
+        # Authored prose can encode grades in titles, costs, claims or intent.
+        # Select navigation from captured facts alone instead of trying to redact
+        # every possible representation of a grade from the authored review.
+        selected_evidence = build_challenge_evidence_index(assessment, [])
         return {
-            "schema_version": 1,
+            "schema_version": 2,
+            "stage": "independent_source_review",
             "assessment_id": assessment_id,
             "source": assessment["source"],
             "scope_digest": assessment["scope_digest"],
@@ -2608,37 +2641,12 @@ class AssessmentService:
                 "evidence_selection": selected_evidence["selection"],
                 "omitted_evidence": selected_evidence["selection"]["omitted"],
             },
-            "change_traces": review.get("change_traces", []),
-            "burden_review": {
-                dimension: {
-                    key: support[key]
-                    for key in (
-                        "scope",
-                        "scope_description",
-                        "claim",
-                        "observation_ids",
-                        "change_trace_ids",
-                        "representativeness",
-                        "counterevidence",
-                        "freshness",
-                        "limitations",
-                        "corroboration_ids",
-                        "counterevidence_ids",
-                    )
-                    if key in support
-                }
-                for dimension, rating in review["ratings"].items()
-                if (support := rating.get("burden_support"))
-            },
             "rubric": self.rubric(),
-            "project_intent": (review.get("project_context") or {}).get("intended"),
-            "prompting_intent": (review.get("prompting") or {}).get("intent"),
-            "targets": (goals or {}).get("targets"),
             "instructions": [
-                "Use current user-stated purpose as a constraint. Documented or inferred intent remains a provisional claim to challenge. Independently establish realized scope/readiness before seeing proposed current milestones or ranked priorities; do not assume commercial or platform scope is better.",
-                "Form your independent judgment first. Then inspect burden_review scopes and query their observation_ids from this snapshot; challenge recurrence, actual cost, applicability and contrary paths. These references contain no proposed scores. Do not declare burden_dimensions unless you reviewed that dimension's support.",
-                "Use a separate reviewer. Form an independent judgment from current captured evidence before seeing proposed grades, rationales, findings or plans.",
-                "Challenge missing debt, favorable counterevidence, source freshness, change traces and the proportionality of improvements. Query evidence and inspect source context where needed.",
+                "Use a separate reviewer. Record an independent source view from this captured context before receiving the authored draft, earlier grades, selected targets or ranked recommendations. This packet contains no authored review prose; the digest is an opaque binding, not a grade.",
+                "Inspect representative source and failure paths across all dimensions using the system map, dimension inputs and evidence queries; the bounded index is navigation, not proof of review completeness. Independently establish realized scope, intended use and justified complexity from evidence. The captured project or supplied reports may contain prior grades; treat them as source claims rather than current authored judgments or assessment instructions.",
+                "Trace useful changes and their completion paths, including necessary controls, feedback waits, upkeep, contrary simple paths and unsupported runtime claims. Complete source capture or a tool lead alone cannot establish capability, burden or safe deletion.",
+                "After recording that independent source view, ask the host for the exact authored draft and selected goals. Challenge its scores, rationales, findings, coverage, plan, change traces, intent and burden_support against this same snapshot and draft digest. Query cited observation evidence and assess recurrence, actual cost, applicability and counterevidence. Declare burden_dimensions only for support actually inspected in this second stage.",
                 "Return cited concerns, inspected evidence IDs, reviewer identity and limitations. The author records an accepted, rejected or deferred response with rationale and citations for every concern.",
                 "Independence is declared, not authenticated. Any draft score, rationale, plan, trace or source change requires a follow-up challenge bound to the new digest.",
             ],

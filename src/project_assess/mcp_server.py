@@ -177,7 +177,7 @@ def create_mcp(service):
 
     @server.tool(annotations={"readOnlyHint": True})
     def challenge_template(assessment_id: str, review: dict) -> dict[str, Any]:
-        """Prepare captured context for a separate reviewer, hiding draft grades and plan. No AI is invoked and no review is saved."""
+        """Prepare captured facts and rubric for an independent source-first view, with no authored review content. After recording that view, challenge the bound full draft. No AI is invoked and no review is saved."""
         return service.challenge_template(assessment_id, review)
 
     @server.tool(annotations={"readOnlyHint": False, "destructiveHint": False})

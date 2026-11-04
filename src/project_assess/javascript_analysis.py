@@ -18,9 +18,9 @@ from pathlib import PurePosixPath
 from .generic_analysis import source_area
 from .js_controls import DIMENSIONS as CONTROL_DIMENSIONS
 from .js_controls import analyze_javascript_controls
-from .static_analysis import source_role
+from .static_analysis import candidate_coverage, source_role
 
-VERSION = "4"
+VERSION = "5"
 SUPPORTED_TREE_SITTER = ">=0.25.2,<0.26"
 MAX_BYTES = 8 * 1024 * 1024
 MAX_NODES = 100_000
@@ -165,6 +165,42 @@ def _name(node, raw):
     return f"anonymous@{node.start_point.row + 1}"
 
 
+def _qualified_symbol(node, raw):
+    """Name lexical owners, never give anonymous/computed owners a line identity."""
+    owners = []
+    current, traversed = node, 0
+    while current is not None and traversed < 256:
+        traversed += 1
+        if current.type in _FUNCTIONS | {"class", "class_declaration"}:
+            name = _name(current, raw)
+            if name.startswith("anonymous@") or len(name.encode()) >= 256:
+                return None
+            owners.append(name)
+        elif current.type == "object":
+            parent = current.parent
+            if parent is None or parent.type != "variable_declarator":
+                return None
+            owner = parent.child_by_field_name("name")
+            if (
+                owner is None
+                or owner.type != "identifier"
+                or owner.end_byte - owner.start_byte >= 256
+            ):
+                return None
+            owners.append(_text(owner, raw))
+        elif (
+            current.type == "statement_block"
+            and current.parent
+            and current.parent.type not in _FUNCTIONS
+        ):
+            return None
+        current = current.parent
+    if current is not None:
+        return None
+    value = ".".join(reversed(owners))
+    return value if len(value) <= 4096 else None
+
+
 def _relative_string(node, raw):
     if node is None or node.type != "string":
         return None
@@ -181,7 +217,7 @@ def _fingerprint(node, raw):
     body = node.child_by_field_name("body")
     parameters = node.child_by_field_name("parameters") or node.child_by_field_name("parameter")
     if body is None or len(body.named_children) < 3:
-        return None
+        return None, False
     digest, stack, count = hashlib.sha256(), [body], 0
     if parameters is not None:
         stack.append(parameters)
@@ -189,7 +225,7 @@ def _fingerprint(node, raw):
         current = stack.pop()
         count += 1
         if count > MAX_FUNCTION_NODES:
-            return None
+            return None, True
         if current.type == "comment":
             continue
         children = [child for child in current.children if child.type != "comment"]
@@ -198,7 +234,7 @@ def _fingerprint(node, raw):
             digest.update(hashlib.sha256(raw[current.start_byte : current.end_byte]).digest())
         else:
             stack.extend(reversed(children))
-    return digest.hexdigest() if count >= 20 else None
+    return (digest.hexdigest() if count >= 20 else None), False
 
 
 def _candidate(kind, lens, locations, metrics, confidence="medium"):
@@ -297,7 +333,26 @@ def analyze_javascript(path: str, text: str) -> dict:
         if node.type in {"identifier", "property_identifier", "shorthand_property_identifier"}
     )
     functions = [node for node, _ in nodes if node.type in _FUNCTIONS]
+    scope_names = {
+        node.id: _qualified_symbol(node, raw)
+        for node, _ in nodes
+        if node.type in _FUNCTIONS | {"class", "class_declaration", "object"}
+    }
+    scope_counts = Counter(name for name in scope_names.values() if name is not None)
+    qualified_symbols = {
+        node_id: name
+        if name
+        and all(
+            scope_counts[".".join(name.split(".")[:end])] == 1
+            for end in range(1, len(name.split(".")) + 1)
+        )
+        else None
+        for node_id, name in scope_names.items()
+    }
     record["module"]["function_count"] = len(functions)
+    record["module"]["metric_function_count"] = sum(
+        node.child_by_field_name("body") is not None for node in functions
+    )
     record["module"]["overview_partial"] = partial
     exported = set()
     dynamic = False
@@ -399,15 +454,30 @@ def analyze_javascript(path: str, text: str) -> dict:
         )
         nesting = max((depth + (node.type in _CONTROLS) for node, depth in own), default=0)
         location, name = _location(path, function), _name(function, raw)
+        qualified_symbol = qualified_symbols.get(function.id)
+        identity_complete = (
+            not record["module"]["overview_partial"] and qualified_symbol is not None
+        )
+        fingerprint, fingerprint_partial = (
+            (None, True) if function_partial else _fingerprint(function, raw)
+        )
+        if fingerprint_partial and not function_partial:
+            partial = True
+            record["gaps"].append(
+                "JavaScript fingerprint node limit reached; clone comparison is partial"
+            )
         record["functions"].append(
             {
                 "name": name,
+                "qualified_symbol": qualified_symbol,
+                "identity_complete": identity_complete,
                 "location": location,
                 "decisions": decisions,
                 "nesting": nesting,
                 "lines": location["end_line"] - location["line"] + 1,
                 "partial": function_partial,
-                "fingerprint": None if function_partial else _fingerprint(function, raw),
+                "fingerprint": fingerprint,
+                "fingerprint_partial": fingerprint_partial,
             }
         )
         if decisions >= DECISION_THRESHOLD or nesting >= NESTING_THRESHOLD:
@@ -418,6 +488,8 @@ def analyze_javascript(path: str, text: str) -> dict:
                     [location],
                     {
                         "symbol": name,
+                        "qualified_symbol": qualified_symbol,
+                        "identity_complete": identity_complete,
                         "decision_points": decisions,
                         "control_nesting": nesting,
                         "partial": function_partial,
@@ -556,6 +628,7 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
                 {
                     "path": row["path"],
                     "name": function["name"],
+                    "qualified_symbol": function.get("qualified_symbol"),
                     "line": function["location"]["line"],
                     "end_line": function["location"]["end_line"],
                     "role": row["role"],
@@ -657,6 +730,54 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
         Counter(edge["target"] for edge in edges),
         Counter(edge["source"] for edge in edges),
     )
+    metric_total = sum(
+        row["module"].get("metric_function_count", row["module"]["function_count"])
+        for row in selected
+    )
+    metric_complete = total == 0 or (
+        identity["available"]
+        and total == len(selected) == len(details)
+        and all(row["parsed"] and not row["module"]["overview_partial"] for row in selected)
+        and metric_total == len(hotspots)
+        and not any(row["partial"] for row in hotspots)
+    )
+    families = {
+        kind: {
+            "complete": metric_complete,
+            "eligible_units": metric_total,
+            "analyzed_units": len(hotspots),
+            "partial_units": sum(row["partial"] for row in hotspots),
+            "basis": "all captured JavaScript/TypeScript function bodies; import resolution is separate",
+        }
+        for kind in ("complex_function", "near_duplicate_function")
+    }
+    fingerprint_partial = sum(
+        function.get("fingerprint_partial", True)
+        for row in selected
+        if row["path"] in details
+        for function in row["functions"]
+    )
+    families["near_duplicate_function"].update(
+        complete=metric_complete and not fingerprint_partial,
+        partial_units=fingerprint_partial,
+        basis="complete parameter/body fingerprint traversal; independent from body-only complexity metrics",
+    )
+    source_rules_complete = total == 0 or (
+        identity["available"]
+        and total == len(selected) == len(details)
+        and all(
+            row["status"] == "complete" and not row["module"]["dynamic_resolution"]
+            for row in selected
+        )
+    )
+    for kind in ("unused_symbol", "unreachable_statement"):
+        families[kind] = {
+            "complete": source_rules_complete,
+            "eligible_units": total,
+            "analyzed_units": len(details),
+            "partial_units": 0 if source_rules_complete else len(details),
+            "basis": "complete captured syntax traversal and applicable rule guards; runtime disuse is not established",
+        }
     return {
         "schema_version": 1,
         "available": identity["available"],
@@ -756,6 +877,7 @@ def summarize_javascript(records: list[dict], javascript_files: int | None = Non
             "by_kind": dict(sorted(Counter(row["kind"] for row in candidates).items())),
             "by_role": dict(sorted(Counter(row["role"] for row in candidates).items())),
         },
+        "candidate_coverage": candidate_coverage(candidates, indexed, families),
         "gaps": sorted(gaps),
         "limits": {
             "bytes_per_file": MAX_BYTES,

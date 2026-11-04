@@ -4,10 +4,37 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter, defaultdict
 from pathlib import PurePosixPath
 
 _KINDS = {"static-analysis", "javascript-analysis", "source-analysis"}
+_LEGACY_VERSIONS = {
+    "project-assess-python-ast": {"1", "2", "3", "4"},
+    "project-assess-tree-sitter": {"1", "2", "3", "4"},
+    "project-assess-source-text": {"1", "2"},
+}
+_LEGACY_KINDS = {
+    "project-assess-python-ast": {
+        "complex_function",
+        "loop_io",
+        "duplicate_function",
+        "near_duplicate_function",
+        "duplicate_block",
+        "dependency_cycle",
+        "shadowed_module",
+        "unreachable_statement",
+        "unreferenced_module",
+        "unused_symbol",
+    },
+    "project-assess-tree-sitter": {
+        "complex_function",
+        "near_duplicate_function",
+        "unused_symbol",
+        "unreachable_statement",
+    },
+    "project-assess-source-text": {"duplicate_source_file", "duplicate_source_block"},
+}
 NATIVE_KINDS = (
     "complex_function",
     "dependency_cycle",
@@ -29,6 +56,8 @@ _METRICS = {
     "near_duplicate_function": ("matching_functions",),
     "duplicate_block": ("matching_blocks",),
     "dependency_cycle": ("module_count",),
+    "duplicate_source_file": ("matching_locations",),
+    "duplicate_source_block": ("matching_locations",),
 }
 _CAVEAT = (
     "Native candidates are review leads, not defects, project grades or verified fixes. "
@@ -76,11 +105,22 @@ def _providers(assessment):
         # Duplicate producer records cannot silently overwrite one another.
         if name in providers:
             providers[name]["complete"] = False
+            providers[name]["families"] = {}
+            providers[name]["duplicate"] = True
             providers[name]["gaps"].append("Duplicate producer evidence; matching is ambiguous")
             continue
         rows = stats.get("candidate_index", stats.get("candidates", []))
         counts = stats.get("candidate_counts", {})
         coverage = stats.get("coverage", {})
+        legacy = "candidate_coverage" not in stats and stats.get("analyzer", {}).get(
+            "version"
+        ) in _LEGACY_VERSIONS.get(name, set())
+        families = stats.get("candidate_coverage", {})
+        family_schema = (
+            isinstance(families, dict)
+            and families.get("schema_version") == 1
+            and isinstance(families.get("families"), dict)
+        )
         eligible = next(
             (
                 coverage[key]
@@ -92,15 +132,30 @@ def _providers(assessment):
         providers[name] = {
             "identity": [stats.get("schema_version"), stats.get("analyzer")],
             "supported": stats.get("schema_version") == 1
-            and isinstance(stats.get("analyzer", {}).get("version"), str),
+            and isinstance(stats.get("analyzer", {}).get("version"), str)
+            and (legacy or family_schema),
             "complete": capture_complete
             and (_inventory_complete(stats) or eligible == 0)
-            and counts.get("omitted_from_index", 0) == 0,
+            and counts.get("omitted_from_index", 0) == 0
+            and (legacy or family_schema),
             "status": stats.get("status", "unknown"),
             "coverage": coverage,
             "gaps": list(stats.get("gaps", [])),
             "rows": rows,
             "edges": stats.get("topology", {}).get("edges", []),
+            "families": families,
+            "capture_complete": capture_complete,
+            "duplicate": False,
+            "legacy": legacy,
+            "legacy_kinds": {
+                "complex_function",
+                "loop_io",
+                "duplicate_function",
+                "dependency_cycle",
+            }
+            if name == "project-assess-python-ast"
+            and stats.get("analyzer", {}).get("version") == "1"
+            else _LEGACY_KINDS.get(name, set()),
         }
     return providers
 
@@ -108,13 +163,102 @@ def _providers(assessment):
 def _key(provider, row):
     metrics = row.get("metrics", {})
     paths = sorted({loc["path"] for loc in row.get("locations", []) if "path" in loc})
-    symbol = metrics.get("symbol") or metrics.get("name")
+    symbol = metrics.get("qualified_symbol") or metrics.get("symbol") or metrics.get("name")
+    unestablished = "qualified_symbol" in metrics and (
+        not metrics["qualified_symbol"] or metrics.get("identity_complete") is not True
+    )
     # No source line numbers, evidence hashes or numeric measurements in the key:
     # moving code or increasing complexity must not reset its identity.
-    anchor = symbol or metrics.get("reason") or metrics.get("module") or ""
-    value = [provider, row.get("kind"), paths, anchor]
+    if unestablished:
+        symbol = None
+    anchor = (
+        [symbol, metrics.get("reason")]
+        if symbol
+        else metrics.get("fingerprint") or metrics.get("reason") or metrics.get("module") or ""
+    )
+    strong_group = (
+        row.get("kind") in {"duplicate_source_file", "duplicate_source_block", "duplicate_function"}
+        and isinstance(metrics.get("fingerprint"), str)
+        and re.fullmatch("[0-9a-f]{64}", metrics["fingerprint"])
+    )
+    value = (
+        [provider, row.get("kind"), metrics["fingerprint"]]
+        if strong_group
+        else [provider, row.get("kind"), paths, anchor]
+    )
     digest = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:24]
-    return "delta-" + digest, paths, "symbol" if symbol else "aggregate_paths_and_reason"
+    return (
+        "delta-" + digest,
+        paths,
+        (
+            "unestablished_symbol"
+            if unestablished
+            else "content_fingerprint"
+            if strong_group
+            else "qualified_symbol"
+            if metrics.get("qualified_symbol")
+            else "symbol"
+            if symbol
+            else "aggregate_paths_and_reason"
+        ),
+    )
+
+
+def _family_scope(provider, kind):
+    """An explicit producer scope cannot override missing capture or retention."""
+    if provider is None:
+        return {"complete": False, "reason": "Producer evidence is missing"}
+    document = provider["families"]
+    if not isinstance(document, dict) or document and document.get("schema_version") != 1:
+        return {"complete": False, "reason": "Unsupported rule-family coverage"}
+    families = document.get("families", {})
+    if not isinstance(families, dict):
+        return {"complete": False, "reason": "Invalid rule-family coverage"}
+    scope = families.get(kind)
+    if scope is None:
+        if document or not provider["legacy"] or kind not in provider["legacy_kinds"]:
+            return {"complete": False, "reason": "Producer does not advertise this rule family"}
+        return {"complete": provider["complete"], "reason": "Legacy whole-provider completeness"}
+    if not isinstance(scope, dict):
+        return {"complete": False, "reason": "Invalid rule-family coverage"}
+    counts = [
+        scope.get(key)
+        for key in (
+            "eligible_units",
+            "analyzed_units",
+            "partial_units",
+            "candidates_observed",
+            "candidates_indexed",
+        )
+    ]
+    valid = all(type(value) is int and value >= 0 for value in counts)
+    eligible, analyzed, partial, observed, indexed = counts if valid else (0, 0, 1, 0, 1)
+    valid = (
+        valid
+        and type(scope.get("complete")) is bool
+        and eligible >= analyzed
+        and partial <= analyzed
+        and observed >= indexed
+        and indexed == sum(row.get("kind") == kind for row in provider["rows"])
+    )
+    complete = (
+        scope.get("complete") is True
+        and valid
+        and eligible == analyzed
+        and partial == 0
+        and observed == indexed
+        and provider["capture_complete"]
+        and not provider["duplicate"]
+        and indexed == sum(row.get("kind") == kind for row in provider["rows"])
+    )
+    return {
+        **scope,
+        "valid": valid,
+        "complete": complete,
+        "reason": "Producer rule-family coverage and compact retention"
+        if complete
+        else "Rule-family analysis, capture or compact retention is incomplete",
+    }
 
 
 def _groups(provider, rows):
@@ -123,6 +267,20 @@ def _groups(provider, rows):
         key, _, _ = _key(provider, row)
         groups[key].append(row)
     return groups
+
+
+def _complete_function_pair(left, right):
+    """Matched local metrics can be complete despite unrelated omitted work."""
+    if len(left) != 1 or len(right) != 1 or left[0].get("kind") != "complex_function":
+        return False
+    return all(
+        row.get("metrics", {}).get("identity_complete") is True
+        and row["metrics"].get("qualified_symbol")
+        and row["metrics"].get("partial") is False
+        and row["metrics"].get("metric_basis") == "complete_function"
+        and all(type(row["metrics"].get(key)) is int for key in _METRICS["complex_function"])
+        for row in (*left, *right)
+    )
 
 
 def _measurements(rows):
@@ -209,6 +367,7 @@ def build_ci_delta(before, after, *, fail_on_kinds=()):
     if not base or not head:
         reasons.append("Native producer evidence is missing")
     changes, coverage = [], []
+    old_files, new_files = _files(before), _files(after)
     for name in sorted(base.keys() | head.keys()):
         old, new = base.get(name), head.get(name)
         compatible = (
@@ -237,15 +396,46 @@ def build_ci_delta(before, after, *, fail_on_kinds=()):
             left, right = old_groups.get(key, []), new_groups.get(key, [])
             row = (right or left)[0]
             _, paths, basis = _key(name, row)
+            old_scope, new_scope = (
+                _family_scope(old, row.get("kind")),
+                _family_scope(new, row.get("kind")),
+            )
+            local_metrics = (
+                old_scope.get("valid") is True
+                and new_scope.get("valid") is True
+                and _complete_function_pair(left, right)
+                and all(old_files.get(path) and new_files.get(path) for path in paths)
+            )
             classification, reason = _change(
                 left,
                 right,
                 comparable=compatible,
-                old_complete=bool(old and old["complete"]),
-                new_complete=bool(new and new["complete"]),
+                old_complete=old_scope["complete"] or local_metrics,
+                new_complete=new_scope["complete"] or local_metrics,
             )
+            if left and right and basis == "unestablished_symbol":
+                classification, reason = (
+                    "unknown",
+                    "Lexical function ownership is unestablished; inspect locations",
+                )
             if row.get("kind") not in NATIVE_KINDS:
                 classification, reason = "unknown", "Unsupported native candidate kind"
+            if (
+                classification in {"new", "no_longer_observed"}
+                and row.get("kind")
+                in {
+                    "duplicate_function",
+                    "duplicate_block",
+                    "near_duplicate_function",
+                    "duplicate_source_file",
+                    "duplicate_source_block",
+                }
+                and basis != "content_fingerprint"
+            ):
+                classification, reason = (
+                    "unknown",
+                    "Stable duplicate-group fingerprint is unavailable; introduction or clearance is unknown",
+                )
             changes.append(
                 {
                     "key": key,
@@ -255,6 +445,10 @@ def build_ci_delta(before, after, *, fail_on_kinds=()):
                     "identity_basis": basis,
                     "classification": classification,
                     "reason": reason,
+                    "family_coverage": {"before": old_scope, "after": new_scope},
+                    "comparison_scope": "matched_complete_function"
+                    if local_metrics
+                    else "rule_family",
                     "before": {
                         "count": len(left),
                         "measurements": _measurements(left),
@@ -299,9 +493,54 @@ def build_ci_delta(before, after, *, fail_on_kinds=()):
         or not row["after"]["complete"]
         for row in coverage
     )
+    selected_coverage = []
+    for kind in sorted(set(fail_on_kinds)):
+        producers = [
+            name
+            for name in base.keys() | head.keys()
+            if any(
+                kind in (provider or {}).get("families", {}).get("families", {})
+                or (provider or {}).get("legacy")
+                and kind in (provider or {}).get("legacy_kinds", set())
+                for provider in (base.get(name), head.get(name))
+            )
+        ]
+        if producers:
+            for name in sorted(producers):
+                old_scope, new_scope = (
+                    _family_scope(base.get(name), kind),
+                    _family_scope(head.get(name), kind),
+                )
+                selected_coverage.append(
+                    {"provider": name, "kind": kind, "before": old_scope, "after": new_scope}
+                )
+        else:
+            selected_coverage.append(
+                {
+                    "provider": "unadvertised rule",
+                    "kind": kind,
+                    "before": {
+                        "complete": False,
+                        "reason": "No producer advertises this selected rule",
+                    },
+                    "after": {
+                        "complete": False,
+                        "reason": "No producer advertises this selected rule",
+                    },
+                }
+            )
+    policy_incomplete = (
+        any(not row[axis]["complete"] for row in selected_coverage for axis in ("before", "after"))
+        if fail_on_kinds
+        else incomplete
+    )
+    policy_unknown = any(
+        row["classification"] == "unknown" and (not fail_on_kinds or row["kind"] in fail_on_kinds)
+        for row in changes
+    )
     return {
         "schema_version": 1,
-        "method": "native_inventory_delta.v1",
+        "method": "native_inventory_delta.v2",
         "baseline_assessment_id": before.get("id"),
         "assessment_id": after.get("id"),
         "source": {"before": before.get("source", {}), "after": after.get("source", {})},
@@ -324,12 +563,11 @@ def build_ci_delta(before, after, *, fail_on_kinds=()):
             "mode": "selected_native_kinds" if fail_on_kinds else "advisory",
             "fail_on_kinds": sorted(set(fail_on_kinds)),
             "violations": violations,
+            "coverage": selected_coverage,
             "result": "fail"
             if violations
             else "unknown"
-            if not compatible
-            or incomplete
-            or any(row["classification"] == "unknown" for row in changes)
+            if not compatible or policy_incomplete or policy_unknown
             else "pass",
             "exit_code": 1 if violations else 0,
         },
@@ -357,10 +595,16 @@ def render_ci_markdown(report):
         "| --- | ---: |",
     ]
     lines.extend(f"| {_escape(kind)} | {count} |" for kind, count in report["counts"].items())
-    lines.extend(["", "| Classification | Kind | Paths |", "| --- | --- | --- |"])
+    lines.extend(
+        [
+            "",
+            "| Classification | Kind | Paths | Family coverage before → after | Reason |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
     rows = [row for row in report["changes"] if row["classification"] != "existing"]
     lines.extend(
-        f"| {_escape(row['classification'])} | {_escape(row['kind'])} | {_escape(', '.join(row['paths']))} |"
+        f"| {_escape(row['classification'])} | {_escape(row['kind'])} | {_escape(', '.join(row['paths']))} | {'complete' if row['family_coverage']['before']['complete'] else 'partial'} → {'complete' if row['family_coverage']['after']['complete'] else 'partial'} | {_escape(row['reason'])} |"
         for row in rows[:50]
     )
     if len(rows) > 50:
@@ -372,4 +616,9 @@ def render_ci_markdown(report):
             f"- {_escape(item['provider'])}: {_escape(left.get('status', 'missing'))} → {_escape(right.get('status', 'missing'))}; comparable: {item['comparable']}."
         )
     lines.extend("- " + _escape(reason) for reason in report["gaps"])
+    for item in report["policy"].get("coverage", []):
+        left, right = item["before"], item["after"]
+        lines.append(
+            f"- Selected rule {_escape(item['kind'])} ({_escape(item['provider'])}): {'complete' if left['complete'] else 'partial'} → {'complete' if right['complete'] else 'partial'}. {_escape(right.get('reason', ''))}"
+        )
     return "\n".join(lines) + "\n"

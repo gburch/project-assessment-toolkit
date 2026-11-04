@@ -230,7 +230,18 @@ def pattern_candidates(records):
     for record in records:
         for function in record["functions"]:
             patterns = function.get("patterns", {})
-            candidates.extend(dict(row) for row in patterns.get("unreachable", []))
+            candidates.extend(
+                {
+                    **row,
+                    "metrics": {
+                        **row["metrics"],
+                        "symbol": function.get("name"),
+                        "qualified_symbol": function.get("qualified_symbol"),
+                        "identity_complete": function.get("identity_complete", False),
+                    },
+                }
+                for row in patterns.get("unreachable", [])
+            )
             for groups, key in ((near, "near_fingerprint"), (shapes, "shape_fingerprint")):
                 if patterns.get(key):
                     groups[patterns[key]].append(function)

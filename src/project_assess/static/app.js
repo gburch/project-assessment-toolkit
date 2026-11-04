@@ -1285,7 +1285,7 @@ $("challenge-load").addEventListener("click", async () => {
     $("challenge-json").textContent = jsonText(packet);
     $("challenge-result").hidden = false;
     $("challenge-result").open = true;
-    message("Challenge packet prepared. Give it to a separate reviewer, then record the challenge and responses in your review JSON.");
+    message("Source-review packet prepared. Give it to a reviewer without the draft; record their independent source view, then share the bound full draft and goals for the challenge.");
   } catch (error) {
     if (currentSnapshot(load, id)) message(error.message, true);
   } finally {

@@ -220,7 +220,7 @@ def test_index_exposes_leads_beyond_rich_sample_with_explicit_denominators(monke
     assert counts["omitted_from_index"] == 2
     assert counts["by_kind"] == {"unreferenced_module": 1, "unused_symbol": 3}
     assert counts["by_role"] == {"production": 4}
-    assert result["analyzer"]["version"] == "4"
+    assert result["analyzer"]["version"] == "5"
     assert any("index limit" in gap for gap in result["gaps"])
 
 

@@ -151,7 +151,9 @@ def test_score_free_challenge_packet_is_read_only_and_bound_to_the_draft(capture
     assert "PROPOSED RATIONALE" not in text
     assert "ratings" not in packet and "findings" not in packet and "plan" not in packet
     assert "review_id" not in packet and "review" not in packet["context"]
-    assert packet["change_traces"] == review["change_traces"]
+    assert "change_traces" not in packet and "burden_review" not in packet
+    assert packet["schema_version"] == 2 and packet["stage"] == "independent_source_review"
+    assert packet["context"]["evidence_selection"]["trace_cited"] == 0
     assert packet["context"]["evidence_index"] and packet["rubric"]
     assert stored_rows(service) == []
     assert (
@@ -328,3 +330,131 @@ def test_old_snapshot_and_mismatched_identity_cannot_prepare_challenge(captured)
     service.scan(snapshot["source"]["root"])
     with pytest.raises(ConflictError, match="stale"):
         service.challenge_template(snapshot["id"], review)
+
+
+@pytest.mark.parametrize(
+    "grade_prose",
+    [
+        "AUTHORED_GRADE_MARKER working burden 2/5 and capability C4",
+        "AUTHORED_GRADE_MARKER Fort Knox, mature, negligible upkeep, four stars",
+        "AUTHORED_GRADE_MARKER encoded score QzUvQjE= <img src=x onerror=alert(1)>",
+    ],
+)
+def test_initial_packet_excludes_authored_prose_in_every_review_surface(captured, grade_prose):
+    service, snapshot = captured
+    review = draft(service, snapshot)
+    baseline = service.challenge_template(snapshot["id"], review)
+    source_id = snapshot["evidence"][0]["id"]
+    for rating in review["ratings"].values():
+        rating.update(rationale=grade_prose, recommendations=[grade_prose])
+        rating["burden_support"] = {
+            "claim": grade_prose,
+            "scope": "workflow",
+            "scope_description": grade_prose,
+            "observation_ids": [],
+            "change_trace_ids": ["change-entrypoint"],
+            "representativeness": grade_prose,
+            "counterevidence": grade_prose,
+            "freshness": grade_prose,
+            "limitations": [grade_prose],
+        }
+    trace = review["change_traces"][0]
+    for key in ("title", "cost", "invariant", "counterevidence"):
+        trace[key] = grade_prose
+    trace["gaps"] = [grade_prose]
+    trace["steps"][0].update(owner=grade_prose, change=grade_prose)
+    review["findings"] = [{"severity": "high", "title": grade_prose, "evidence_ids": [source_id]}]
+    review["project_context"]["intended"]["statement"] = grade_prose
+    review["project_context"]["intended"]["alternatives"] = [grade_prose]
+    review["prompting"]["intent"]["rationale"] = grade_prose
+    review["prompting"]["recommendations"] = [
+        {
+            "direction": "retain",
+            "action": grade_prose,
+            "rationale": grade_prose,
+            "evidence_ids": [source_id],
+        }
+    ]
+    review["coverage"]["limitations"] = [grade_prose]
+    for dimension in review["coverage"]["dimension_reviews"].values():
+        dimension["rationale"] = grade_prose
+    review["methodology"]["reviewer_id"] = grade_prose
+    review["review_context"]["loaded_instructions"] = [
+        {"path": "/authored/" + grade_prose, "sha256": "0" * 64, "read_status": "partial"}
+    ]
+    review["project_context"]["current"]["rationale"] = grade_prose
+    review["project_context"]["alignment"]["rationale"] = grade_prose
+    review["prompting"]["rationale"] = grade_prose
+    review["prompting"]["variability"]["rationale"] = grade_prose
+    review["plan"] = {
+        "schema_version": 1,
+        "diagnosis": grade_prose,
+        "target_state": grade_prose,
+        "initiatives": [
+            {
+                "id": "authored-plan",
+                "title": grade_prose,
+                "priority": "high",
+                "root_cause": grade_prose,
+                "scope": grade_prose,
+                "dimension_impacts": {"maintainability": grade_prose},
+                "evidence_ids": [source_id],
+                "acceptance": [grade_prose],
+                "burden_effect": grade_prose,
+                "depends_on": [],
+                "first_slice": grade_prose,
+            }
+        ],
+    }
+    service.set_targets(snapshot["project_id"], profile="sensitive-critical", expected_revision=0)
+    packet = service.challenge_template(snapshot["id"], review)
+    assert grade_prose not in json.dumps(packet)
+    assert set(packet) == {
+        "schema_version",
+        "stage",
+        "assessment_id",
+        "source",
+        "scope_digest",
+        "rubric_version",
+        "draft_digest",
+        "context",
+        "rubric",
+        "instructions",
+    }
+    assert packet["draft_digest"] != baseline["draft_digest"]
+    assert {key: value for key, value in packet.items() if key != "draft_digest"} == {
+        key: value for key, value in baseline.items() if key != "draft_digest"
+    }
+    for key in (
+        "ratings",
+        "findings",
+        "plan",
+        "change_traces",
+        "burden_review",
+        "project_context",
+        "project_intent",
+        "prompting_intent",
+        "targets",
+        "review_context",
+    ):
+        assert key not in packet
+    assert all(
+        "change_trace" not in row["selection_reasons"]
+        for row in packet["context"]["evidence_index"]
+    )
+    assert "exact authored draft" in " ".join(packet["instructions"])
+    assert stored_rows(service) == []
+
+
+def test_source_packet_preserves_captured_grade_like_names_without_authored_claims(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "claimed-C5-B0.md").write_text(
+        "# Claimed old grade\nC5/B0 is an unverified project claim.\n"
+    )
+    service = AssessmentService(tmp_path / "state")
+    snapshot = service.scan(root)
+    packet = service.challenge_template(snapshot["id"], service.review_template(snapshot["id"]))
+    assert any(row["path"] == "claimed-C5-B0.md" for row in packet["context"]["evidence_index"])
+    assert packet["source"]["manifest_digest"] == snapshot["source"]["manifest_digest"]
+    assert "captured project" in " ".join(packet["instructions"])

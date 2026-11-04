@@ -168,7 +168,11 @@ def build_challenge_evidence_index(assessment, change_traces, limit=80):
     return {
         "items": list(picked.values()),
         "selection": {
-            "method": "trace_then_production_area_breadth_then_support",
+            "method": (
+                "trace_then_production_area_breadth_then_support"
+                if cited
+                else "production_area_breadth_then_support"
+            ),
             "limit": limit,
             "selected": len(picked),
             "omitted": max(0, len(evidence) - len(picked)),

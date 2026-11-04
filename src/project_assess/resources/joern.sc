@@ -67,11 +67,15 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
 
 // Fixed, trusted query for captured source CPGs. Deep adds modeled dataflow, never target execution.
 @main def exec(cpgFile: String, out: String, profile: String = "standard",
-    runToken: String = "", flowSeconds: Int = 1200): Unit = {
+    runToken: String = "", flowSeconds: Int = 1200,
+    attemptToken: String = "", resumeFile: String = ""): Unit = {
   require(Set("standard", "deep")(profile), "Unsupported analysis profile")
   val deep = profile == "deep"
   require((runToken.isEmpty && !deep) || runToken.matches("[0-9a-f]{32}"), "Invalid run token")
   require(flowSeconds >= 1 && flowSeconds <= 86400, "Invalid flow work budget")
+  require(attemptToken.isEmpty || attemptToken.matches("[0-9a-f]{32}"), "Invalid attempt token")
+  val resume = if (resumeFile.nonEmpty) Some(ujson.read(Files.readString(Paths.get(resumeFile)))) else None
+  resume.foreach(value => require(value("run_token").str == runToken && value("query_version").str == "10", "Invalid resume identity"))
   val errors = Arr()
   val gaps = Arr()
   val caveats = Arr(
@@ -79,7 +83,7 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
     "Unread bindings are review leads only; preserve initializer effects and callback, override and public signature contracts.",
     "Deep dataflow describes modeled parameter influence, not external taint, feasible execution, dead-method proof or target-code execution."
   )
-  val result = Obj("schema_version" -> 1, "query_version" -> "9", "run_token" -> runToken, "dataflow" -> "not_run",
+  val result = Obj("schema_version" -> 1, "query_version" -> "10", "run_token" -> runToken, "dataflow" -> "not_run",
     "errors" -> errors, "gaps" -> gaps, "caveats" -> caveats)
   def writeResult(value: Value, name: String = out): Unit = {
     val destination = Paths.get(name)
@@ -96,7 +100,7 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
     // Aggregate timings only: no source names, paths, code or error messages.
     phases.value += Obj("phase" -> name,
       "elapsed_seconds" -> Num((System.nanoTime() - began).toDouble / 1e9))
-    writeResult(Obj("schema_version" -> 1, "query_version" -> "9", "phases" -> phases), out + ".phases.json")
+    writeResult(Obj("schema_version" -> 1, "query_version" -> "10", "phases" -> phases), out + ".phases.json")
   }
   var truncatedValues = 0L
   def text(value: String, limit: Int = 2048): String = {
@@ -294,14 +298,25 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
   }
   try {
     phase("import_started")
+    resume.foreach { value =>
+      val hash = java.security.MessageDigest.getInstance("SHA-256")
+      val stream = Files.newInputStream(Paths.get(cpgFile))
+      try {
+        val buffer = new Array[Byte](65536)
+        var count = stream.read(buffer)
+        while (count >= 0) { if (count > 0) hash.update(buffer, 0, count); count = stream.read(buffer) }
+      } finally stream.close()
+      require(java.util.HexFormat.of().formatHex(hash.digest()) == value("overlay_sha256").str,
+        "Immutable overlay identity mismatch")
+    }
     importCpg(cpgFile, "captured-input", enhance = false).getOrElse(
       throw new IllegalArgumentException("Cannot load captured graph"))
     phase("import_completed")
     phase("default_overlays_started")
-    io.joern.x2cpg.X2Cpg.applyDefaultOverlays(cpg)
+    if (resume.isEmpty) io.joern.x2cpg.X2Cpg.applyDefaultOverlays(cpg)
     phase("default_overlays_completed")
     phase("postprocessing_started")
-    console.applyPostProcessingPasses(cpg)
+    if (resume.isEmpty) console.applyPostProcessingPasses(cpg)
     phase("postprocessing_completed")
     phase("base_evidence_started")
     languages = cpg.metaData.language.toSet
@@ -645,7 +660,7 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
       checkpoint("errors").arr += Obj("section" -> "dataflow_analysis", "error" -> "InterruptedDataflow")
       // Keep a separate immutable base: finally may replace the primary output
       // with incomplete state even after a fatal JVM error and nonzero exit.
-      writeResult(checkpoint, out + ".base.json")
+      if (resume.isEmpty) writeResult(checkpoint, out + ".base.json")
       writeResult(checkpoint)
       val baseDigest = java.security.MessageDigest.getInstance("SHA-256")
       val baseStream = Files.newInputStream(Paths.get(out + ".base.json"))
@@ -658,6 +673,7 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
         }
       } finally baseStream.close()
       val baseSha256 = java.util.HexFormat.of().formatHex(baseDigest.digest())
+      resume.foreach(value => require(value("base_sha256").str == baseSha256, "Resume base mismatch"))
       // PAT_DATAFLOW_CHECKPOINT_COMPLETE
       val maxDefinitions = 50000
       val maxCallDepth = 8
@@ -703,7 +719,7 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
         val passFailed = new AtomicBoolean(false)
         val methodsCompleted = new AtomicLong(0L)
         phase("dataflow_overlay_started")
-        new OssDataFlow(options) {
+        if (!cpg.metaData.overlays.exists(_ == "dataflowOss")) new OssDataFlow(options) {
           override def create(context: LayerCreatorContext): Unit = {
             new ReachingDefPass(context.cpg, maxDefinitions)(options.semantics) {
               override def runOnPart(dstGraph: DiffGraphBuilder, method: Method): Unit = {
@@ -739,9 +755,25 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
         if (!cpg.metaData.overlays.exists(_ == "dataflowOss"))
           throw new IllegalStateException("Dataflow overlay was not established")
         phase("dataflow_overlay_completed")
+        val overlay = Paths.get(out + ".overlay.bin")
+        if (resume.isEmpty) {
+          val temporary = Paths.get(out + ".overlay.tmp")
+          flatgraph.storage.Serialization.writeGraph(cpg.graph, temporary)
+          Files.move(temporary, overlay, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+            java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+        }
+        val prior = resume.map(_ => ujson.read(Files.readString(Paths.get(out + ".flow.json")))("dataflow_analysis"))
+        val completedIds = mutable.LinkedHashSet.empty[String]
+        prior.foreach(value => value("selection")("completed_endpoint_ids").arr.foreach(id => completedIds += id.str))
+        val timedOutIds = mutable.LinkedHashSet.empty[String]
+        resume.foreach(value => value("timed_out_endpoint_ids").arr.foreach(id => timedOutIds += id.str))
         dataflow("methods_analyzed") = methods.size - skippedIds.size
         given EngineContext = EngineContext(config = EngineConfig(maxCallDepth = maxCallDepth))
         val rows = new Bounded(20000, 8 * 1024 * 1024)
+        prior.foreach { value =>
+          value("paths")("rows").arr.foreach(rows.add)
+          rows.count = value("paths")("count").num.toLong
+        }
         val operationNames = Set("print", "println", "printf", "log", "warn", "error", "write", "writeFile",
           "writeFileSync", "appendFile", "open", "readFile", "readFileSync", "unlink", "remove", "rename",
           "execute", "executemany", "query", "exec", "execFile", "spawn", "run", "Popen", "system",
@@ -858,30 +890,38 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
         if (selected.map(_.id).distinct.size != selected.size)
           throw new IllegalStateException("Ambiguous endpoint source identities")
         val planDigest = sha(selected.map(_.id).mkString("\n"))
+        val selectedIds = selected.map(_.id).toSet
+        require(completedIds.subsetOf(selectedIds) && timedOutIds.subsetOf(selectedIds) &&
+          completedIds.intersect(timedOutIds).isEmpty, "Resume endpoints outside selected plan")
+        resume.foreach(value => require(value("plan_digest").str == planDigest, "Resume plan mismatch"))
         dataflow("selection") = Obj("policy" -> "priority_file_method_round_robin_v1", "limit" -> selectionLimit,
-          "plan_digest" -> planDigest, "endpoints" -> Arr.from(selected.map(endpoint =>
+          "plan_digest" -> planDigest, "completed_endpoint_ids" -> Arr(), "timed_out_endpoint_ids" -> Arr(),
+          "endpoints" -> Arr.from(selected.map(endpoint =>
             Obj("id" -> endpoint.id, "category" -> endpoint.category, "kind" -> endpoint.kind,
               "path" -> text(endpoint.method.filename), "line" -> endpoint.at,
               "location_basis" -> endpoint.locationBasis))))
         val sinksTotal = sinks.size.toLong
         val categoryCandidates = eligible.groupMapReduce(_.category)(_ => 1L)(_ + _)
         val categorySelected = selected.groupMapReduce(_.category)(_ => 1L)(_ + _)
-        var sinksQueried = 0L
-        var engineQueries = 0L
-        var engineQueriesStarted = 0L
-        var provenEmpty = 0L
-        var pathsTruncated = 0L
-        val categoryQueried = mutable.Map.from(categories.map(_ -> 0L))
+        var sinksQueried = completedIds.size.toLong
+        var engineQueries = prior.map(_("queries")("engine_queries").num.toLong).getOrElse(0L)
+        var engineQueriesStarted = engineQueries + timedOutIds.size
+        var provenEmpty = prior.map(_("queries")("sinks_proven_empty").num.toLong).getOrElse(0L)
+        var pathsTruncated = prior.map(_("queries")("paths_truncated").num.toLong).getOrElse(0L)
+        val categoryQueried = mutable.Map.from(categories.map(category => category -> selected.count(endpoint => endpoint.category == category && completedIds(endpoint.id)).toLong))
         val flowBegan = System.nanoTime()
         val flowDeadline = began + flowSeconds.toLong * 1000000000L
         var maximumEndpointSeconds = 0.0
         var currentEndpointStarted: Option[Double] = None
+        var currentEndpointId: Option[String] = None
         def number(value: Long): Num = Num(value.toDouble)
         def categoryCounts: Obj = Obj.from(categories.map(category => category -> Obj(
           "candidates" -> number(categoryCandidates.getOrElse(category, 0L)),
           "selected" -> number(categorySelected.getOrElse(category, 0L)),
           "queried" -> number(categoryQueried(category)))))
         def updateFlow(finished: Boolean): Unit = {
+          dataflow("selection")("completed_endpoint_ids") = Arr.from(completedIds)
+          dataflow("selection")("timed_out_endpoint_ids") = Arr.from(timedOutIds)
           val output = rows.output
           val missing = skippedIds.nonEmpty || eligible.size > selected.size || sinksQueried < selected.size
           val lowerBound = missing || pathsTruncated > 0
@@ -894,7 +934,7 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
             "sinks_not_selected" -> (eligible.size - selected.size),
             "sinks_skipped" -> (sinks.size - eligible.size),
             "sinks_pending" -> number(selected.size.toLong - sinksQueried),
-            "sinks_queried" -> number(sinksQueried), "sinks_omitted" -> number(sinksTotal - sinksQueried),
+            "sinks_queried" -> number(sinksQueried), "sinks_timed_out" -> timedOutIds.size, "sinks_omitted" -> number(sinksTotal - sinksQueried),
             "engine_queries" -> number(engineQueries), "sinks_proven_empty" -> number(provenEmpty),
             "paths_truncated" -> number(pathsTruncated), "step_limit" -> stepLimit,
             "by_category" -> categoryCounts)
@@ -902,8 +942,10 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
           result("dataflow") = dataflow("status")
         }
         def progress(stage: String): Unit = {
-          writeResult(Obj("schema_version" -> 1, "query_version" -> "9", "run_token" -> runToken,
+          writeResult(Obj("schema_version" -> 1, "query_version" -> "10", "run_token" -> runToken,
             "base_sha256" -> baseSha256, "plan_digest" -> planDigest, "stage" -> stage,
+            "attempt_token" -> attemptToken, "current_endpoint_id" -> currentEndpointId.map(Str(_)).getOrElse(Null),
+            "completed_endpoint_ids" -> Arr.from(completedIds), "timed_out_endpoint_ids" -> Arr.from(timedOutIds),
             "source_parameter_count" -> parameters.size, "sinks_total" -> number(sinksTotal),
             "sinks_eligible" -> eligible.size, "sinks_selected" -> selected.size,
             "sinks_not_selected" -> (eligible.size - selected.size), "sinks_skipped" -> (sinks.size - eligible.size),
@@ -922,7 +964,7 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
         def flowCheckpoint(): Unit = {
           updateFlow(false)
           val snapshot = ujson.read(ujson.write(dataflow))
-          writeResult(Obj("schema_version" -> 1, "query_version" -> "9", "checkpoint" -> "dataflow_progress",
+          writeResult(Obj("schema_version" -> 1, "query_version" -> "10", "checkpoint" -> "dataflow_progress",
             "run_token" -> runToken, "base_sha256" -> baseSha256,
             "overlays" -> Arr.from(cpg.metaData.overlays.toVector.distinct.sorted),
             "truncated_values" -> number(truncatedValues), "dataflow_analysis" -> snapshot), out + ".flow.json")
@@ -934,11 +976,13 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
         flowCheckpoint()
         progress("ready")
         val engine = new Engine(summon[EngineContext])
-        try selected.iterator.takeWhile(_ => System.nanoTime() < flowDeadline).foreach { endpoint =>
+        try selected.iterator.filterNot(endpoint => completedIds(endpoint.id) || timedOutIds(endpoint.id))
+          .takeWhile(_ => System.nanoTime() < flowDeadline).foreach { endpoint =>
           val kind = endpoint.kind
           val sink = endpoint.node
           val endpointBegan = System.nanoTime()
           currentEndpointStarted = Some((endpointBegan - began).toDouble / 1e9)
+          currentEndpointId = Some(endpoint.id)
           // Keep the original per-endpoint query shape and peak-memory scope;
           // share the executor without generic source/usage expansion.
           val empty = provenEmptyStarter(sink)
@@ -978,9 +1022,12 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
           // endpoints. An in-flight engine call remains pending on interruption.
           if (empty) provenEmpty += 1 else engineQueries += 1
           sinksQueried += 1
+          completedIds += endpoint.id
           categoryQueried(endpoint.category) += 1
           maximumEndpointSeconds = math.max(maximumEndpointSeconds, (System.nanoTime() - endpointBegan).toDouble / 1e9)
           currentEndpointStarted = None
+          currentEndpointId = None
+          progress("ready")
           if ((!firstWitnessSaved && rows.count > 0) || sinksQueried - lastCheckpointCount >= 64 ||
               System.nanoTime() - lastCheckpointAt >= 15000000000L) {
             flowCheckpoint()
@@ -988,7 +1035,9 @@ def provenEmptyStarter(sink: CfgNode): Boolean = sink match {
           }
         } finally engine.shutdown()
         flowCheckpoint()
-        progress(if (sinksQueried < selected.size) "budget_exhausted" else "finished")
+        progress(if (sinksQueried == selected.size) "finished"
+          else if (completedIds.size + timedOutIds.size == selected.size) "finished_with_timeouts"
+          else "budget_exhausted")
         phase("dataflow_queries_completed")
         updateFlow(true)
         result("metadata")("overlays") = Arr.from(cpg.metaData.overlays.toVector.distinct.sorted)

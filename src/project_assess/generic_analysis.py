@@ -11,9 +11,9 @@ import time
 from collections import Counter, defaultdict, deque
 from pathlib import PurePosixPath
 
-from .static_analysis import _retained_candidates, source_role
+from .static_analysis import _retained_candidates, candidate_coverage, source_role
 
-VERSION = "2"
+VERSION = "3"
 MAX_CANDIDATES = 100
 MAX_INDEX = 20_000
 BLOCK_LINES = 12
@@ -389,6 +389,26 @@ def summarize_source_text(sources: dict[str, str], *, max_blocks=40_000, deadlin
             "omitted_areas": max(0, len(areas) - MAX_COVERAGE_AREAS),
             "sampling": "one_window_per_file_by_role_and_area_then_weighted_area_refill; nested_spread_within_file",
         },
+        "candidate_coverage": candidate_coverage(
+            candidates,
+            indexed,
+            {
+                "duplicate_source_file": {
+                    "complete": True,
+                    "eligible_units": len(modules),
+                    "analyzed_units": len(modules),
+                    "partial_units": 0,
+                    "basis": "whole captured source texts hashed before bounded block work",
+                },
+                "duplicate_source_block": {
+                    "complete": not (block_limited or timed_out),
+                    "eligible_units": sum(row["block_windows"] for row in modules),
+                    "analyzed_units": block_count,
+                    "partial_units": sum(row["blocks_omitted"] for row in modules),
+                    "basis": "exact nonblank block windows; omitted windows remain unknown",
+                },
+            },
+        ),
         "modules": sorted(modules, key=lambda row: row["path"]),
         "candidates": retained,
         "candidate_index": indexed,

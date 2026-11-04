@@ -65,7 +65,11 @@ def test_equivalent_deep_provider_selection_keeps_scope_but_preserves_provenance
 
 @pytest.mark.parametrize(
     "variable,value,limit_key",
-    [("PAT_JOERN_TIMEOUT_SECONDS", "21600", "seconds"), ("PAT_JOERN_HEAP_GIB", "16", "heap_gib")],
+    [
+        ("PAT_JOERN_TIMEOUT_SECONDS", "21600", "seconds"),
+        ("PAT_JOERN_HEAP_GIB", "16", "heap_gib"),
+        ("PAT_JOERN_ENDPOINT_SECONDS", "20", "endpoint_seconds"),
+    ],
 )
 def test_operator_joern_budget_changes_comparison_scope_without_changing_source(
     tmp_path, monkeypatch, variable, value, limit_key
@@ -84,7 +88,9 @@ def test_operator_joern_budget_changes_comparison_scope_without_changing_source(
     limits = changed["facts"]["collection"]["limits"]["dedicated_analyzer_phases"]["joern"]
     receipt = changed["facts"]["optional_analysis"]["joern"]
     assert limits[limit_key] == receipt["limits"][limit_key] == int(value)
-    assert receipt["provenance"]["operator_overrides"][limit_key]["environment_variable"] == variable
+    assert (
+        receipt["provenance"]["operator_overrides"][limit_key]["environment_variable"] == variable
+    )
     assert plain["scope_digest"] == service.scan(root)["scope_digest"]
 
 
@@ -371,6 +377,11 @@ def test_deep_requests_dead_code_and_guidance_drift_without_analyzer_flags(tmp_p
         r["check"]: r for r in coverage["items"] if r.get("record_type") == "required_deep_check"
     }
     assert set(required) == {"dead_code", "documentation_drift"}
+    bounded = service.query_evidence(deep["id"], view="coverage", limit=100, max_chars=12000)
+    assert {
+        row["check"] for row in bounded["items"] if row.get("record_type") == "required_deep_check"
+    } == {"dead_code", "documentation_drift"}
+    assert len(json.dumps(bounded, indent=2)) <= 12000
     assert required["dead_code"]["collection_status"] == "partial"
     assert required["documentation_drift"]["evidence_ids"] == [docs["id"]]
     assert (

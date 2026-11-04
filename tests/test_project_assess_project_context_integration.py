@@ -116,8 +116,8 @@ def test_context_changes_bind_challenge_but_do_not_create_engineering_progress(c
     service.set_targets(assessment["project_id"], profile="local-experiment", expected_revision=0)
     first = service.submit_review(assessment["id"], review)
     packet = service.challenge_template(assessment["id"], review)
-    assert packet["project_intent"] == review["project_context"]["intended"]
-    assert "current" not in packet["project_intent"]
+    assert "project_intent" not in packet and "targets" not in packet
+    assert "prompting_intent" not in packet
     assert "project_context" in packet["rubric"]
     review["project_context"]["intended"]["statement"] = (
         "The owner clarified the intended personal scope."

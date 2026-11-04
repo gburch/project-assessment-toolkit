@@ -241,3 +241,87 @@ def test_cli_backfill_requires_one_selection_and_reports_json(repository, tmp_pa
     output = json.loads(capsys.readouterr().out)
     assert output["snapshots"][0]["revision"] == revision
     assert output["selection"]["mode"] == "revisions"
+
+
+def test_backfill_refreshes_tool_identity_and_preserves_previous_record(
+    repository, tmp_path, monkeypatch
+):
+    from project_assess import provenance
+
+    revision = commit(repository, {"app.py": "VALUE = 1\n"})
+    service = AssessmentService(tmp_path / "state")
+    first = service.backfill(repository, revisions=[revision])["snapshots"][0]
+    saved = service.get_report(first["assessment_id"])["assessment"]
+    assert (
+        service.backfill(repository, revisions=[revision])["snapshots"][0]["status"] == "existing"
+    )
+    original = provenance.tool_info
+    monkeypatch.setattr(
+        provenance, "tool_info", lambda: {**original(), "code_digest": "sha256:" + "a" * 64}
+    )
+    fresh = service.backfill(repository, revisions=[revision])["snapshots"][0]
+    assert fresh["status"] == "captured" and fresh["assessment_id"] != first["assessment_id"]
+    assert service.get_report(first["assessment_id"])["assessment"] == saved
+    assert (
+        service.backfill(repository, revisions=[revision])["snapshots"][0]["assessment_id"]
+        == fresh["assessment_id"]
+    )
+
+
+def test_backfill_refreshes_optional_provider_and_operator_limits(
+    repository, tmp_path, monkeypatch
+):
+    from project_assess import analyzer_registry
+
+    revision = commit(repository, {"app.py": "VALUE = 1\n"})
+    service = AssessmentService(tmp_path / "state")
+    plain = service.backfill(repository, revisions=[revision])["snapshots"][0]
+    monkeypatch.setattr(
+        analyzer_registry,
+        "analyzer_info",
+        lambda name: {"name": name, "version": "one", "available": False},
+    )
+    limits = {"seconds": 10}
+    monkeypatch.setattr(analyzer_registry, "dedicated_phase_limits", lambda *args: dict(limits))
+    selected = service.backfill(repository, revisions=[revision], analyzers=["vulture"])[
+        "snapshots"
+    ][0]
+    assert selected["status"] == "captured" and selected["assessment_id"] != plain["assessment_id"]
+    assert (
+        service.backfill(repository, revisions=[revision], analyzers=["vulture"])["snapshots"][0][
+            "status"
+        ]
+        == "existing"
+    )
+    limits["seconds"] = 20
+    changed = service.backfill(repository, revisions=[revision], analyzers=["vulture"])[
+        "snapshots"
+    ][0]
+    assert changed["status"] == "captured"
+    monkeypatch.setattr(
+        analyzer_registry,
+        "analyzer_info",
+        lambda name: {"name": name, "version": "two", "available": False},
+    )
+    upgraded = service.backfill(repository, revisions=[revision], analyzers=["vulture"])[
+        "snapshots"
+    ][0]
+    assert (
+        upgraded["status"] == "captured" and upgraded["assessment_id"] != changed["assessment_id"]
+    )
+
+
+def test_legacy_backfill_without_collection_identity_is_not_reused(repository, tmp_path):
+    revision = commit(repository, {"app.py": "VALUE = 1\n"})
+    service = AssessmentService(tmp_path / "state")
+    first = service.backfill(repository, revisions=[revision])["snapshots"][0]
+    snapshot = service.get_report(first["assessment_id"])["assessment"]
+    del snapshot["collection"]["backfill_identity"]
+    with service._db(write=True) as db:
+        db.execute(
+            "UPDATE assessments SET data=? WHERE id=?",
+            (json.dumps(snapshot), first["assessment_id"]),
+        )
+    fresh = service.backfill(repository, revisions=[revision])["snapshots"][0]
+    assert fresh["status"] == "captured" and fresh["assessment_id"] != first["assessment_id"]
+    assert service.get_report(first["assessment_id"])["assessment"] == snapshot

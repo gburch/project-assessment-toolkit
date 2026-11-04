@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 
 from .analysis_patterns import function_patterns, pattern_candidates
 
-VERSION = "4"
+VERSION = "5"
 MAX_FILES = 1000
 MAX_OVERVIEW_FILES = 20_000
 MAX_SYMBOLS = 20_000
@@ -222,6 +222,48 @@ def _function_metrics(functions, node_budget):
     return rows, used, probes
 
 
+def _qualified_symbols(tree):
+    """Lexical ownership only; repeated bindings keep the same, ambiguous name."""
+    names, stack, seen = {}, [(tree, ())], 0
+    while stack and seen < MAX_OVERVIEW_NODES:
+        node, owners = stack.pop()
+        seen += 1
+        if isinstance(node, (*_FUNCTION, ast.ClassDef)):
+            owners = (*owners, node.name)
+            name = ".".join(owners)
+            if len(name) <= MAX_MODULE_LENGTH:
+                names[id(node)] = name
+        stack.extend((child, owners) for child in reversed(list(ast.iter_child_nodes(node))))
+    counts = Counter(names.values())
+    return {
+        node_id: name
+        if all(
+            counts[".".join(name.split(".")[:end])] == 1
+            for end in range(1, len(name.split(".")) + 1)
+        )
+        else None
+        for node_id, name in names.items()
+    }
+
+
+def candidate_coverage(candidates, indexed, families):
+    """Separate bounded candidate retention from each producer's analysis work."""
+    observed = Counter(row["kind"] for row in candidates)
+    retained = Counter(row["kind"] for row in indexed)
+    return {
+        "schema_version": 1,
+        "families": {
+            kind: {
+                **scope,
+                "complete": scope["complete"] and observed[kind] == retained[kind],
+                "candidates_observed": observed[kind],
+                "candidates_indexed": retained[kind],
+            }
+            for kind, scope in families.items()
+        },
+    }
+
+
 def analyze_python(
     path: str,
     tree: ast.Module,
@@ -241,6 +283,7 @@ def analyze_python(
     functions = sorted(
         (node for node in nodes if isinstance(node, _FUNCTION)), key=lambda node: node.lineno
     )
+    qualified_symbols = _qualified_symbols(tree)
     classes = [node for node in nodes if isinstance(node, ast.ClassDef)]
     loads = {
         node.id for node in nodes if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
@@ -379,6 +422,9 @@ def analyze_python(
             {
                 "location": _location(path, function),
                 "name": function.name,
+                "qualified_symbol": qualified_symbols.get(id(function)),
+                "identity_complete": not overview_partial
+                and qualified_symbols.get(id(function)) is not None,
                 "decisions": metric["decisions"],
                 "nesting": metric["nesting"],
                 "nodes_analyzed": metric["nodes_analyzed"],
@@ -825,6 +871,7 @@ def summarize(
                 {
                     "path": record["path"],
                     "name": function.get("name"),
+                    "qualified_symbol": function.get("qualified_symbol"),
                     "line": function["location"]["line"],
                     "end_line": function["location"]["end_line"],
                     "role": record.get("role", "unknown"),
@@ -850,6 +897,8 @@ def summarize(
                             "decision_points": function["decisions"],
                             "control_nesting": function["nesting"],
                             "symbol": function.get("name"),
+                            "qualified_symbol": function.get("qualified_symbol"),
+                            "identity_complete": function.get("identity_complete", False),
                             "partial": function.get("partial", False),
                             "metric_basis": function.get("metric_basis", "complete_function"),
                         },
@@ -862,13 +911,18 @@ def summarize(
                         "lens": "efficiency",
                         "locations": function["loop_io"],
                         "metrics": {
-                            "method": "syntactic calls inside loops; shadowing, freshness and actual I/O require review"
+                            "symbol": function.get("name"),
+                            "qualified_symbol": function.get("qualified_symbol"),
+                            "identity_complete": function.get("identity_complete", False),
+                            "partial": function.get("partial", False),
+                            "metric_basis": function.get("metric_basis"),
+                            "method": "syntactic calls inside loops; shadowing, freshness and actual I/O require review",
                         },
                     }
                 )
     candidates.extend(pattern_candidates(selected))
     candidates.extend(_dead_candidates(selected, edges, graph_complete=graph_complete))
-    for locations in clones.values():
+    for fingerprint, locations in clones.items():
         if len(locations) > 1:
             candidates.append(
                 {
@@ -877,6 +931,7 @@ def summarize(
                     "locations": sorted(locations, key=lambda row: (row["path"], row["line"]))[:20],
                     "metrics": {
                         "matching_functions": len(locations),
+                        "fingerprint": fingerprint,
                         "normalization": "exact arguments/decorators/body AST; definition names, locations and leading docstrings omitted",
                     },
                 }
@@ -975,6 +1030,118 @@ def summarize(
         (row.get("module", {}).get("metric_node_budget", MAX_NODES) for row in selected),
         default=MAX_NODES,
     )
+    function_total = sum(row["module"]["function_count"] for row in selected)
+    all_functions = [function for row in selected for function in row["functions"]]
+    overview_complete = (
+        source_complete
+        and python_files == len(selected)
+        and all(not row["module"]["overview_partial"] for row in selected)
+    )
+    metric_complete = (
+        overview_complete
+        and function_total == len(all_functions)
+        and not any(function["partial"] for function in all_functions)
+    )
+    pattern_complete = (
+        overview_complete
+        and all(
+            function["pattern_analyzed"] and not function["pattern_partial"]
+            for function in all_functions
+        )
+        and not any(
+            gap.startswith(("Pattern serialization", "Clone serialization"))
+            for row in selected
+            for gap in row["gaps"]
+        )
+    )
+    pattern_limits = [
+        limit
+        for function in all_functions
+        for limit in function["patterns"].get("limits_reached", [])
+    ]
+    families = {
+        kind: {
+            "complete": metric_complete,
+            "eligible_units": function_total,
+            "analyzed_units": len(all_functions),
+            "partial_units": sum(function["partial"] for function in all_functions),
+            "basis": "all captured Python function metrics; independent of clone/pattern detail",
+        }
+        for kind in ("complex_function", "loop_io")
+    }
+    families.update(
+        {
+            kind: {
+                "complete": pattern_complete
+                and not any(
+                    limit.startswith("unreachable")
+                    or kind == "duplicate_block"
+                    and limit.startswith("duplicate block")
+                    for limit in pattern_limits
+                ),
+                "eligible_units": function_total,
+                "analyzed_units": sum(function["pattern_analyzed"] for function in all_functions),
+                "partial_units": sum(function["pattern_partial"] for function in all_functions),
+                "basis": "captured Python function pattern traversal; rule-specific window limits retained",
+            }
+            for kind in (
+                "duplicate_function",
+                "near_duplicate_function",
+                "duplicate_block",
+                "unreachable_statement",
+            )
+        }
+    )
+    symbol_complete = (
+        overview_complete
+        and not edges_limited
+        and not any(
+            row["module"].get("dynamic_resolution")
+            or row["module"].get("exports_unknown")
+            or any(
+                gap.startswith(
+                    (
+                        "Module reference",
+                        "Module qualified reference",
+                        "Module definition/export",
+                        "Import traversal",
+                        "Module import",
+                    )
+                )
+                for gap in row["gaps"]
+            )
+            for row in selected
+        )
+    )
+    for kind, complete, basis in (
+        (
+            "dependency_cycle",
+            graph_complete,
+            "captured static import graph; runtime resolution is not established",
+        ),
+        (
+            "unreferenced_module",
+            graph_complete,
+            "complete captured static inbound edges; external entrypoints remain unknown",
+        ),
+        (
+            "unused_symbol",
+            symbol_complete,
+            "captured local/export/import references; open-world use remains unknown",
+        ),
+        (
+            "shadowed_module",
+            source_complete and python_files == len(selected),
+            "all captured module paths, independent of pattern work",
+        ),
+    ):
+        families[kind] = {
+            "complete": complete,
+            "eligible_units": python_files,
+            "analyzed_units": len(selected),
+            "partial_units": 0 if complete else len(selected),
+            "basis": basis,
+        }
     return {
         "schema_version": 1,
         "analyzer": {"name": "project-assess-python-ast", "version": VERSION},
@@ -1017,6 +1184,7 @@ def summarize(
             "by_kind": dict(sorted(Counter(row["kind"] for row in candidates).items())),
             "by_role": dict(sorted(Counter(row["role"] for row in candidates).items())),
         },
+        "candidate_coverage": candidate_coverage(candidates, indexed, families),
         "modules": modules,
         "topology": {
             "edges": edges,

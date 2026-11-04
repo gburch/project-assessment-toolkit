@@ -27,12 +27,18 @@ pat --state-dir "$PAT_STATE" ci-delta BASE_ASSESSMENT_ID HEAD_ASSESSMENT_ID --fo
 
 The report distinguishes new, worsening, existing, improving and no-longer-observed
 leads; it includes changed areas, captured import callers, coverage and incompatible
-or incomplete evidence. Identity ignores line movement. Ambiguous matches remain
-unknown. Disappearance is **not verified closure**. Grades require a cited review.
+or incomplete evidence. Completeness is recorded per rule family, so an unrelated
+pattern limit does not hide complete function metrics. Qualified lexical names
+keep same-named methods separate; shadowed or unestablished identities stay unknown.
+Introduction and disappearance require a complete family and retained index. A
+matched function needs complete, unambiguous metrics to establish movement.
+Unsupported families and contradictory coverage remain unknown, even with no leads. Disappearance is **not verified closure**. Grades require a cited review.
 Both Git captures share a selection scope; mixing a Git capture with a worktree scan
 can be incompatible. Standard is the collection profile, not `scan --brief`, which
 only shortens output. Reuse a saved baseline only when scope and analyzer versions
-match; never reuse a grade across changed source.
+match; never reuse a grade across changed source. Backfill reuses only captures
+with a matching tool, runtime and effective provider identity; an upgrade or changed
+provider allowance creates fresh facts while preserving earlier records.
 
 Default exit status is advisory (0), including unknown comparisons. An owner can
 select supported native lead kinds explicitly, for example

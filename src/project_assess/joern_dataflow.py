@@ -18,13 +18,16 @@ _CAVEAT = (
     "An empty result does not establish absence of a flow."
 )
 _SCOPE = "method_parameters_to_returns_and_selected_operation_arguments"
-_CATEGORIES = (
-    "named_effect_hint", "lifecycle_name_hint", "source_supported_cross_file", "breadth"
-)
+_CATEGORIES = ("named_effect_hint", "lifecycle_name_hint", "source_supported_cross_file", "breadth")
 _KINDS = {"parameter_to_return", "parameter_to_operation"}
 _TRACE_COUNTERS = (
-    "sinks_eligible", "sinks_selected", "sinks_not_selected", "sinks_pending",
-    "sinks_skipped", "engine_queries", "sinks_proven_empty",
+    "sinks_eligible",
+    "sinks_selected",
+    "sinks_not_selected",
+    "sinks_pending",
+    "sinks_skipped",
+    "engine_queries",
+    "sinks_proven_empty",
 )
 
 
@@ -59,14 +62,40 @@ def _selection(value, queries, located):
     """Validate the complete ordered selected plan and its completed prefix."""
     if (
         not isinstance(value, dict)
-        or set(value) != {"policy", "limit", "plan_digest", "endpoints"}
+        or set(value)
+        not in (
+            {"policy", "limit", "plan_digest", "endpoints"},
+            {
+                "policy",
+                "limit",
+                "plan_digest",
+                "endpoints",
+                "completed_endpoint_ids",
+                "timed_out_endpoint_ids",
+            },
+        )
         or value["policy"] != "priority_file_method_round_robin_v1"
-        or type(value["limit"]) is not int or value["limit"] != 2048
+        or type(value["limit"]) is not int
+        or value["limit"] != 2048
         or not isinstance(value["endpoints"], list)
         or len(value["endpoints"]) != queries["sinks_selected"]
         or len(value["endpoints"]) > value["limit"]
     ):
         raise ValueError("Invalid dataflow selection plan")
+    explicit = "completed_endpoint_ids" in value
+    completed = value.get("completed_endpoint_ids", [])
+    timed_out = value.get("timed_out_endpoint_ids", [])
+    if explicit and (
+        not isinstance(completed, list)
+        or not isinstance(timed_out, list)
+        or any(not isinstance(item, str) for item in [*completed, *timed_out])
+        or len(set(completed)) != len(completed)
+        or len(set(timed_out)) != len(timed_out)
+        or set(completed).intersection(timed_out)
+        or len(completed) != queries["sinks_queried"]
+        or len(timed_out) != queries.get("sinks_timed_out", 0)
+    ):
+        raise ValueError("Invalid completed/timeout endpoint identities")
     rows, ids = [], set()
     for index, row in enumerate(value["endpoints"]):
         if (
@@ -80,14 +109,29 @@ def _selection(value, queries, located):
             or row["location_basis"] not in {"node_line", "method_line"}
         ):
             raise ValueError("Invalid selected endpoint identity")
-        location = located({**row, "name": "<endpoint>", "method": "<plan>",
-                            "node_type": "PLANNED_ENDPOINT"})
+        location = located(
+            {**row, "name": "<endpoint>", "method": "<plan>", "node_type": "PLANNED_ENDPOINT"}
+        )
         ids.add(row["id"])
-        rows.append({
-            **{key: location[key] for key in ("path", "line", "source_evidence_id", "digest")},
-            **{key: row[key] for key in ("id", "category", "kind", "location_basis")},
-            "status": "completed" if index < queries["sinks_queried"] else "pending",
-        })
+        rows.append(
+            {
+                **{key: location[key] for key in ("path", "line", "source_evidence_id", "digest")},
+                **{key: row[key] for key in ("id", "category", "kind", "location_basis")},
+                "status": (
+                    "completed"
+                    if row["id"] in completed
+                    else "timed_out"
+                    if row["id"] in timed_out
+                    else "pending"
+                )
+                if explicit
+                else "completed"
+                if index < queries["sinks_queried"]
+                else "pending",
+            }
+        )
+    if explicit and not (set(completed) | set(timed_out)) <= ids:
+        raise ValueError("Completed/timeout endpoints lie outside the selected plan")
     digest = hashlib.sha256("\n".join(row["id"] for row in rows).encode()).hexdigest()
     if value["plan_digest"] != digest:
         raise ValueError("Dataflow selection digest mismatch")
@@ -101,18 +145,38 @@ def _selection(value, queries, located):
             raise ValueError("Invalid dataflow category counters")
         counts = {key: _count(number) for key, number in counts.items()}
         selected = sum(row["category"] == category for row in rows)
-        completed = sum(row["category"] == category for row in rows[:queries["sinks_queried"]])
-        if not counts["candidates"] >= counts["selected"] == selected >= counts["queried"] == completed:
+        completed_count = sum(
+            row["category"] == category and row["status"] == "completed" for row in rows
+        )
+        if (
+            not counts["candidates"]
+            >= counts["selected"]
+            == selected
+            >= counts["queried"]
+            == completed_count
+        ):
             raise ValueError("Inconsistent dataflow category coverage")
         safe_categories[category] = counts
     if any(
         sum(counts[key] for counts in safe_categories.values()) != queries[field]
-        for key, field in (("candidates", "sinks_eligible"), ("selected", "sinks_selected"),
-                           ("queried", "sinks_queried"))
+        for key, field in (
+            ("candidates", "sinks_eligible"),
+            ("selected", "sinks_selected"),
+            ("queried", "sinks_queried"),
+        )
     ):
         raise ValueError("Inconsistent total category coverage")
-    return {"policy": value["policy"], "limit": value["limit"],
-            "plan_digest": digest, "endpoints": rows}, safe_categories
+    return {
+        "policy": value["policy"],
+        "limit": value["limit"],
+        "plan_digest": digest,
+        "endpoints": rows,
+        **(
+            {"completed_endpoint_ids": completed, "timed_out_endpoint_ids": timed_out}
+            if explicit
+            else {}
+        ),
+    }, safe_categories
 
 
 def normalize_dataflow(raw, *, stage, sources, clean):
@@ -181,6 +245,10 @@ def normalize_dataflow(raw, *, stage, sources, clean):
     traced = raw.get("query_version") == "8" or "selection" in value
     if traced:
         result["queries"].update((key, _count(queries.get(key))) for key in _TRACE_COUNTERS)
+        if "sinks_timed_out" in queries:
+            result["queries"]["sinks_timed_out"] = _count(queries["sinks_timed_out"])
+            if queries["sinks_timed_out"] > queries["sinks_pending"]:
+                raise ValueError("Timeout endpoints must remain unresolved")
         q = result["queries"]
         if (
             q["sinks_total"] != q["sinks_eligible"] + q["sinks_skipped"]
@@ -229,11 +297,14 @@ def normalize_dataflow(raw, *, stage, sources, clean):
     completed_endpoints = {}
     if traced:
         result["selection"], result["queries"]["by_category"] = _selection(
-            value.get("selection"), {**result["queries"], "by_category": queries.get("by_category")},
+            value.get("selection"),
+            {**result["queries"], "by_category": queries.get("by_category")},
             located,
         )
         completed_endpoints = {
-            row["id"]: row for row in result["selection"]["endpoints"] if row["status"] == "completed"
+            row["id"]: row
+            for row in result["selection"]["endpoints"]
+            if row["status"] == "completed"
         }
 
     result["skipped_methods"] = _section(value.get("skipped_methods"), MAX_PATHS)
@@ -279,7 +350,8 @@ def normalize_dataflow(raw, *, stage, sources, clean):
             if traced:
                 endpoint = completed_endpoints.get(row.get("endpoint_id"))
                 if (
-                    endpoint is None or endpoint["kind"] != row["kind"]
+                    endpoint is None
+                    or endpoint["kind"] != row["kind"]
                     or (endpoint["path"], endpoint["line"]) != (end["path"], end["line"])
                     or endpoint["location_basis"] != "node_line"
                     or start["node_type"] != "METHOD_PARAMETER_IN"
@@ -329,9 +401,15 @@ def normalize_dataflow(raw, *, stage, sources, clean):
             section["status"] = "partial"
     if result["methods_skipped"]:
         gaps.add("Joern dataflow skipped methods above its recorded definition limit")
+    if queries.get("sinks_timed_out"):
+        gaps.add(
+            "Individual Joern endpoint queries exceeded their wall allowance; these endpoints remain unknown, never proven empty"
+        )
     if queries["sinks_omitted"] or queries["paths_truncated"] or paths["count_is_lower_bound"]:
         gaps.add("Joern dataflow queries were bounded; missing paths remain unknown")
-    if traced and (queries["sinks_omitted"] or queries["paths_truncated"] or result["methods_skipped"]):
+    if traced and (
+        queries["sinks_omitted"] or queries["paths_truncated"] or result["methods_skipped"]
+    ):
         if status != "partial" or not paths["count_is_lower_bound"]:
             raise ValueError("Incomplete tracing must declare partial lower-bound paths")
     if paths["omitted"] or skipped["omitted"]:

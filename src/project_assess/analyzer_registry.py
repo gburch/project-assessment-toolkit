@@ -42,10 +42,14 @@ def resolve_analyzers(names, analysis_profile):
 
 def list_analyzers():
     """Installation is optional; Deep requests these fixed providers automatically."""
-    return [
-        {**_BUILTINS[name][0](), "default_profiles": ["deep"] if name in DEEP_ANALYZERS else []}
-        for name in registered_analyzer_names()
-    ]
+    return [analyzer_info(name) for name in registered_analyzer_names()]
+
+
+def analyzer_info(name):
+    """Inspect one trusted provider without probing unrelated installations."""
+    if name not in _BUILTINS:
+        raise ValueError("Unknown optional analyzer")
+    return {**_BUILTINS[name][0](), "default_profiles": ["deep"] if name in DEEP_ANALYZERS else []}
 
 
 def dedicated_phase_limits(name, analysis_profile):

@@ -27,8 +27,8 @@ from .joern_bindings import BindingCountercheck
 from .joern_dataflow import normalize_dataflow
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "12"
-QUERY_VERSION = "9"
+VERSION = "13"
+QUERY_VERSION = "10"
 JOERN_VERSION = "4.0.669"
 QUERY_PATH = Path(__file__).parent / "resources" / "joern.sc"
 MAX_INPUT_RECORDS = 20_000
@@ -228,6 +228,8 @@ def _joern_configuration(analysis_profile):
         raise ValueError("Unknown analysis profile")
     limits = {
         **_PROFILES[analysis_profile],
+        "endpoint_seconds": 60,
+        "max_query_restarts": 32,
         "thread_stack_mib": 32 if analysis_profile == "deep" else None,
         "active_processors": 2,
         "workspace_bytes": (16 if analysis_profile == "deep" else 8) * 1024**3,
@@ -264,6 +266,7 @@ def _joern_configuration(analysis_profile):
         ("PAT_JOERN_TIMEOUT_SECONDS", "seconds", 86_400),
         ("PAT_JOERN_HEAP_GIB", "heap_gib", 64),
         ("PAT_JOERN_ACTIVE_PROCESSORS", "active_processors", 32),
+        ("PAT_JOERN_ENDPOINT_SECONDS", "endpoint_seconds", 300),
     ):
         raw = os.environ.get(name)
         if raw is None:
@@ -282,6 +285,11 @@ def _joern_configuration(analysis_profile):
             "value": limits[field],
             "profile_default": profile_default,
         }
+    limits["dataflow"].update(
+        endpoint_seconds=limits["endpoint_seconds"],
+        max_query_restarts=limits["max_query_restarts"],
+        isolation="reaped_process_group_with_immutable_overlay_resume",
+    )
     return limits, overrides
 
 
@@ -631,18 +639,24 @@ def _stop_group(process):
 class _ProcessStatus(str):
     """Keep source-free producer diagnostics alongside the actual process outcome."""
 
-    def __new__(cls, terminal_status, *, engine_failed=False, model_pruned=False):
+    def __new__(cls, terminal_status, *, engine_failed=False, model_pruned=False, endpoint_id=None):
         value = super().__new__(cls, "analysis_engine_error" if engine_failed else terminal_status)
         value.terminal_status = terminal_status
         value.engine_failed = engine_failed
         value.model_pruned = model_pruned
+        value.endpoint_id = endpoint_id
         return value
 
 
-def _run(argv, *, workspace, cwd, env, stop, limits, output=None):
+_UNKNOWN_ENDPOINT = object()
+_INVALID_ENDPOINT = object()
+
+
+def _run(argv, *, workspace, cwd, env, stop, limits, output=None, flow_watch=None):
     """Discard bounded logs and always reap the whole process group, including orphans."""
     status, logged, next_disk = "complete", 0, 0.0
     engine_error, model_pruned, tails = False, False, {}
+    watched_endpoint, endpoint_began, timed_out_endpoint = None, None, None
 
     def inspect(stream, data):
         # Joern can catch worker failures and still exit zero with empty paths.
@@ -659,10 +673,13 @@ def _run(argv, *, workspace, cwd, env, stop, limits, output=None):
             )
         ):
             engine_error = True
-        if any(marker in combined for marker in (
-            b"Too many arguments for parameter:",
-            b"Too many new tasks in expansion of unresolved output arguments",
-        )):
+        if any(
+            marker in combined
+            for marker in (
+                b"Too many arguments for parameter:",
+                b"Too many new tasks in expansion of unresolved output arguments",
+            )
+        ):
             model_pruned = True
         tails[stream] = combined[-128:]
 
@@ -685,6 +702,19 @@ def _run(argv, *, workspace, cwd, env, stop, limits, output=None):
                 if now >= stop:
                     status = "timeout"
                     break
+                if flow_watch and output:
+                    marker = _active_endpoint(output, flow_watch)
+                    if marker is _INVALID_ENDPOINT and watched_endpoint is None:
+                        status = "invalid_endpoint_progress"
+                        break
+                    if (
+                        marker not in (_UNKNOWN_ENDPOINT, _INVALID_ENDPOINT)
+                        and marker != watched_endpoint
+                    ):
+                        watched_endpoint, endpoint_began = marker, now if marker else None
+                    if watched_endpoint and now - endpoint_began >= flow_watch["seconds"]:
+                        status, timed_out_endpoint = "endpoint_timeout", watched_endpoint
+                        break
                 if now >= next_disk:
                     if _workspace_size(workspace) > limits["workspace_bytes"]:
                         status = "workspace_limit"
@@ -733,7 +763,75 @@ def _run(argv, *, workspace, cwd, env, stop, limits, output=None):
         and output.lstat().st_size > limits["query_json_bytes"]
     ):
         status = "output_limit"
-    return _ProcessStatus(status, engine_failed=engine_error, model_pruned=model_pruned)
+    return _ProcessStatus(
+        status,
+        engine_failed=engine_error,
+        model_pruned=model_pruned,
+        endpoint_id=timed_out_endpoint,
+    )
+
+
+def _active_endpoint(output, watch):
+    """Only a fully validated fresh idle marker may clear an endpoint timer."""
+    fresh = False
+    try:
+        path = output.with_name(output.name + ".flow-progress.json")
+        marker = _read_json(path, 512 * 1024)
+        if not isinstance(marker, dict):
+            return _UNKNOWN_ENDPOINT
+        if (
+            marker.get("query_version") != QUERY_VERSION
+            or marker.get("run_token") != watch["run_token"]
+            or marker.get("attempt_token") != watch["attempt_token"]
+        ):
+            return _UNKNOWN_ENDPOINT
+        fresh = True
+        if "_flow" not in watch:
+            checkpoint = _read_json(output.with_name(output.name + ".flow.json"), 32 * 1024**2)
+            flow = checkpoint["dataflow_analysis"]
+            selection = flow["selection"]
+            ids = [row["id"] for row in selection["endpoints"]]
+            digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
+            if (
+                checkpoint.get("query_version") != QUERY_VERSION
+                or checkpoint.get("run_token") != watch["run_token"]
+                or checkpoint.get("base_sha256") != marker.get("base_sha256")
+                or len(ids) > 2048
+                or len(set(ids)) != len(ids)
+                or digest != selection["plan_digest"]
+                or digest != marker.get("plan_digest")
+            ):
+                return _INVALID_ENDPOINT
+            watch.update(
+                # The checkpoint can advance after the marker was atomically read.
+                # Bind immutable plan/scope here, not a later completion lower bound.
+                _flow={"selection": selection, "queries": {**flow["queries"], "sinks_queried": 0}},
+                _base_sha256=checkpoint["base_sha256"],
+            )
+        diagnostic = _flow_progress(
+            path, watch["run_token"], watch["_base_sha256"], watch["_flow"], value=marker
+        )
+        if diagnostic["status"] != "valid":
+            return _INVALID_ENDPOINT
+        previous = watch.get("_last")
+        if previous and (
+            not set(previous["completed_endpoint_ids"]) <= set(marker["completed_endpoint_ids"])
+            or not set(previous["timed_out_endpoint_ids"]) <= set(marker["timed_out_endpoint_ids"])
+            or marker["sinks_queried"] < previous["sinks_queried"]
+            or marker["engine_queries_started"] < previous["engine_queries_started"]
+            or marker["elapsed_seconds"] < previous["elapsed_seconds"]
+            or previous["current_endpoint_id"] is not None
+            and previous["current_endpoint_id"] != marker["current_endpoint_id"]
+            and previous["current_endpoint_id"] not in marker["completed_endpoint_ids"]
+            and previous["current_endpoint_id"] not in marker["timed_out_endpoint_ids"]
+        ):
+            return _INVALID_ENDPOINT
+        watch["_last"] = marker
+        if marker["stage"] == "querying":
+            return marker["current_endpoint_id"]
+        return None
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        return _INVALID_ENDPOINT if fresh else _UNKNOWN_ENDPOINT
 
 
 def _read_json(path, maximum):
@@ -786,106 +884,241 @@ def _checkpoint_digest(path, maximum):
 def _recover_flow_checkpoint(path, base, base_sha256, run_token, limits, stage, sources, clean):
     """Admit only a finished, source-bound prefix from this invocation and base."""
     value = _read_json(path, limits["flow_checkpoint_bytes"])
-    fields = {"schema_version", "query_version", "checkpoint", "run_token", "base_sha256",
-              "overlays", "truncated_values", "dataflow_analysis"}
+    fields = {
+        "schema_version",
+        "query_version",
+        "checkpoint",
+        "run_token",
+        "base_sha256",
+        "overlays",
+        "truncated_values",
+        "dataflow_analysis",
+    }
     if (
-        not isinstance(value, dict) or set(value) != fields
-        or type(value["schema_version"]) is not int or value["schema_version"] != 1
-        or value["query_version"] != QUERY_VERSION or value["checkpoint"] != "dataflow_progress"
-        or value["run_token"] != run_token or base.get("run_token") != run_token
+        not isinstance(value, dict)
+        or set(value) != fields
+        or type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
+        or value["query_version"] != QUERY_VERSION
+        or value["checkpoint"] != "dataflow_progress"
+        or value["run_token"] != run_token
+        or base.get("run_token") != run_token
         or value["base_sha256"] != base_sha256
-        or value["overlays"] != sorted(set(base.get("metadata", {}).get("overlays", [])) | {"dataflowOss"})
-        or not _integer(value["truncated_values"]) or value["truncated_values"] > 2**53
+        or value["overlays"]
+        != sorted(set(base.get("metadata", {}).get("overlays", [])) | {"dataflowOss"})
+        or not _integer(value["truncated_values"])
+        or value["truncated_values"] > 2**53
         or not isinstance(value["dataflow_analysis"], dict)
         or value["dataflow_analysis"].get("status") != "partial"
         or value["dataflow_analysis"].get("methods_total") != base.get("methods", {}).get("count")
     ):
         raise ValueError("Unqualified flow checkpoint")
     flow, gaps = normalize_dataflow(
-        {"query_version": QUERY_VERSION, "dataflow": "partial",
-         "dataflow_analysis": value["dataflow_analysis"]},
-        stage=stage, sources=sources, clean=clean,
+        {
+            "query_version": QUERY_VERSION,
+            "dataflow": "partial",
+            "dataflow_analysis": value["dataflow_analysis"],
+        },
+        stage=stage,
+        sources=sources,
+        clean=clean,
     )
     flow.update(checkpoint_recovered=True, overlay="dataflowOss", base_sha256=base_sha256)
-    gaps.add("Recovered completed flow queries from an interrupted producer; unfinished work remains unknown")
+    gaps.add(
+        "Recovered completed flow queries from an interrupted producer; unfinished work remains unknown"
+    )
     return flow, gaps
 
 
-def _flow_progress(path, run_token, base_sha256, flow=None):
+def _flow_progress(path, run_token, base_sha256, flow=None, *, value=None):
     """Inspect bounded scalar diagnostics separately from usable path evidence."""
-    if not path.exists():
+    if value is None and not path.exists():
         return {"status": "unavailable"}
     counters = (
-        "source_parameter_count", "sinks_total", "sinks_eligible", "sinks_selected",
-        "sinks_not_selected", "sinks_skipped", "sinks_queried", "sinks_pending",
-        "engine_queries", "engine_queries_started", "sinks_proven_empty",
+        "source_parameter_count",
+        "sinks_total",
+        "sinks_eligible",
+        "sinks_selected",
+        "sinks_not_selected",
+        "sinks_skipped",
+        "sinks_queried",
+        "sinks_pending",
+        "engine_queries",
+        "engine_queries_started",
+        "sinks_proven_empty",
     )
     times = ("elapsed_seconds", "flow_elapsed_seconds", "maximum_endpoint_seconds")
-    fields = {"schema_version", "query_version", "run_token", "base_sha256", "plan_digest",
-              "stage", "by_category", "flow_budget_seconds", "budget_origin",
-              "current_endpoint_started_seconds", *counters, *times}
+    fields = {
+        "schema_version",
+        "query_version",
+        "run_token",
+        "base_sha256",
+        "plan_digest",
+        "stage",
+        "by_category",
+        "flow_budget_seconds",
+        "budget_origin",
+        "current_endpoint_started_seconds",
+        *counters,
+        *times,
+    }
     try:
-        value = _read_json(path, 16 * 1024)
+        if value is None:
+            value = _read_json(path, 512 * 1024)
+        resumed_fields = {
+            "attempt_token",
+            "current_endpoint_id",
+            "completed_endpoint_ids",
+            "timed_out_endpoint_ids",
+        }
         if (
-            not isinstance(value, dict) or set(value) != fields
-            or type(value["schema_version"]) is not int or value["schema_version"] != 1
-            or value["query_version"] != QUERY_VERSION or value["run_token"] != run_token
+            not isinstance(value, dict)
+            or set(value) not in (fields, fields | resumed_fields)
+            or type(value["schema_version"]) is not int
+            or value["schema_version"] != 1
+            or value["query_version"] != QUERY_VERSION
+            or value["run_token"] != run_token
             or value["base_sha256"] != base_sha256
             or not isinstance(value["plan_digest"], str)
             or re.fullmatch(r"[0-9a-f]{64}", value["plan_digest"]) is None
-            or value["stage"] not in {"ready", "querying", "finished", "budget_exhausted"}
+            or value["stage"]
+            not in {"ready", "querying", "finished", "finished_with_timeouts", "budget_exhausted"}
             or value["budget_origin"] != "query_body_start"
             or type(value["flow_budget_seconds"]) is not int
             or not 1 <= value["flow_budget_seconds"] <= 86_400
             or any(not _integer(value[key]) or value[key] > 2**53 for key in counters)
-            or any(type(value[key]) not in {int, float} or not 0 <= value[key] <= 86_400
-                   or not math.isfinite(value[key]) for key in times)
+            or any(
+                type(value[key]) not in {int, float}
+                or not 0 <= value[key] <= 86_400
+                or not math.isfinite(value[key])
+                for key in times
+            )
         ):
             raise ValueError("Invalid tracing progress")
         current = value["current_endpoint_started_seconds"]
+        explicit = "completed_endpoint_ids" in value
+        completed = value.get("completed_endpoint_ids", [])
+        timed_out = value.get("timed_out_endpoint_ids", [])
+        if explicit and (
+            not isinstance(value["attempt_token"], str)
+            or re.fullmatch("[0-9a-f]{32}", value["attempt_token"]) is None
+            or not isinstance(completed, list)
+            or not isinstance(timed_out, list)
+            or any(
+                not isinstance(item, str) or re.fullmatch("[0-9a-f]{64}", item) is None
+                for item in [*completed, *timed_out]
+            )
+            or len(set(completed)) != len(completed)
+            or len(set(timed_out)) != len(timed_out)
+            or set(completed).intersection(timed_out)
+            or len(completed) != value["sinks_queried"]
+            or len(timed_out) > value["sinks_pending"]
+            or (value["current_endpoint_id"] is None) != (value["stage"] != "querying")
+            or value["current_endpoint_id"] is not None
+            and (
+                not isinstance(value["current_endpoint_id"], str)
+                or re.fullmatch("[0-9a-f]{64}", value["current_endpoint_id"]) is None
+                or value["current_endpoint_id"] in [*completed, *timed_out]
+            )
+        ):
+            raise ValueError("Invalid explicit endpoint progress")
         if (
             value["sinks_selected"] > 2048
             or value["sinks_total"] != value["sinks_eligible"] + value["sinks_skipped"]
             or value["sinks_eligible"] != value["sinks_selected"] + value["sinks_not_selected"]
             or value["sinks_selected"] != value["sinks_queried"] + value["sinks_pending"]
             or value["sinks_queried"] != value["engine_queries"] + value["sinks_proven_empty"]
-            or value["engine_queries_started"] - value["engine_queries"] != (value["stage"] == "querying")
+            or value["engine_queries_started"] - value["engine_queries"]
+            != len(timed_out) + (value["stage"] == "querying")
             or (current is None) != (value["stage"] != "querying")
-            or current is not None and (type(current) not in {int, float}
-                or not 0 <= current <= value["elapsed_seconds"] or not math.isfinite(current))
+            or current is not None
+            and (
+                type(current) not in {int, float}
+                or not 0 <= current <= value["elapsed_seconds"]
+                or not math.isfinite(current)
+            )
             or value["flow_elapsed_seconds"] > value["elapsed_seconds"]
             or value["maximum_endpoint_seconds"] > value["flow_elapsed_seconds"]
-            or value["stage"] == "finished" and value["sinks_pending"] != 0
-            or value["stage"] == "budget_exhausted" and value["sinks_pending"] == 0
+            or value["stage"] == "finished"
+            and value["sinks_pending"] != 0
+            or value["stage"] == "finished_with_timeouts"
+            and (not explicit or not timed_out or value["sinks_pending"] != len(timed_out))
+            or value["stage"] == "budget_exhausted"
+            and value["sinks_pending"] == 0
         ):
             raise ValueError("Inconsistent tracing progress")
-        categories = ("named_effect_hint", "lifecycle_name_hint", "source_supported_cross_file", "breadth")
+        categories = (
+            "named_effect_hint",
+            "lifecycle_name_hint",
+            "source_supported_cross_file",
+            "breadth",
+        )
         counts = value["by_category"]
         if not isinstance(counts, dict) or set(counts) != set(categories):
             raise ValueError("Missing tracing categories")
         for row in counts.values():
-            if (not isinstance(row, dict) or set(row) != {"candidates", "selected", "queried"}
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"candidates", "selected", "queried"}
                 or any(not _integer(number) or number > 2**53 for number in row.values())
-                or not row["candidates"] >= row["selected"] >= row["queried"]):
+                or not row["candidates"] >= row["selected"] >= row["queried"]
+            ):
                 raise ValueError("Invalid tracing category counts")
-        if any(sum(row[key] for row in counts.values()) != value[field]
-               for key, field in (("candidates", "sinks_eligible"), ("selected", "sinks_selected"),
-                                  ("queried", "sinks_queried"))):
+        if any(
+            sum(row[key] for row in counts.values()) != value[field]
+            for key, field in (
+                ("candidates", "sinks_eligible"),
+                ("selected", "sinks_selected"),
+                ("queried", "sinks_queried"),
+            )
+        ):
             raise ValueError("Inconsistent tracing category totals")
         if flow and "selection" in flow:
             if value["plan_digest"] != flow["selection"]["plan_digest"]:
                 raise ValueError("Progress belongs to another plan")
-            for key in ("sinks_total", "sinks_eligible", "sinks_selected", "sinks_not_selected", "sinks_skipped"):
+            for key in (
+                "sinks_total",
+                "sinks_eligible",
+                "sinks_selected",
+                "sinks_not_selected",
+                "sinks_skipped",
+            ):
                 if value[key] != flow["queries"][key]:
                     raise ValueError("Progress belongs to another query scope")
             if value["sinks_queried"] < flow["queries"]["sinks_queried"]:
                 raise ValueError("Progress predates its checkpoint")
-            prefix = flow["selection"]["endpoints"][:value["sinks_queried"]]
-            if any(counts[category]["queried"] != sum(row["category"] == category for row in prefix)
-                   for category in categories):
+            selected = flow["selection"]["endpoints"]
+            if explicit and not (
+                set(completed)
+                | set(timed_out)
+                | ({value["current_endpoint_id"]} if value["current_endpoint_id"] else set())
+            ) <= {row["id"] for row in selected}:
+                raise ValueError("Progress endpoints lie outside the plan")
+            prefix = (
+                [row for row in selected if row["id"] in completed]
+                if explicit
+                else selected[: value["sinks_queried"]]
+            )
+            if any(
+                counts[category]["queried"] != sum(row["category"] == category for row in prefix)
+                for category in categories
+            ):
                 raise ValueError("Progress does not match its completed prefix")
-        return {"status": "valid", **{key: value[key] for key in fields
-                - {"schema_version", "query_version", "run_token", "base_sha256"}}}
+        return {
+            "status": "valid",
+            **{
+                key: value[key]
+                for key in fields - {"schema_version", "query_version", "run_token", "base_sha256"}
+            },
+            **(
+                {
+                    "sinks_timed_out": len(timed_out),
+                    "current_endpoint_id": value["current_endpoint_id"],
+                }
+                if explicit
+                else {}
+            ),
+        }
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         return {"status": "invalid"}
 
@@ -895,8 +1128,13 @@ def _phase_progress(path, profile):
     if not path.exists():
         return {"status": "unavailable"}
     stages = (
-        "import", "default_overlays", "postprocessing", "base_evidence",
-        "definition_accounting", "dataflow_overlay", "dataflow_queries",
+        "import",
+        "default_overlays",
+        "postprocessing",
+        "base_evidence",
+        "definition_accounting",
+        "dataflow_overlay",
+        "dataflow_queries",
     )
     if profile == "standard":
         stages = stages[:4]
@@ -1535,8 +1773,11 @@ def analyze_joern(
                 staged[source["path"]] = {**source, "lines": source["text"].splitlines()}
                 result["coverage"]["input_bytes"] += len(raw)
             result["coverage"]["staged_files"] = len(staged)
-            languages = [language for language in _FRONTENDS
-                         if any(source["language"] == language for source in staged.values())]
+            languages = [
+                language
+                for language in _FRONTENDS
+                if any(source["language"] == language for source in staged.values())
+            ]
             for language_index, language in enumerate(languages):
                 batch = {
                     path: source
@@ -1586,6 +1827,7 @@ def analyze_joern(
                 )
                 parse_seconds = time.perf_counter() - parse_began
                 query_seconds = None
+                query_attempts, endpoint_timeouts = 0, []
                 query_work_seconds = max(1, min(86_400, int(language_stop - _clock() - 15)))
                 if status == "complete" and language == "javascript":
                     try:
@@ -1621,20 +1863,141 @@ def analyze_joern(
                         "flowSeconds=" + str(query_work_seconds),
                     ]
                     query_began = time.perf_counter()
-                    status = _run(
-                        _contained_command(command, workspace, original, containment, binary, cwd),
-                        workspace=workspace,
-                        cwd=cwd,
-                        env=env,
-                        stop=language_stop,
-                        limits=limits,
-                        output=output,
-                    )
+                    query_attempts, endpoint_timeouts = 0, []
+                    query_model_pruned = False
+                    overlay_digest = None
+                    while True:
+                        attempt_token = uuid.uuid4().hex
+                        attempt_command = [*command, "--param", "attemptToken=" + attempt_token]
+                        if query_attempts:
+                            attempt_command[
+                                attempt_command.index("flowSeconds=" + str(query_work_seconds))
+                            ] = "flowSeconds=" + str(
+                                max(1, min(86_400, int(language_stop - _clock() - 15)))
+                            )
+                            attempt_command[attempt_command.index("cpgFile=" + str(cpg))] = (
+                                "cpgFile=" + str(output) + ".overlay.bin"
+                            )
+                            attempt_command += [
+                                "--param",
+                                "resumeFile=" + str(output) + ".resume.json",
+                            ]
+                            # Reuse the validated graph, never the SDK's mutable prior workspace.
+                            shutil.rmtree(cwd / "workspace", ignore_errors=True)
+                        query_attempts += 1
+                        status = _run(
+                            _contained_command(
+                                attempt_command, workspace, original, containment, binary, cwd
+                            ),
+                            workspace=workspace,
+                            cwd=cwd,
+                            env=env,
+                            stop=language_stop,
+                            limits=limits,
+                            output=output,
+                            **(
+                                {
+                                    "flow_watch": {
+                                        "run_token": run_token,
+                                        "attempt_token": attempt_token,
+                                        "seconds": limits["endpoint_seconds"],
+                                    }
+                                }
+                                if analysis_profile == "deep"
+                                else {}
+                            ),
+                        )
+                        query_model_pruned = query_model_pruned or getattr(
+                            status, "model_pruned", False
+                        )
+                        if status != "endpoint_timeout":
+                            break
+                        try:
+                            base_path = output.with_name(output.name + ".base.json")
+                            overlay_path = output.with_name(output.name + ".overlay.bin")
+                            digest = _checkpoint_digest(overlay_path, limits["workspace_bytes"])
+                            if overlay_digest is not None and overlay_digest != digest:
+                                raise ValueError("Immutable overlay changed")
+                            overlay_digest = digest
+                            base_hash = _checkpoint_digest(base_path, limits["query_json_bytes"])
+                            base = _read_result(base_path, limits["query_json_bytes"])
+                            recovered, _ = _recover_flow_checkpoint(
+                                output.with_name(output.name + ".flow.json"),
+                                base,
+                                base_hash,
+                                run_token,
+                                limits,
+                                stage,
+                                batch,
+                                clean,
+                            )
+                            endpoint_id = status.endpoint_id
+                            plan = recovered["selection"]
+                            if (
+                                endpoint_id not in {row["id"] for row in plan["endpoints"]}
+                                or endpoint_id in plan.get("completed_endpoint_ids", [])
+                                or endpoint_id in endpoint_timeouts
+                            ):
+                                raise ValueError("Timed-out endpoint is not pending in this plan")
+                            endpoint_timeouts.append(endpoint_id)
+                            if (
+                                query_attempts > limits["max_query_restarts"]
+                                or _clock() >= language_stop
+                            ):
+                                break
+                            resume = {
+                                "query_version": QUERY_VERSION,
+                                "run_token": run_token,
+                                "base_sha256": base_hash,
+                                "overlay_sha256": overlay_digest,
+                                "plan_digest": plan["plan_digest"],
+                                "timed_out_endpoint_ids": endpoint_timeouts,
+                            }
+                            output.with_name(output.name + ".resume.json").write_text(
+                                json.dumps(resume)
+                            )
+                            # Preserve the original parser source path; the cached graph is read-only.
+                            overlay_path.chmod(0o400)
+                        except (
+                            OSError,
+                            ValueError,
+                            TypeError,
+                            KeyError,
+                            UnicodeError,
+                            RecursionError,
+                        ):
+                            status = "invalid_resume_checkpoint"
+                            break
                     query_seconds = time.perf_counter() - query_began
+                    if query_attempts > 1 and status == "complete":
+                        try:
+                            resumed = _read_result(output, limits["query_json_bytes"])
+                            if any(
+                                row.get("section") == "load_or_overlays"
+                                for row in resumed.get("errors", [])
+                            ):
+                                status = "resume_load_error"
+                        except (
+                            OSError,
+                            ValueError,
+                            TypeError,
+                            KeyError,
+                            UnicodeError,
+                            RecursionError,
+                        ):
+                            status = "invalid_resume_output"
+                    status = _ProcessStatus(
+                        getattr(status, "terminal_status", str(status)),
+                        engine_failed=getattr(status, "engine_failed", False),
+                        model_pruned=query_model_pruned,
+                        endpoint_id=getattr(status, "endpoint_id", None),
+                    )
                 process_status = status
                 producer_diagnostics = {
                     "terminal_status": getattr(status, "terminal_status", str(status)),
-                    "engine_failed": getattr(status, "engine_failed", status == "analysis_engine_error"),
+                    "engine_failed": getattr(
+                        status, "engine_failed", status == "analysis_engine_error"
+                    ),
                     "model_pruned": getattr(status, "model_pruned", False),
                 }
                 phase_progress = _phase_progress(
@@ -1688,7 +2051,9 @@ def analyze_joern(
                         base_sha256 = None
                         if analysis_profile == "deep" and base_output.is_file():
                             try:
-                                base_sha256 = _checkpoint_digest(base_output, limits["query_json_bytes"])
+                                base_sha256 = _checkpoint_digest(
+                                    base_output, limits["query_json_bytes"]
+                                )
                             except (OSError, ValueError):
                                 flow_checkpoint_status = "invalid"
                                 flow_progress = {"status": "invalid"}
@@ -1699,35 +2064,88 @@ def analyze_joern(
                                 flow_checkpoint_status = "vetoed_worker_failure"
                             elif producer_diagnostics["terminal_status"] == "log_limit":
                                 flow_checkpoint_status = "vetoed_incomplete_diagnostics"
-                                flow_gaps.add("Flow recovery withheld after the diagnostic log limit")
+                                flow_gaps.add(
+                                    "Flow recovery withheld after the diagnostic log limit"
+                                )
                             elif flow_output.exists() and flow["status"] == "error":
                                 try:
-                                    flow_base = raw if recovered_output == base_output else _read_result(
-                                        base_output, limits["query_json_bytes"]
+                                    flow_base = (
+                                        raw
+                                        if recovered_output == base_output
+                                        else _read_result(base_output, limits["query_json_bytes"])
                                     )
                                     if flow_base.get("checkpoint") != "base_before_dataflow":
                                         raise ValueError("Missing immutable flow base")
                                     flow, recovered_gaps = _recover_flow_checkpoint(
-                                        flow_output, flow_base, base_sha256, run_token, limits,
-                                        stage, batch, clean,
+                                        flow_output,
+                                        flow_base,
+                                        base_sha256,
+                                        run_token,
+                                        limits,
+                                        stage,
+                                        batch,
+                                        clean,
                                     )
                                     flow_gaps = recovered_gaps
                                     flow_checkpoint_recovered = True
                                     flow_checkpoint_status = "usable"
-                                except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+                                except (
+                                    OSError,
+                                    ValueError,
+                                    TypeError,
+                                    KeyError,
+                                    UnicodeError,
+                                    RecursionError,
+                                ):
                                     flow_checkpoint_status = "invalid"
-                                    flow_gaps.add("Flow checkpoint could not be qualified; base evidence remains available")
+                                    flow_gaps.add(
+                                        "Flow checkpoint could not be qualified; base evidence remains available"
+                                    )
                             elif flow_output.exists():
                                 flow_checkpoint_status = "not_needed"
                             flow_progress = _flow_progress(
                                 output.with_name(output.name + ".flow-progress.json"),
-                                run_token, base_sha256, flow,
+                                run_token,
+                                base_sha256,
+                                flow,
                             )
-                        if producer_diagnostics["model_pruned"] and flow["status"] in {"complete", "partial"}:
+                        if (
+                            process_status == "endpoint_timeout"
+                            and flow_progress.get("status") == "valid"
+                            and flow_progress.get("current_endpoint_id") in endpoint_timeouts
+                            and flow.get("selection")
+                        ):
+                            timed_out = set(flow["selection"].get("timed_out_endpoint_ids", []))
+                            timed_out.update(endpoint_timeouts)
+                            pending = {
+                                row["id"]
+                                for row in flow["selection"]["endpoints"]
+                                if row["status"] != "completed"
+                            }
+                            if not timed_out <= pending:
+                                raise ValueError(
+                                    "Killed endpoint conflicts with completed evidence"
+                                )
+                            for row in flow["selection"]["endpoints"]:
+                                if row["id"] in timed_out:
+                                    row["status"] = "timed_out"
+                            flow["selection"]["timed_out_endpoint_ids"] = sorted(timed_out)
+                            flow["queries"]["sinks_timed_out"] = len(timed_out)
+                            flow["status"] = flow["paths"]["status"] = "partial"
+                            flow["paths"]["count_is_lower_bound"] = True
+                            flow_gaps.add(
+                                "Assessor killed individually bounded endpoint workers; timed-out endpoints remain unknown"
+                            )
+                        if producer_diagnostics["model_pruned"] and flow["status"] in {
+                            "complete",
+                            "partial",
+                        }:
                             flow["status"] = flow["paths"]["status"] = "partial"
                             flow["paths"]["count_is_lower_bound"] = True
                             flow["model_pruned"] = True
-                            flow_gaps.add("Joern pruned bounded argument expansion; retained witnesses do not establish complete reachability")
+                            flow_gaps.add(
+                                "Joern pruned bounded argument expansion; retained witnesses do not establish complete reachability"
+                            )
                         (
                             methods,
                             calls,
@@ -1872,11 +2290,20 @@ def analyze_joern(
                         "process_status": process_status,
                         "base_checkpoint_recovered": checkpoint_recovered and validated,
                         "dataflow_worker_failed": process_status == "analysis_engine_error",
+                        "query_attempts": query_attempts,
+                        "endpoint_timeouts": len(endpoint_timeouts),
+                        "overlay_reused": query_attempts > 1
+                        and any(
+                            event["phase"] == "dataflow_queries_started"
+                            for event in phase_progress.get("events", [])
+                        ),
                         "producer_diagnostics": producer_diagnostics,
                         "flow_checkpoint_recovered": flow_checkpoint_recovered,
                         "flow_checkpoint_status": flow_checkpoint_status,
                         "flow_progress": flow_progress,
-                        "model_metrics_scope": "base_before_dataflow" if checkpoint_recovered else "query_final",
+                        "model_metrics_scope": "base_before_dataflow"
+                        if checkpoint_recovered
+                        else "query_final",
                         "time_budget": {
                             "policy": "equal_remaining_time_v1",
                             "assigned_seconds": round(assigned_seconds, 3),
@@ -1893,7 +2320,8 @@ def analyze_joern(
                         "timing": {
                             "parser_seconds": round(parse_seconds, 3),
                             "query_process_seconds": round(query_seconds, 3)
-                            if query_seconds is not None else None,
+                            if query_seconds is not None
+                            else None,
                         },
                         "phase_progress": phase_progress,
                     }
@@ -2056,9 +2484,17 @@ def analyze_joern(
                 and all(type(batch.get("queries", {}).get(key)) is int for batch in flow_batches)
                 else None
                 for key in (
-                    "sinks_total", "sinks_eligible", "sinks_selected", "sinks_not_selected",
-                    "sinks_pending", "sinks_skipped", "sinks_queried", "engine_queries",
-                    "sinks_proven_empty", "paths_truncated",
+                    "sinks_total",
+                    "sinks_eligible",
+                    "sinks_selected",
+                    "sinks_not_selected",
+                    "sinks_pending",
+                    "sinks_skipped",
+                    "sinks_queried",
+                    "engine_queries",
+                    "sinks_proven_empty",
+                    "sinks_timed_out",
+                    "paths_truncated",
                 )
             },
             "paths_omitted": sum(batch["paths"]["omitted"] for batch in flow_batches)
