@@ -14,7 +14,7 @@ from collections import Counter, defaultdict, deque
 
 from .rubric import DIMENSIONS
 
-VERSION = "3"
+VERSION = "4"
 MAX_LEADS = 200
 MAX_SELECTOR_CANDIDATES = 64
 MAX_EXPRESSION_NODES = 4000
@@ -23,6 +23,7 @@ _CHANGE_MECHANISMS = {
     "security.authorization_declaration",
     "operability.retry_policy",
     "operability.wait",
+    "operability.silent_exception_handler",
     "extensibility.discovery_or_dispatch",
     "extensibility.dispatch_or_abstract_declaration",
     "performance.io_in_loop",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from pathlib import PurePosixPath
 
 from .dimension_inputs import dimension_inputs
@@ -11,7 +11,7 @@ from .generic_analysis import source_area
 from .rubric import DIMENSIONS
 from .static_analysis import source_role
 
-VERSION = "3"
+VERSION = "4"
 MAX_TASKS = 32
 _SOURCE_KINDS = {"python", "javascript", "source", "documentation", "configuration", "manifest"}
 _BINARY_SUFFIXES = {
@@ -29,6 +29,40 @@ _BINARY_SUFFIXES = {
     ".mov",
     ".pdf",
     ".zip",
+    ".tar",
+    ".gz",
+    ".tgz",
+    ".bz2",
+    ".xz",
+    ".zst",
+    ".7z",
+    ".rar",
+    ".jar",
+    ".war",
+    ".whl",
+    ".deb",
+    ".rpm",
+    ".dmg",
+    ".iso",
+    ".so",
+    ".dylib",
+    ".dll",
+    ".exe",
+    ".wasm",
+    ".bin",
+    ".wav",
+    ".flac",
+    ".webm",
+    ".mkv",
+    ".avi",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".otf",
+    ".eot",
+    ".parquet",
+    ".sqlite",
+    ".onnx",
 }
 _LOCK_NAMES = {
     "package-lock.json",
@@ -44,6 +78,7 @@ _LOCK_NAMES = {
 }
 _DEPENDENCY_DIMENSIONS = {"security", "testing", "maintainability", "delivery"}
 _DEAD_CODE_KINDS = {"unused_symbol", "unreachable_statement", "unreferenced_module"}
+MAX_DIMENSION_REPEATS = 2
 _DEEP_QUESTIONS = [
     "Review dead-code leads against actual reads, initializer effects, entry points, callbacks, registries and public contracts; distinguish unreachable code from unresolved or intentional unused bindings.",
     "Compare agent instructions, skills and canonical guidance with current code, manifest commands and their callers. Trace a documented rule or source-of-truth conflict to its development impact in this dimension; do not treat documentation as incidental assets.",
@@ -521,6 +556,8 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
     }
     inputs = dimension_inputs(assessment)
     packs = {}
+    # Dimensions choose in order, so a file already routed elsewhere yields to fresh source.
+    routed = Counter()
     for name in [dimension] if dimension else DIMENSIONS:
         candidates = {}
 
@@ -618,6 +655,16 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
                 if task["strength"] == "inventory_seed":
                     task["strength"] = "captured_import_context"
 
+        def saturated(task, *, name=name):
+            """Shared guidance or configuration stops recurring unless this dimension cites it."""
+            return (
+                name != "documentation"
+                and task["kind"] in {"documentation", "configuration", "manifest"}
+                and routed[task["evidence_id"]] >= MAX_DIMENSION_REPEATS
+                and not {"dimension_signal", "authored_rating_citation"}
+                & set(task["selection_reasons"])
+            )
+
         def rank(task, *, name=name):
             reasons = task["selection_reasons"]
             direct = any(kind.startswith(name + ".") for kind in task["signal_kinds"])
@@ -651,6 +698,8 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
             }
             return (
                 _navigation_penalty(task["path"], doc_roles.get(task["path"])),
+                saturated(task),
+                task["kind"] in {"python", "javascript", "source"} and task["role"] == "unknown",
                 not (profile == "deep" and is_agent_guidance(task["path"])),
                 not canonical if task["kind"] == "documentation" else False,
                 task["role"] == "tooling" and task["kind"] != "documentation",
@@ -665,6 +714,8 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
 
         queues = defaultdict(deque)
         for task in sorted(candidates.values(), key=rank):
+            if saturated(task):
+                continue
             category = (
                 "guidance"
                 if task["kind"] == "documentation"
@@ -715,6 +766,9 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
             and task["role"] not in {"test", "tooling"}
             and not _navigation_penalty(task["path"])
         ]
+        # A qualification or sample file whose name matches a hint must not lead the
+        # dimension when classified production source exists.
+        production = [task for task in production if task["role"] == "production"] or production
         named = sorted(
             (
                 task
@@ -748,6 +802,11 @@ def build_review_plan(assessment, review=None, *, dimension=None, limit=None):
                 if queues[key] and len(chosen) < limit:
                     task = queues[key].popleft()
                     chosen[task["evidence_id"]] = task
+        for task in sorted(candidates.values(), key=rank):
+            # With nothing better to route, shared context is still worth reading.
+            if saturated(task) and len(chosen) < limit:
+                chosen[task["evidence_id"]] = task
+        routed.update(chosen.keys())
         selected_paths = {task["path"] for task in chosen.values()}
         connections = [
             edge

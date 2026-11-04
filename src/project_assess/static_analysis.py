@@ -11,6 +11,9 @@ import hashlib
 import json
 import re
 from collections import Counter, defaultdict, deque
+from contextlib import contextmanager
+from contextvars import ContextVar
+from fnmatch import fnmatchcase
 from itertools import islice
 from pathlib import Path, PurePosixPath
 
@@ -97,13 +100,125 @@ def _io_call(node):
     return False
 
 
+_APP_MANIFESTS = {"package.json", "pyproject.toml", "setup.py", "cargo.toml", "go.mod", "pom.xml"}
+_NON_APP_PARTS = {
+    "example",
+    "examples",
+    "sample",
+    "samples",
+    "fixture",
+    "fixtures",
+    "demo",
+    "demos",
+    "testdata",
+    "test_data",
+    "template",
+    "templates",
+}
+_BUILD_ASSET_PARTS = {"assets", "static", "public", "chunks", "bundles", "_next"}
+_HASHED_BUILD_NAME = re.compile(r"^.+[-._]([A-Za-z0-9_-]{8,})\.(?:m?js|cjs|css)$")
+_ROLES = {"production", "test", "tooling", "unknown", "generated"}
+_role_context = ContextVar("pat_role_context", default=None)
+
+
+def validate_role_overrides(document):
+    """Accept reviewer-held path rules; they live outside the assessed repository."""
+    if not isinstance(document, dict) or set(document) != {"schema_version", "rules"}:
+        raise ValueError("Role overrides require schema_version and rules")
+    rules = document["rules"]
+    if document["schema_version"] != 1 or not isinstance(rules, list) or len(rules) > 200:
+        raise ValueError("Role overrides require schema_version 1 and at most 200 rules")
+    for rule in rules:
+        if (
+            not isinstance(rule, dict)
+            or set(rule) != {"path", "role"}
+            or not isinstance(rule["path"], str)
+            or not 1 <= len(rule["path"]) <= 500
+            or not isinstance(rule["role"], str)
+            or rule["role"] not in _ROLES
+        ):
+            raise ValueError("Each role override needs a path glob and a known role")
+    return rules
+
+
+@contextmanager
+def role_scope(overrides=()):
+    """Apply one collection's manifests, build-output findings and overrides to source_role."""
+    token = _role_context.set({"overrides": list(overrides), "app_roots": set(), "minified": set()})
+    try:
+        yield
+    finally:
+        _role_context.reset(token)
+
+
+def note_directory(relative, names):
+    """Record a nested manifest so its source tree is recognized as application code."""
+    context = _role_context.get()
+    if (
+        context is not None
+        and relative not in {"", "."}
+        and not {part.lower() for part in PurePosixPath(relative).parts} & _NON_APP_PARTS
+        and any(name.lower() in _APP_MANIFESTS for name in names)
+    ):
+        context["app_roots"].add(relative)
+
+
+def note_javascript_text(path, text):
+    """Unhashed bundles have ordinary names; long average lines identify minified output."""
+    context = _role_context.get()
+    if context is not None and len(text) >= 2048 and len(text) / (text.count("\n") + 1) > 200:
+        context["minified"].add(path)
+
+
+def _hashed_build_name(name):
+    match = _HASHED_BUILD_NAME.match(name)
+    if not match:
+        return False
+    digest = match.group(1)
+    mixed = bool(re.search(r"[0-9]", digest) and re.search(r"[A-Za-z]", digest)) or bool(
+        re.search(r"[A-Z]", digest) and re.search(r"[a-z]", digest)
+    )
+    return mixed and not re.search(r"[a-z]{5}", digest)
+
+
+def _in_app_root(path, context):
+    return any(
+        path.parts[index] in {"src", "lib", "app"}
+        and PurePosixPath(*path.parts[:index]).as_posix() in context.get("app_roots", ())
+        for index in range(1, len(path.parts) - 1)
+    )
+
+
 def source_role(path: str) -> dict:
     """A transparent path heuristic; executable source is not necessarily product code."""
-    parts = tuple(part.lower() for part in PurePosixPath(path).parts)
-    name = parts[-1] if parts else ""
-    generated = bool(set(parts[:-1]) & {"generated", "dist", "build"}) or bool(
-        re.search(r"(?:\.generated\.|_pb2(?:_grpc)?\.py$)", name)
+    context = _role_context.get() or {}
+    for rule in context.get("overrides", ()):
+        if fnmatchcase(path, rule["path"]):
+            generated = rule["role"] == "generated"
+            return {
+                "role": "unknown" if generated else rule["role"],
+                "role_basis": "reviewer override held outside the repository",
+                "generated_hint": generated,
+                "vendor_hint": False,
+            }
+    original = PurePosixPath(path)
+    parts = tuple(part.lower() for part in original.parts)
+    name = original.name
+    lowered = name.lower()
+    generated = (
+        bool(set(parts[:-1]) & {"generated", "dist", "build", "__generated__", ".next", ".nuxt"})
+        or bool(
+            re.search(r"(?:\.generated\.|\.min\.(?:m?js|cjs|css)$|_pb2(?:_grpc)?\.py$)", lowered)
+        )
+        or path in context.get("minified", ())
+        or "src" not in parts[:-1]
+        and any(
+            part in _BUILD_ASSET_PARTS or part.endswith(("_static", "-static"))
+            for part in parts[:-1]
+        )
+        and _hashed_build_name(name)
     )
+    name = lowered
     vendor = bool(
         set(parts[:-1])
         & {"vendor", "vendored", "third_party", "third-party", "node_modules", ".venv", "venv"}
@@ -140,6 +255,8 @@ def source_role(path: str) -> dict:
         "docs",
     }:
         role = "tooling"
+    elif _in_app_root(original, context):
+        role = "production"
     else:
         role = "unknown"
     return {

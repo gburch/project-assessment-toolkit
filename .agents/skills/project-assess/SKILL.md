@@ -7,6 +7,19 @@ description: Run PAT to produce an evidence-backed project assessment with capab
 
 Use PAT through the `pat` CLI to collect facts, add attributable judgment and explain progress toward the user's goals. Run commands from its standalone checkout with `uv run pat`; the Python API is `project_assess`. Keep capability independent of maintenance burden: more tests, documentation or controls do not automatically mean more capability or excessive burden.
 
+## Ordered checklist
+
+Read only what the current step needs; the sections and references below hold the detail.
+
+1. `info`, then `scan ROOT --brief` (Deep when the review needs it). Progress prints to stderr.
+2. Inspect `system_map`, `dimension_inputs`, `doctor ID --limit 20` and `evidence-query` views. A section marked `omitted_for_budget` names the command that reads it.
+3. Read source with `source-context ID --path FILE`; cite the returned `evidence_id`.
+4. `review-schema` lists every field; `review-template ID --full` starts a draft with each optional section.
+5. `review ID --input draft.json --check` reports all problems without saving. Fix them before any reviewer starts.
+6. `challenge-template ID --input draft.json` runs the same checks, then returns the source-first packet. Run the independent challenge and record its responses.
+7. `review ID --input draft.json --check`, then `review ID --input draft.json`.
+8. `export-report ID` only after the review saves; an unreviewed bundle is marked and warned. Read back the report and give the verdict, scorecard, findings, plan and limits inline.
+
 ## Complete the requested assessment
 
 An ordinary request such as "run PAT against this repository" means a complete evidence-backed assessment and a substantive report in the response. Default to whole-project review unless the user requests a narrower scope. A successful scan, Deep run, Doctor output or exported unreviewed report completes evidence collection, not that assessment. Continue through representative source inspection, authored ratings, coverage and a proportionate plan, the applicable independent challenge, and review submission; then read back the saved report. The CLI does not invoke an AI reviewer or assign scores for you.

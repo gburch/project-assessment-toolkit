@@ -46,6 +46,13 @@ def parser():
         help="Include an installed trusted analyzer; Deep already requests Vulture and Joern",
     )
     scan.add_argument(
+        "--role-overrides",
+        help="JSON path-role rules kept outside the assessed repository",
+    )
+    scan.add_argument(
+        "--display-name", help="Report name; defaults to the origin repository or directory name"
+    )
+    scan.add_argument(
         "--report",
         action="append",
         default=[],
@@ -87,6 +94,11 @@ def parser():
     decision.add_argument("--request-id")
     commands.add_parser("list")
     commands.add_parser("rubric")
+    commands.add_parser("review-schema", help="Read the review contract, with all optional fields")
+    setup = commands.add_parser(
+        "setup-joern", help="Download the pinned Joern release and verify its SHA-256"
+    )
+    setup.add_argument("destination", help="Directory outside assessed projects")
     for name in (
         "report",
         "export-report",
@@ -102,6 +114,7 @@ def parser():
         if name == "report":
             command.add_argument("--format", choices=("json", "markdown"), default="json")
             command.add_argument("--brief", action="store_true", help="Read a compact handoff")
+            command.add_argument("--section", help="Read one section a brief handoff omitted")
         if name == "evidence":
             command.add_argument("--evidence-id")
         if name == "doctor":
@@ -111,12 +124,27 @@ def parser():
                 default=100,
                 help="Share 1..100 candidates across evidence families; 20 is useful for a first pass",
             )
+            command.add_argument(
+                "--full", action="store_true", help="Include bodies other commands also supply"
+            )
         if name == "review-template":
             command.add_argument("--mode", choices=("fresh", "refresh"))
+            command.add_argument(
+                "--full", action="store_true", help="Include every optional authored section"
+            )
         if name in {"review", "challenge-template"}:
             command.add_argument("--input", required=True)
         if name == "review":
             command.add_argument("--request-id")
+            command.add_argument(
+                "--check", action="store_true", help="Run every final check without saving"
+            )
+        if name == "export-report":
+            command.add_argument(
+                "--include-evidence",
+                action="store_true",
+                help="Keep evidence bodies in report.json; they can dominate its size",
+            )
     query = commands.add_parser("evidence-query", help="Browse bounded captured evidence")
     query.add_argument("assessment_id")
     query.add_argument(
@@ -159,7 +187,8 @@ def parser():
         "source-context", help="Read captured source only when its live digest still matches"
     )
     context.add_argument("assessment_id")
-    context.add_argument("evidence_id")
+    context.add_argument("evidence_id", nargs="?")
+    context.add_argument("--path", help="Exact captured relative path, instead of an evidence ID")
     context.add_argument("--line", type=int, default=1)
     context.add_argument("--end-line", type=int)
     context.add_argument("--max-chars", type=int, default=8000)
@@ -199,6 +228,20 @@ def main(argv=None):
 
         print(json.dumps(tool_info(), indent=2, allow_nan=False))
         return 0
+    if args.command == "review-schema":
+        from .service import AssessmentService
+
+        print(json.dumps(AssessmentService.review_schema(), indent=2, allow_nan=False))
+        return 0
+    if args.command == "setup-joern":
+        from .joern_setup import setup_joern
+
+        try:
+            print(json.dumps(setup_joern(args.destination), indent=2, allow_nan=False))
+        except (ValueError, OSError) as exc:
+            print(f"pat: {exc}", file=sys.stderr)
+            return 2
+        return 0
     if args.command == "skills":
         from importlib.resources import files
 
@@ -219,6 +262,7 @@ def main(argv=None):
     if not args.state_dir:
         argument_parser.error("--state-dir is required for assessment commands")
     try:
+        from .progress import stderr_progress
         from .service import AssessmentService, markdown_report
 
         if args.command in {"scan", "backfill"} and Path(
@@ -237,12 +281,22 @@ def main(argv=None):
             serve(service, args.port, open_browser=args.open)
             return 0
         if args.command == "scan":
-            output = service.scan(
-                args.root,
-                args.report,
-                analysis_profile=args.analysis_profile,
-                analyzers=args.analyzers,
-            )
+            if args.role_overrides and (
+                Path(args.role_overrides)
+                .expanduser()
+                .resolve()
+                .is_relative_to(Path(args.root).expanduser().resolve())
+            ):
+                raise ValueError("Role overrides must be kept outside the assessed project")
+            with stderr_progress():
+                output = service.scan(
+                    args.root,
+                    args.report,
+                    analysis_profile=args.analysis_profile,
+                    analyzers=args.analyzers,
+                    role_overrides=_input(args.role_overrides) if args.role_overrides else None,
+                    display_name=args.display_name,
+                )
             if args.brief:
                 output = service.overview(output["id"])
         elif args.command == "backfill":
@@ -280,7 +334,7 @@ def main(argv=None):
         elif args.command == "rubric":
             output = service.rubric()
         elif args.command == "doctor":
-            output = service.doctor(args.assessment_id, limit=args.limit)
+            output = service.doctor(args.assessment_id, limit=args.limit, brief=not args.full)
         elif args.command == "evolve":
             output = service.evolve(args.assessment_id)
         elif args.command == "badge":
@@ -289,8 +343,17 @@ def main(argv=None):
                 print(output)
                 return 0
         elif args.command == "report":
-            if args.brief and args.format != "json":
-                raise ValueError("--brief requires --format json")
+            if (args.brief or args.section) and args.format != "json":
+                raise ValueError("--brief and --section require --format json")
+            if args.section:
+                print(
+                    json.dumps(
+                        service.overview(args.assessment_id, section=args.section),
+                        indent=2,
+                        allow_nan=False,
+                    )
+                )
+                return 0
             output = (
                 service.overview(args.assessment_id)
                 if args.brief
@@ -300,7 +363,11 @@ def main(argv=None):
                 print(markdown_report(output))
                 return 0
         elif args.command == "export-report":
-            output = service.export_report(args.assessment_id)
+            output = service.export_report(
+                args.assessment_id, include_evidence=args.include_evidence
+            )
+            for warning in output["warnings"]:
+                print(f"pat: warning: {warning}", file=sys.stderr)
         elif args.command == "evidence":
             output = service.evidence(args.assessment_id, args.evidence_id)
         elif args.command == "evidence-query":
@@ -329,11 +396,18 @@ def main(argv=None):
                 line=args.line,
                 end_line=args.end_line,
                 max_chars=args.max_chars,
+                path=args.path,
             )
         elif args.command == "review-template":
-            output = service.review_template(args.assessment_id, mode=args.mode)
+            output = service.review_template(args.assessment_id, mode=args.mode, full=args.full)
         elif args.command == "challenge-template":
             output = service.challenge_template(args.assessment_id, _input(args.input))
+        elif args.command == "review" and args.check:
+            if args.request_id:
+                raise ValueError("--check saves nothing, so it takes no --request-id")
+            output = service.check_review(args.assessment_id, _input(args.input))
+            print(json.dumps(output, indent=2, allow_nan=False))
+            return 0 if output["valid"] else 2
         elif args.command == "review":
             output = service.submit_review(args.assessment_id, _input(args.input), args.request_id)
         elif args.command == "targets":

@@ -545,8 +545,8 @@ def test_deep_plans_prioritize_agent_guidance_and_cited_dead_code_amid_noise():
     plan = build_review_plan(captured, limit=6)
     for pack in plan["dimensions"].values():
         tasks = {row["evidence_id"]: row for row in pack["source_tasks"]}
-        assert {"agents", "skill", "dead"} <= tasks.keys()
-        assert tasks["agents"]["line"] == 12
+        assert "dead" in tasks and tasks.keys() & {"agents", "skill"}
+        assert "agents" not in tasks or tasks["agents"]["line"] == 12
         assert tasks["dead"]["line"] == 7
         assert "dead_code_candidate" in tasks["dead"]["selection_reasons"]
         assert tasks["dead"]["binding_states"] == ["review_lead_not_disuse_proof"]
@@ -556,7 +556,11 @@ def test_deep_plans_prioritize_agent_guidance_and_cited_dead_code_amid_noise():
             "documentation_drift",
         }
         assert all(row["status"] == "collected" for row in pack["required_checks"])
-    assert plan["version"] == "3"
+    routed = [
+        {row["evidence_id"] for row in pack["source_tasks"]} for pack in plan["dimensions"].values()
+    ]
+    assert all(any(guide in tasks for tasks in routed) for guide in ("agents", "skill"))
+    assert plan["version"] == "4"
     assert captured == before
 
 
@@ -569,3 +573,44 @@ def test_deep_missing_required_inputs_remain_queryable_unknowns():
         assert pack["coverage"]["syntax_gaps"]
     standard = build_review_plan(snapshot(captured["evidence"]))
     assert all("required_checks" not in pack for pack in standard["dimensions"].values())
+
+
+def test_routing_favors_production_and_limits_repeats_across_dimensions():
+    entries = [
+        source("AGENTS.md", "agents", "documentation", "tooling"),
+        source("qualification/tool/pyproject.toml", "pyproject", "manifest", "unknown"),
+        source("qualification/tool/build_cache.py", "qualified", role="unknown"),
+        *(source(f"src/area{index}/owner.py", f"owner{index}") for index in range(12)),
+    ]
+    plan = build_review_plan(snapshot(entries), limit=4)
+    routed = [
+        [task["evidence_id"] for task in pack["source_tasks"]]
+        for pack in plan["dimensions"].values()
+    ]
+    for tasks in routed:
+        production = [identity for identity in tasks if identity.startswith("owner")]
+        assert production and "qualified" not in tasks[: len(production)]
+    undocumented = [
+        tasks
+        for name, tasks in zip(plan["dimensions"], routed, strict=True)
+        if name != "documentation"
+    ]
+    assert sum("agents" in tasks for tasks in undocumented) == 2
+    assert sum("pyproject" in tasks for tasks in undocumented) == 2
+    assert "agents" in routed[list(plan["dimensions"]).index("documentation")]
+
+
+def test_routing_changes_leave_test_and_production_allocation_alone():
+    entries = [
+        *(source(f"src/area{index}/owner.py", f"owner{index}") for index in range(12)),
+        *(
+            source(f"tests/test_owner{index}.py", f"test{index}", role="test")
+            for index in range(12)
+        ),
+    ]
+    plan = build_review_plan(snapshot(entries), limit=6)["dimensions"]
+    tests = {
+        name: sum(task["role"] == "test" for task in pack["source_tasks"])
+        for name, pack in plan.items()
+    }
+    assert tests["testing"] == 2 and tests["security"] == tests["performance"] == 1

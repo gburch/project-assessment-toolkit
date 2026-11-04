@@ -250,7 +250,9 @@ def test_real_stdio_discovery_scan_review_targets_and_boundaries(tmp_path):
                     "get_badge", {"assessment_id": snapshot["id"], "dimension": "../private"}
                 )
                 assert invalid_badge.is_error
-                diagnosis = await session.call_tool("doctor", {"assessment_id": snapshot["id"]})
+                diagnosis = await session.call_tool(
+                    "doctor", {"assessment_id": snapshot["id"], "full": True}
+                )
                 assert not diagnosis.is_error
                 assert diagnosis.structured_content["selection"]["limit"] == 20
                 assert diagnosis.structured_content["source"] == snapshot["source"]

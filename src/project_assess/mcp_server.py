@@ -70,9 +70,18 @@ def create_mcp(service):
         reports: list[str] | None = None,
         analysis_profile: str = "standard",
         analyzers: list[str] | None = None,
+        role_overrides: dict | None = None,
+        display_name: str | None = None,
     ) -> dict[str, Any]:
-        """Read source within allowed roots and save an immutable local facts snapshot."""
-        return service.scan(root, reports, analysis_profile=analysis_profile, analyzers=analyzers)
+        """Read source within allowed roots and save an immutable local facts snapshot. role_overrides holds {schema_version: 1, rules: [{path, role}]} kept outside the repository."""
+        return service.scan(
+            root,
+            reports,
+            analysis_profile=analysis_profile,
+            analyzers=analyzers,
+            role_overrides=role_overrides,
+            display_name=display_name,
+        )
 
     @server.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
     def backfill_history(
@@ -99,8 +108,12 @@ def create_mcp(service):
         return {"analyzers": available()}
 
     @server.tool(annotations={"readOnlyHint": True})
-    def get_report(assessment_id: str, brief: bool = False) -> dict[str, Any]:
-        """Read a saved report; brief=True gives a compact handoff for query_evidence."""
+    def get_report(
+        assessment_id: str, brief: bool = False, section: str | None = None
+    ) -> dict[str, Any]:
+        """Read a saved report; brief=True gives a compact handoff for query_evidence, and section reads one part of it that a size budget omitted."""
+        if section is not None:
+            return service.overview(assessment_id, section=section)
         return service.overview(assessment_id) if brief else service.get_report(assessment_id)
 
     @server.tool(annotations={"readOnlyHint": True})
@@ -109,9 +122,9 @@ def create_mcp(service):
         return service.get_badge(assessment_id, dimension, format="json")
 
     @server.tool(annotations={"readOnlyHint": True})
-    def doctor(assessment_id: str, limit: int = 20) -> dict[str, Any]:
-        """Inspect a fair bounded sample of captured reuse, quality and efficiency leads; query_evidence retrieves omitted candidates."""
-        return service.doctor(assessment_id, limit=limit)
+    def doctor(assessment_id: str, limit: int = 20, full: bool = False) -> dict[str, Any]:
+        """Inspect a fair bounded sample of captured reuse, quality and efficiency leads; query_evidence retrieves omitted candidates. Size-bounded unless full is set."""
+        return service.doctor(assessment_id, limit=limit, brief=not full)
 
     @server.tool(annotations={"readOnlyHint": True})
     def evolve(assessment_id: str) -> dict[str, Any]:
@@ -155,25 +168,38 @@ def create_mcp(service):
     @server.tool(annotations={"readOnlyHint": True})
     def inspect_source_context(
         assessment_id: str,
-        evidence_id: str,
+        evidence_id: str | None = None,
         line: int = 1,
         end_line: int | None = None,
         max_chars: int = 8000,
+        path: str | None = None,
     ) -> dict[str, Any]:
-        """Read lines from an already captured source file only if its whole-file digest still matches. For immutable saved windows use query_evidence(view='snippets')."""
+        """Read lines from an already captured source file, named by evidence_id or exact relative path, only if its whole-file digest still matches. For immutable saved windows use query_evidence(view='snippets')."""
         return service.source_context(
-            assessment_id, evidence_id, line=line, end_line=end_line, max_chars=max_chars
+            assessment_id, evidence_id, line=line, end_line=end_line, max_chars=max_chars, path=path
         )
 
     @server.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
-    def export_report(assessment_id: str) -> dict[str, Any]:
-        """Export a private offline interactive HTML report, readable Markdown/JSON and summary plus eight SVG badges beneath configured state. Return file paths for badge images and the 3D report; never publish or change the assessed project."""
-        return service.export_report(assessment_id)
+    def export_report(assessment_id: str, include_evidence: bool = False) -> dict[str, Any]:
+        """Export a private offline interactive HTML report, readable Markdown/JSON and summary plus eight SVG badges beneath configured state. Return file paths for badge images and the 3D report; never publish or change the assessed project. An unreviewed bundle is marked and warned; evidence bodies stay out of report.json unless include_evidence is set."""
+        return service.export_report(assessment_id, include_evidence=include_evidence)
 
     @server.tool(annotations={"readOnlyHint": True})
-    def review_template(assessment_id: str, mode: str | None = None) -> dict[str, Any]:
-        """Read an unscored snapshot-bound template; mode fresh/refresh records judgment origins."""
-        return service.review_template(assessment_id, mode=mode)
+    def review_template(
+        assessment_id: str, mode: str | None = None, full: bool = False
+    ) -> dict[str, Any]:
+        """Read an unscored snapshot-bound template; mode fresh/refresh records judgment origins, full adds every optional authored section."""
+        return service.review_template(assessment_id, mode=mode, full=full)
+
+    @server.tool(annotations={"readOnlyHint": True})
+    def review_schema() -> dict[str, Any]:
+        """Read the exact review contract, listing required and optional fields."""
+        return service.review_schema()
+
+    @server.tool(annotations={"readOnlyHint": True})
+    def check_review(assessment_id: str, review: dict) -> dict[str, Any]:
+        """Run every submit_review check against a draft and report all burden-support gaps. Nothing is saved."""
+        return service.check_review(assessment_id, review)
 
     @server.tool(annotations={"readOnlyHint": True})
     def challenge_template(assessment_id: str, review: dict) -> dict[str, Any]:

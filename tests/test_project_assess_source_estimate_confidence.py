@@ -83,13 +83,14 @@ def estimate(tmp_path):
 
 
 def bind(service, assessment, review):
-    packet = service.challenge_template(assessment["id"], review)
+    # These tests inspect the final gate on drafts the earlier gates would refuse.
+    digest = service.check_review(assessment["id"], review)["draft_digest"]
     review["challenge"] = {
         "schema_version": 1,
         "status": "completed",
         "reviewer_id": "fixture-independent",
         "independence": "declared",
-        "draft_digest": packet["draft_digest"],
+        "draft_digest": digest,
         "summary": "Synthetic independent support declaration for validation, not an actual expert review.",
         "evidence_ids": review["ratings"]["maintainability"]["evidence_ids"],
         "burden_dimensions": ["maintainability"],

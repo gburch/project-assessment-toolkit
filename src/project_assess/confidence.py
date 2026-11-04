@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -253,6 +254,26 @@ def burden_evidence_inventory(assessment, review, dimension):
     }
 
 
+CHALLENGE_GAP_FIELD = "challenge"
+_CAPTURED_EVIDENCE_ID = re.compile(r"e-[0-9a-f]{8,64}")
+
+
+def evidence_label(value):
+    """Name a captured ID; other submitted text may be sensitive and is never echoed."""
+    return value if _CAPTURED_EVIDENCE_ID.fullmatch(value) else "an ID outside this snapshot"
+
+
+def _trace_label(review, trace):
+    return f"change_traces[{review.get('change_traces', []).index(trace)}]"
+
+
+def _add_gap(result, field, message, failures=()):
+    """Record a gap with the field and evidence or trace IDs needed to correct it."""
+    failures = list(failures)
+    result["gaps"].append(message + (f" [{'; '.join(failures)}]" if failures else ""))
+    result["gap_details"].append({"field": field, "message": message, "failures": failures})
+
+
 def burden_support_assessment(assessment, review, dimension):
     """Check explicit support prerequisites, not the truth of a burden judgment.
 
@@ -268,6 +289,7 @@ def burden_support_assessment(assessment, review, dimension):
         "scope": support.get("scope"),
         "claim": support.get("claim"),
         "gaps": [],
+        "gap_details": [],
         "evidence_ids": list(support.get("observation_ids", [])),
         "readiness": burden_evidence_inventory(assessment, review, dimension),
     }
@@ -283,50 +305,96 @@ def burden_support_assessment(assessment, review, dimension):
     if rating.get("burden_confidence") != "high":
         return result
     result["status"] = "withheld"
-    gaps = result["gaps"]
     if rating.get("burden") is None or rating.get("burden_basis") != "observed":
-        gaps.append("High burden confidence requires a scored, observed burden claim.")
+        _add_gap(
+            result, "burden", "High burden confidence requires a scored, observed burden claim."
+        )
     if not support:
-        gaps.append("No explicit burden support is recorded for the high-confidence claim.")
+        _add_gap(
+            result,
+            "burden_support",
+            "No explicit burden support is recorded for the high-confidence claim.",
+        )
         return result
     for key in ("claim", "scope_description", "representativeness", "counterevidence", "freshness"):
         if not _nonblank(support.get(key)):
-            gaps.append(f"Burden support must explicitly record {key}.")
+            _add_gap(
+                result, f"burden_support.{key}", f"Burden support must explicitly record {key}."
+            )
     scope = support.get("scope")
     coverage = review.get("coverage", {})
     status = coverage.get("dimension_reviews", {}).get(dimension, {}).get("status")
     if scope == "project":
         if coverage.get("scope") != "whole_project" or status != "reviewed":
-            gaps.append("Project-scoped burden confidence requires reviewed whole-project scope.")
+            _add_gap(
+                result,
+                "coverage.scope",
+                "Project-scoped burden confidence requires reviewed whole-project scope.",
+            )
         if not assessment.get("complete", False):
-            gaps.append("Partial collection does not establish project-scoped burden support.")
+            _add_gap(
+                result,
+                "collection",
+                "Partial collection does not establish project-scoped burden support.",
+            )
     elif scope == "workflow":
         if status not in {"reviewed", "partial"}:
-            gaps.append("Workflow-scoped burden confidence requires an explicitly reviewed scope.")
+            _add_gap(
+                result,
+                f"coverage.dimension_reviews.{dimension}.status",
+                "Workflow-scoped burden confidence requires an explicitly reviewed scope.",
+            )
     else:
-        gaps.append("Burden support must declare project or workflow scope.")
+        _add_gap(
+            result, "burden_support.scope", "Burden support must declare project or workflow scope."
+        )
 
     entries = {entry["id"]: entry for entry in assessment.get("evidence", [])}
     cited = set(rating.get("evidence_ids", []))
     observation_ids = support.get("observation_ids", [])
     observations = [entries[eid] for eid in observation_ids if eid in entries and eid in cited]
     if not observation_ids or len(observations) != len(observation_ids):
-        gaps.append("Burden observations must be cited evidence from this captured assessment.")
+        _add_gap(
+            result,
+            "burden_support.observation_ids",
+            "Burden observations must be cited evidence from this captured assessment.",
+            [
+                f"{evidence_label(eid)}: "
+                + ("not in rating evidence_ids" if eid in entries else "not in this snapshot")
+                for eid in observation_ids
+                if eid not in entries or eid not in cited
+            ],
+        )
     contexts = [
         (entry, claim) for entry in observations for claim in _context_claims(entry, dimension)
     ]
     costs = [entry for entry in observations if _observed_cost(entry)]
     if not contexts and not costs:
-        gaps.append(
+        _add_gap(
+            result,
+            "burden_support.observation_ids",
             "No applicable dimension-specific attributed experience with a stated period or "
             "source-matched explicit change-cost observation is cited; joint claims, JUnit "
-            "sums and source identity alone do not establish the cost."
+            "sums and source identity alone do not establish the cost.",
+            [
+                f"{entry['id']}: {entry.get('kind')} has no applicable claim"
+                for entry in observations
+            ],
         )
     traces = {trace["id"]: trace for trace in review.get("change_traces", [])}
     trace_ids = support.get("change_trace_ids", [])
     selected = [traces[tid] for tid in trace_ids if tid in traces]
     if not trace_ids or len(selected) != len(trace_ids):
-        gaps.append("Burden support requires referenced representative change traces.")
+        _add_gap(
+            result,
+            "burden_support.change_trace_ids",
+            "Burden support requires referenced representative change traces.",
+            [
+                f"change_trace_ids[{index}]: unknown change trace"
+                for index, tid in enumerate(trace_ids)
+                if tid not in traces
+            ],
+        )
     source_ids = {
         eid
         for trace in selected
@@ -335,7 +403,12 @@ def burden_support_assessment(assessment, review, dimension):
         if eid in entries and entries[eid].get("kind") in SOURCE_KINDS
     }
     if not source_ids:
-        gaps.append("Change traces must corroborate the hurdle with captured current source.")
+        _add_gap(
+            result,
+            "change_traces.steps.evidence_ids",
+            "Change traces must corroborate the hurdle with captured current source.",
+            [f"{_trace_label(review, trace)}: no captured source step" for trace in selected],
+        )
     source_paths = {entries[eid].get("path") for eid in source_ids}
     relevant_contexts = [
         (entry, claim)
@@ -347,16 +420,27 @@ def burden_support_assessment(assessment, review, dimension):
         entry for entry in costs if source_paths.intersection(_burden_observation_paths(entry))
     ]
     if len(relevant_contexts) != len(contexts) or len(relevant_costs) != len(costs):
-        gaps.append(
+        _add_gap(
+            result,
+            "burden_support.observation_ids",
             "Each observation scope must be corroborated by a current source change trace; "
-            "reconcile the scope before claiming high confidence."
+            "reconcile the scope before claiming high confidence.",
+            [
+                f"{identity}: scope not matched by a change trace"
+                for identity in sorted(
+                    {pair[0]["id"] for pair in contexts if pair not in relevant_contexts}
+                    | {entry["id"] for entry in costs if entry not in relevant_costs}
+                )
+            ],
         )
     if (
         scope == "project"
         and _burden_recurrence(relevant_contexts, relevant_costs) == "not_established"
     ):
-        gaps.append(
-            "Project-scoped burden needs recurring dimension-specific experience or multiple distinct dated cost observations; one isolated workflow cost does not establish project recurrence."
+        _add_gap(
+            result,
+            "burden_support.observation_ids",
+            "Project-scoped burden needs recurring dimension-specific experience or multiple distinct dated cost observations; one isolated workflow cost does not establish project recurrence.",
         )
 
     method = review.get("methodology", {})
@@ -371,13 +455,21 @@ def burden_support_assessment(assessment, review, dimension):
         and author.casefold() not in {"unassigned", challenger.casefold()}
         and challenger.casefold() != "unassigned"
     ):
-        gaps.append("A distinct declared reviewer must challenge this dimension's burden support.")
+        _add_gap(
+            result,
+            CHALLENGE_GAP_FIELD,
+            "A distinct declared reviewer must challenge this dimension's burden support.",
+        )
     else:
         # Reuse the canonical draft binding; a completed label alone
         # cannot turn an old or unrelated challenge into current support.
         if challenge.get("draft_digest") != _draft_digest(assessment, review):
-            gaps.append("The burden challenge is not bound to this current draft and snapshot.")
-    if not gaps:
+            _add_gap(
+                result,
+                CHALLENGE_GAP_FIELD,
+                "The burden challenge is not bound to this current draft and snapshot.",
+            )
+    if not result["gaps"]:
         result["status"] = "structured_support_present_for_declared_scope"
     return result
 
@@ -387,62 +479,130 @@ def _source_estimate_support(assessment, review, dimension, result):
     from .review_plan import dimension_coverage
 
     result.update(status="withheld", standard="source-estimate-v1")
-    gaps = result["gaps"]
     rating = review["ratings"][dimension]
     support = rating.get("burden_support") or {}
     if rating.get("burden") is None:
-        gaps.append("Medium source confidence requires a scored structural estimate.")
+        _add_gap(
+            result, "burden", "Medium source confidence requires a scored structural estimate."
+        )
     for key in ("claim", "scope_description", "representativeness", "counterevidence", "freshness"):
         if not _nonblank(support.get(key)):
-            gaps.append(f"Source-estimate support must explicitly record {key}.")
+            _add_gap(
+                result,
+                f"burden_support.{key}",
+                f"Source-estimate support must explicitly record {key}.",
+            )
     coverage = review.get("coverage", {})
     dimension_review = coverage.get("dimension_reviews", {}).get(dimension, {})
     scope = support.get("scope")
     if scope == "project":
         if coverage.get("scope") != "whole_project" or dimension_review.get("status") != "reviewed":
-            gaps.append("Project estimates require representative reviewed dimension coverage.")
-        gaps.extend(dimension_coverage(assessment, dimension)["collection_blockers"])
+            _add_gap(
+                result,
+                f"coverage.dimension_reviews.{dimension}.status",
+                "Project estimates require representative reviewed dimension coverage.",
+            )
+        for blocker in dimension_coverage(assessment, dimension)["collection_blockers"]:
+            _add_gap(result, "collection", blocker)
     elif scope == "workflow":
         if dimension_review.get("status") not in {"reviewed", "partial"}:
-            gaps.append("Workflow estimates require an explicitly reviewed source scope.")
+            _add_gap(
+                result,
+                f"coverage.dimension_reviews.{dimension}.status",
+                "Workflow estimates require an explicitly reviewed source scope.",
+            )
     else:
-        gaps.append("Source-estimate support must declare project or workflow scope.")
+        _add_gap(
+            result,
+            "burden_support.scope",
+            "Source-estimate support must declare project or workflow scope.",
+        )
     entries = {entry["id"]: entry for entry in assessment.get("evidence", [])}
     cited = set(rating.get("evidence_ids", []))
     examined = set(dimension_review.get("evidence_ids", []))
     for field in ("corroboration_ids", "counterevidence_ids"):
         ids = support.get(field, [])
-        if not ids or any(
-            eid not in cited
-            or eid not in examined
-            or entries.get(eid, {}).get("kind") not in SOURCE_KINDS
-            for eid in ids
-        ):
-            gaps.append(f"{field} must cite current source inspected for this dimension.")
+        failing = []
+        for eid in ids:
+            problems = [
+                problem
+                for problem, present in (
+                    (f"not in ratings.{dimension}.evidence_ids", eid in cited),
+                    (
+                        f"not in coverage.dimension_reviews.{dimension}.evidence_ids",
+                        eid in examined,
+                    ),
+                    (
+                        f"kind {entries.get(eid, {}).get('kind', 'unknown')} is not current source",
+                        entries.get(eid, {}).get("kind") in SOURCE_KINDS,
+                    ),
+                )
+                if not present
+            ]
+            if problems:
+                failing.append(f"{evidence_label(eid)}: {', '.join(problems)}")
+        if not ids or failing:
+            _add_gap(
+                result,
+                f"burden_support.{field}",
+                f"{field} must cite current source inspected for this dimension.",
+                failing,
+            )
     traces = {trace["id"]: trace for trace in review.get("change_traces", [])}
     ids = support.get("change_trace_ids", [])
     selected = [traces[identity] for identity in ids if identity in traces]
     if not ids or len(selected) != len(ids):
-        gaps.append("Source estimates require a referenced representative change or upkeep trace.")
+        _add_gap(
+            result,
+            "burden_support.change_trace_ids",
+            "Source estimates require a referenced representative change or upkeep trace.",
+            [
+                f"change_trace_ids[{index}]: unknown change trace"
+                for index, identity in enumerate(ids)
+                if identity not in traces
+            ],
+        )
     for trace in selected:
         if not _nonblank(trace.get("cost")) or not _nonblank(trace.get("counterevidence")):
-            gaps.append("Each estimate trace must explain upkeep and a contrary or simpler path.")
+            _add_gap(
+                result,
+                "change_traces.cost",
+                "Each estimate trace must explain upkeep and a contrary or simpler path.",
+                [f"{_trace_label(review, trace)}: cost or counterevidence is blank"],
+            )
         if any(step.get("activity", "unknown") == "unknown" for step in trace.get("steps", [])):
-            gaps.append("Estimate traces must distinguish edits, verification and inspection.")
+            _add_gap(
+                result,
+                "change_traces.steps.activity",
+                "Estimate traces must distinguish edits, verification and inspection.",
+                [f"{_trace_label(review, trace)}: a step has unknown activity"],
+            )
         if not any(
             eid in cited and eid in examined and entries.get(eid, {}).get("kind") in SOURCE_KINDS
             for step in trace.get("steps", [])
             for eid in step.get("evidence_ids", [])
         ):
-            gaps.append("Each estimate trace must intersect inspected current dimension source.")
+            _add_gap(
+                result,
+                "change_traces.steps.evidence_ids",
+                "Each estimate trace must intersect inspected current dimension source.",
+                [f"{_trace_label(review, trace)}: no step cites inspected dimension source"],
+            )
         trace_ids = {eid for step in trace.get("steps", []) for eid in step.get("evidence_ids", [])}
         if not trace_ids.intersection(support.get("corroboration_ids", [])):
-            gaps.append(
-                "Each estimate trace must include source corroborating this dimension's upkeep mechanism."
+            _add_gap(
+                result,
+                "burden_support.corroboration_ids",
+                "Each estimate trace must include source corroborating this dimension's upkeep mechanism.",
+                [f"{_trace_label(review, trace)}: shares no evidence ID with corroboration_ids"],
             )
     if not _burden_challenge_matches(assessment, review, dimension):
-        gaps.append("A distinct reviewer must challenge the estimate against this exact draft.")
-    if not gaps:
+        _add_gap(
+            result,
+            CHALLENGE_GAP_FIELD,
+            "A distinct reviewer must challenge the estimate against this exact draft.",
+        )
+    if not result["gaps"]:
         result["status"] = "structured_support_present_for_declared_scope"
     result["caveat"] = (
         "Structural estimate support, not measured duration, recurrence, runtime effectiveness or automatically earned confidence. Corroboration and contrary-source relevance remain review judgments."

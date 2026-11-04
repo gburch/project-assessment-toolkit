@@ -15,7 +15,7 @@ from pathlib import Path
 from .badges import MARK, badge_assets, badge_data
 from .collector import _open_directory
 from .confidence import confidence_assessment
-from .report_markdown import markdown_report
+from .report_markdown import markdown_report, report_name
 from .rubric import DIMENSIONS
 
 _STATIC = Path(__file__).with_name("static")
@@ -134,7 +134,7 @@ def dimension_map_data(report):
         "schema_version": 1,
         "assessment_id": assessment["id"],
         "review_id": review.get("id"),
-        "project": Path(assessment["source"]["root"]).name,
+        "project": report_name(assessment),
         "preview_targets": False,
         "complete": assessment.get("complete") is True,
         "dimensions": rows,
@@ -927,7 +927,33 @@ def _remove_at(parent, name):
     os.rmdir(name, dir_fd=parent)
 
 
-def export_report(report, state_dir, *, forbidden_roots=()):
+def _json_report(report, *, include_evidence, review_status):
+    """Evidence bodies dominate the JSON; the ledger and evidence commands reach them."""
+    marker = {
+        "review_status": review_status,
+        "evidence_bodies": "included" if include_evidence else "omitted",
+    }
+    if include_evidence:
+        return {**report, "export": marker}
+    assessment = report["assessment"]
+    return {
+        **report,
+        "export": marker,
+        "assessment": {
+            **assessment,
+            "evidence": [
+                {
+                    key: value
+                    for key, value in entry.items()
+                    if key not in {"stats", "excerpt", "source_windows"}
+                }
+                for entry in assessment["evidence"]
+            ],
+        },
+    }
+
+
+def export_report(report, state_dir, *, forbidden_roots=(), include_evidence=False):
     """Write a fresh private bundle under configured state, without target writes."""
     assessment = report["assessment"]
     assessment_id = assessment["id"]
@@ -946,6 +972,12 @@ def export_report(report, state_dir, *, forbidden_roots=()):
         if destination.is_relative_to(Path(root).expanduser().resolve()):
             raise ValueError("Report exports must be outside assessed projects")
     badges = badge_assets(report)
+    review_status = "reviewed" if report.get("review") else "unreviewed"
+    warnings = (
+        []
+        if report.get("review")
+        else ["No saved review: this bundle holds captured facts only, with no judged scores."]
+    )
     markdown = "\n".join(
         ["[Interactive 3D report](report.html)", "", "![PAT snapshot](badges/summary.svg)", ""]
         + [f"![PAT {_LABELS[d]}](badges/{d}.svg)" for d in DIMENSIONS]
@@ -955,7 +987,15 @@ def export_report(report, state_dir, *, forbidden_roots=()):
         "report.html": report_html(report).encode(),
         "report.md": markdown.encode(),
         "report.json": (
-            json.dumps(report, ensure_ascii=True, allow_nan=False, indent=2) + "\n"
+            json.dumps(
+                _json_report(
+                    report, include_evidence=include_evidence, review_status=review_status
+                ),
+                ensure_ascii=True,
+                allow_nan=False,
+                indent=2,
+            )
+            + "\n"
         ).encode(),
         **{"badges/" + name: data.encode() for name, data in badges.items()},
     }
@@ -1010,6 +1050,9 @@ def export_report(report, state_dir, *, forbidden_roots=()):
         "schema_version": 1,
         "assessment_id": assessment_id,
         "review_id": (report.get("review") or {}).get("id"),
+        "review_status": review_status,
+        "warnings": warnings,
+        "evidence_bodies": "included" if include_evidence else "omitted",
         "source_digest": source_digest,
         "goal_revision": (report.get("goals") or {}).get("revision"),
         "directory": str(folder),

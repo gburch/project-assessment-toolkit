@@ -18,14 +18,17 @@ from jsonschema import Draft202012Validator
 from .collector import collect
 from .comparison import compare_assessments
 from .confidence import (
+    CHALLENGE_GAP_FIELD,
     MAX_FINDING_EXCERPT,
     burden_support_assessment,
     confidence_assessment,
+    evidence_label,
     validate_finding_support,
 )
 from .control_inventory import DIMENSIONS as CONTROL_DIMENSIONS
 from .dimension_inputs import dimension_inputs
 from .documentation import maintenance_candidates
+from .output_budget import BRIEF_CHARS, CHALLENGE_CHARS, DOCTOR_CHARS, fit_budget
 from .project_context import (
     PROJECT_CONTEXT_SCHEMA,
     project_context_assessment,
@@ -47,6 +50,24 @@ from .review_context import build_challenge_evidence_index, get_system_map
 from .review_plan import VERSION as REVIEW_PLAN_VERSION
 from .review_plan import build_review_plan
 from .rubric import DIMENSIONS, PROFILES, RUBRIC_VERSION, rubric
+
+
+class BurdenSupportError(ValueError):
+    """Every burden claim that lacks support, reported together."""
+
+    def __init__(self, issues):
+        self.issues = issues
+        super().__init__(
+            "\n".join(
+                f"{issue['claim']} confidence lacks support for {issue['dimension']}: "
+                + "; ".join(
+                    f"{gap['field']}: {gap['message']}"
+                    + (f" [{'; '.join(gap['failures'])}]" if gap["failures"] else "")
+                    for gap in issue["gaps"]
+                )
+                for issue in issues
+            )
+        )
 
 
 class ConflictError(ValueError):
@@ -349,6 +370,31 @@ def _goal_alignment(assessment, review, goals, goal_rubric_version):
         "findings": findings,
         "urgent_findings": [item for item in findings if item["severity"] in {"critical", "high"}],
     }
+
+
+MAX_QUERY_CHARS = 100_000
+_BRIEF_ROW_LOCATIONS = 5
+_BRIEF_ROW_METRIC_CHARS = 1500
+
+
+def _doctor_row_brief(row, assessment_id):
+    """Keep what ranks and locates a lead; source bodies and long metrics are read on request."""
+    brief = {
+        key: value
+        for key, value in row.items()
+        if key not in {"snippets", "source_windows", "excerpt", "fingerprint"}
+    }
+    locations = row.get("locations", [])
+    if len(locations) > _BRIEF_ROW_LOCATIONS:
+        brief["locations"] = locations[:_BRIEF_ROW_LOCATIONS]
+        brief["locations_omitted"] = len(locations) - _BRIEF_ROW_LOCATIONS
+    if len(json.dumps(row.get("metrics", {}))) > _BRIEF_ROW_METRIC_CHARS:
+        brief["metrics"] = {
+            "omitted_for_budget": True,
+            "read_with": f"evidence-query {assessment_id} --view candidates "
+            f"--candidate-kind {row.get('kind')}",
+        }
+    return brief
 
 
 def _validate(value, schema):
@@ -849,7 +895,16 @@ class AssessmentService:
             "prompting": prompting_rubric(),
         }
 
-    def scan(self, root, reports=None, *, analysis_profile="standard", analyzers=None):
+    def scan(
+        self,
+        root,
+        reports=None,
+        *,
+        analysis_profile="standard",
+        analyzers=None,
+        role_overrides=None,
+        display_name=None,
+    ):
         root = self._root(root)
         # Report paths have the same authorization boundary as source reads.
         report_paths = []
@@ -863,7 +918,12 @@ class AssessmentService:
         started = time.monotonic()
         captured_at = now()
         snapshot = collect(
-            root, reports=report_paths, analysis_profile=analysis_profile, analyzers=analyzers
+            root,
+            reports=report_paths,
+            analysis_profile=analysis_profile,
+            analyzers=analyzers,
+            role_overrides=role_overrides,
+            display_name=display_name,
         )
         snapshot["collection"] = {
             "seconds": round(time.monotonic() - started, 4),
@@ -873,7 +933,8 @@ class AssessmentService:
         snapshot.update(id=_id("a_"), project_id=project_id, created_at=captured_at)
         with self._db(write=True) as db:
             db.execute(
-                "INSERT OR IGNORE INTO projects VALUES (?,?,?)", (project_id, str(root), root.name)
+                "INSERT OR IGNORE INTO projects VALUES (?,?,?)",
+                (project_id, str(root), snapshot["source"]["display_name"]),
             )
             db.execute(
                 "INSERT INTO assessments(id,project_id,data) VALUES (?,?,?)",
@@ -1159,8 +1220,8 @@ class AssessmentService:
                 return item
         raise ValueError("Unknown evidence ID in this assessment")
 
-    def overview(self, assessment_id):
-        """Read a compact handoff; detailed captured data remains queryable by view."""
+    def overview(self, assessment_id, *, section=None):
+        """Read a compact handoff, or one whole section a budgeted handoff left out."""
         with self._db() as db:
             assessment = self._assessment(db, assessment_id)
             review = self._review(db, assessment_id)
@@ -1168,7 +1229,7 @@ class AssessmentService:
         facts = assessment["facts"]
         findings = [*assessment["findings"], *(review or {}).get("findings", [])]
         urgent = [row for row in findings if row.get("severity") in {"critical", "high"}]
-        return {
+        result = {
             "assessment_id": assessment_id,
             "project_id": assessment["project_id"],
             "created_at": assessment["created_at"],
@@ -1234,7 +1295,18 @@ class AssessmentService:
                 "goal_revision": alignment["goal_revision"],
                 "missing_targets": alignment["missing_targets"],
             },
-            "tool_provenance": assessment.get("tool_provenance", facts.get("tool_provenance")),
+            "tool_provenance": {
+                key: value
+                for key, value in (
+                    assessment.get("tool_provenance", facts.get("tool_provenance")) or {}
+                ).items()
+                if key not in {"available_instructions", "instructions", "collection"}
+            },
+            "deleted_documents": {
+                "count": facts.get("change_history", {}).get("deleted_documents", 0),
+                "read_with": f"evidence-query {assessment_id} --view candidates "
+                "--candidate-kind deleted_document_hint",
+            },
             "reported_findings": {
                 severity: sum(row.get("severity") == severity for row in findings)
                 for severity in ("critical", "high", "medium", "low", "info")
@@ -1272,6 +1344,35 @@ class AssessmentService:
                 "support the report rather than replacing it."
             ),
         }
+        if section is not None:
+            sections = {**result, "collection_gaps": assessment["gaps"]}
+            if section not in sections:
+                raise ValueError(
+                    "Unknown report section; choose one of: " + ", ".join(sorted(sections))
+                )
+            return {"assessment_id": assessment_id, "section": section, section: sections[section]}
+
+        def read(name):
+            return f"report {assessment_id} --section {name}"
+
+        return fit_budget(
+            result,
+            BRIEF_CHARS,
+            {
+                "optional_analysis": read("optional_analysis"),
+                "javascript_analysis": read("javascript_analysis"),
+                "source_analysis": read("source_analysis"),
+                "static_analysis": read("static_analysis"),
+                "prompting": read("prompting"),
+                "confidence_assessment": read("confidence_assessment"),
+                "assessment_method": read("assessment_method"),
+                "review_coverage": read("review_coverage"),
+                "project_context": read("project_context"),
+                "collection_scope": read("collection_scope"),
+                "dimension_inputs": read("dimension_inputs"),
+                "system_map": f"evidence-query {assessment_id} --view areas",
+            },
+        )
 
     def query_evidence(
         self,
@@ -1323,7 +1424,7 @@ class AssessmentService:
         ):
             raise ValueError("Evidence filters must be strings of at most 256 characters")
         if any(type(value) is not int for value in (offset, limit, max_chars)) or not (
-            offset >= 0 and 1 <= limit <= 100 and 2000 <= max_chars <= 100000
+            offset >= 0 and 1 <= limit <= 100 and 2000 <= max_chars <= MAX_QUERY_CHARS
         ):
             raise ValueError("Require offset >= 0, limit 1..100 and max_chars 2000..100000")
         if line is not None and (type(line) is not int or line < 1):
@@ -1500,6 +1601,19 @@ class AssessmentService:
                 )
             elif view == "candidates":
                 rows.extend(by_evidence.get(entry["id"], []))
+                if entry["kind"] == "change-history" and candidate_kind in {
+                    None,
+                    "deleted_document_hint",
+                }:
+                    rows.extend(
+                        {
+                            **row,
+                            **common,
+                            "kind": "deleted_document_hint",
+                            "basis": "Path and deletion commit only; content was not retained.",
+                        }
+                        for row in stats.get("deleted_documents", [])
+                    )
             elif view == "prompting" and entry["kind"] == "prompting-analysis":
                 rows.extend(
                     {**row, "record_type": "prompting_signal", **common}
@@ -1899,11 +2013,18 @@ class AssessmentService:
                 result["items"].pop()
                 if result["items"]:
                     break
+                size = len(json.dumps(row, indent=2))
                 result["items"].append(
                     {
                         "evidence_id": row.get("evidence_id"),
                         "path": row.get("path"),
-                        "omitted": "Row exceeds output budget; use a narrower view or raise max_chars.",
+                        "chars": size,
+                        "omitted": (
+                            f"Row exceeds this output budget; raise max_chars above {size}."
+                            if size + 2000 <= MAX_QUERY_CHARS
+                            else f"Row exceeds the {MAX_QUERY_CHARS}-character query maximum; "
+                            "read it whole with the evidence command (--evidence-id)."
+                        ),
                     }
                 )
                 result["oversized_rows"] += 1
@@ -1911,20 +2032,86 @@ class AssessmentService:
         result["returned"] = len(result["items"])
         end = offset + result["returned"]
         result["next_offset"] = end if end < len(filtered) else None
+        if view == "candidates" and candidate_kind and not filtered:
+            for name, kinds in (
+                (
+                    "burden",
+                    [
+                        lead.get("kind")
+                        for entry in entries
+                        if entry["kind"] == "burden-analysis"
+                        for lead in entry["stats"].get("leads", [])
+                    ],
+                ),
+                (
+                    "controls",
+                    [
+                        signal.get("kind")
+                        for entry in entries
+                        if entry["kind"] == "control-analysis"
+                        for signal in entry["stats"].get("signals", [])
+                    ],
+                ),
+                (
+                    "prompting",
+                    [
+                        signal.get("kind")
+                        for entry in entries
+                        if entry["kind"] == "prompting-analysis"
+                        for signal in entry["stats"].get("signals", [])
+                    ],
+                ),
+            ):
+                matches = sorted(
+                    {
+                        kind_name
+                        for kind_name in kinds
+                        if kind_name
+                        and (
+                            kind_name == candidate_kind or kind_name.endswith("." + candidate_kind)
+                        )
+                    }
+                )
+                if matches:
+                    result["hint"] = (
+                        f"{candidate_kind} is reported by the {name} view, not candidates: "
+                        f"evidence-query {assessment_id} --view {name} --candidate-kind {matches[0]}"
+                    )
+                    break
         if navigation is not None:
             result["remaining"] = max(0, len(filtered) - end)
         if len(json.dumps(result, indent=2)) > max_chars:
             raise ValueError("Output budget is too small for snapshot identity; raise max_chars")
         return result
 
-    def source_context(self, assessment_id, evidence_id, line=1, end_line=None, max_chars=8000):
+    def source_context(
+        self, assessment_id, evidence_id=None, line=1, end_line=None, max_chars=8000, *, path=None
+    ):
         """Read only captured source whose current complete bytes match the saved digest."""
+        from .source_context import SOURCE_CONTEXT_KINDS, read_context
+
+        if (evidence_id is None) == (path is None):
+            raise ValueError("Source context requires exactly one of an evidence ID or path")
         with self._db() as db:
             assessment = self._assessment(db, assessment_id)
-        entry = next((row for row in assessment["evidence"] if row["id"] == evidence_id), None)
-        if entry is None:
-            raise ValueError("Unknown evidence ID in this assessment")
-        from .source_context import read_context
+        if path is None:
+            entry = next((row for row in assessment["evidence"] if row["id"] == evidence_id), None)
+            if entry is None:
+                raise ValueError("Unknown evidence ID in this assessment")
+        else:
+            entry = next(
+                (
+                    row
+                    for row in assessment["evidence"]
+                    if row.get("path") == path and row["kind"] in SOURCE_CONTEXT_KINDS
+                ),
+                None,
+            )
+            if entry is None:
+                raise ValueError(
+                    "No captured source at that exact relative path; "
+                    "use evidence-query --path for a substring search"
+                )
 
         return {
             "assessment_id": assessment_id,
@@ -1972,7 +2159,7 @@ class AssessmentService:
                 "goal_alignment": self._alignment(db, assessment),
             }
 
-    def doctor(self, assessment_id, *, limit=100):
+    def doctor(self, assessment_id, *, limit=100, brief=False):
         """Project captured simplify candidates without executing or changing source."""
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("Doctor limit must be an integer from 1 to 100")
@@ -1992,6 +2179,7 @@ class AssessmentService:
                 "sarif",
                 "source_text",
                 "documentation",
+                "burden_leads",
             )
         }
         entries = assessment["evidence"]
@@ -2275,6 +2463,77 @@ class AssessmentService:
                         "verification": "Check affected workflows and source-of-truth ownership. Literal paths, overlap and undeclared scripts do not establish stale guidance or safe deletion.",
                     }
                 )
+        located_loops = {
+            (location.get("path"), location.get("line"))
+            for rows in families.values()
+            for row in rows
+            if row.get("kind") == "loop_io"
+            for location in row.get("locations", [])
+        }
+        for entry in entries:
+            if entry["kind"] != "burden-analysis":
+                continue
+            for lead in entry["stats"].get("leads", []):
+                locations = lead.get("locations", [])
+                if lead.get("kind") != "performance.io_in_loop" or any(
+                    (location.get("path"), location.get("line")) in located_loops
+                    for location in locations
+                ):
+                    continue
+                families["burden_leads"].append(
+                    {
+                        "kind": "burden_io_in_loop",
+                        "lens": "efficiency",
+                        "locations": locations,
+                        "metrics": lead.get("metrics", {}),
+                        "evidence_ids": sorted(
+                            {
+                                entry["id"],
+                                *(row["source_evidence_id"] for row in locations),
+                            }
+                        ),
+                        "source_identity": "captured_snapshot",
+                        "smallest_fix": guidance["loop_io"][0],
+                        "verification": guidance["loop_io"][1],
+                    }
+                )
+            for lead in entry["stats"].get("leads", []):
+                if lead.get("kind") != "operability.silent_exception_handler":
+                    continue
+                locations = lead.get("locations", [])
+                families["burden_leads"].append(
+                    {
+                        "kind": "silent_exception_handler",
+                        "lens": "quality",
+                        "locations": locations,
+                        "metrics": lead.get("metrics", {}),
+                        "evidence_ids": sorted(
+                            {
+                                entry["id"],
+                                *(row["source_evidence_id"] for row in locations),
+                            }
+                        ),
+                        "source_identity": "captured_snapshot",
+                        "smallest_fix": "Check whether this failure must be visible; log or re-raise it only where a caller or operator needs to act.",
+                        "verification": "Exercise the failure path and confirm its outcome stays observable; a deliberately ignored failure can be correct.",
+                    }
+                )
+        for entry in entries:
+            if entry["kind"] != "change-history":
+                continue
+            for row in entry["stats"].get("deleted_documents", []):
+                families["documentation"].append(
+                    {
+                        "kind": "deleted_document_hint",
+                        "lens": "quality",
+                        "locations": [{"path": row["path"]}],
+                        "metrics": {key: row[key] for key in ("deleted_at", "revision")},
+                        "evidence_ids": [entry["id"]],
+                        "source_identity": "git_history_path_only",
+                        "smallest_fix": "Read the deleted document in Git history and compare what it claimed with current scope and readiness.",
+                        "verification": "Only the path was retained; deletion alone establishes neither abandonment nor a readiness change.",
+                    }
+                )
         ecosystem = _ecosystem_fit(assessment)
         if ecosystem["status"] in {"complete", "partial"}:
             signals = sorted(
@@ -2336,7 +2595,7 @@ class AssessmentService:
             status = "partial"
         if status == "complete" and not assessment.get("complete", False):
             status = "partial"
-        return {
+        result = {
             "schema_version": 1,
             "assessment_id": assessment_id,
             "project_id": assessment["project_id"],
@@ -2377,10 +2636,69 @@ class AssessmentService:
             "verification": "Trace actual callers and choose relevant behavior checks before an authorized edit; rescan afterward to assess the change.",
             "caveat": "Static candidates and supplied diagnostics require review. Empty groups are not a clean bill of health; this operation assigns no grades and applies no fixes.",
         }
+        return self._doctor_brief(result, alignment) if brief else result
 
-    def review_template(self, assessment_id, mode=None):
+    @staticmethod
+    def _doctor_brief(result, alignment):
+        """Keep ranked leads and return references, not the bodies other commands supply."""
+        identity = result["assessment_id"]
+        burden = result["burden_analysis"]
+        brief = {
+            **result,
+            "groups": {
+                lens: [_doctor_row_brief(row, identity) for row in rows]
+                for lens, rows in result["groups"].items()
+            },
+            "goal_alignment": {
+                key: alignment.get(key)
+                for key in ("status", "planning_status", "review_id", "goal_revision")
+            },
+            "prompting": _prompting_summary(alignment["prompting"]),
+            "burden_analysis": {
+                "coverage": burden.get("coverage"),
+                "read_with": f"evidence-query {identity} --view burden",
+            },
+            "analysis_scope": {
+                key: value
+                for key, value in result["analysis_scope"].items()
+                if key != "documentation"
+            },
+            "gaps": result["gaps"][:20],
+            "omitted_gaps": max(0, len(result["gaps"]) - 20),
+            "details": f"doctor {identity} --full",
+        }
+        return fit_budget(
+            brief,
+            DOCTOR_CHARS,
+            {
+                "test_value_static": f"doctor {identity} --full",
+                "ecosystem_fit": f"doctor {identity} --full",
+                "analysis_scope": f"doctor {identity} --full",
+                "prompting": f"evidence-query {identity} --view prompting",
+                "burden_analysis": f"evidence-query {identity} --view burden",
+                "groups.reuse": f"evidence-query {identity} --view candidates",
+                "groups.quality": f"evidence-query {identity} --view candidates",
+                "groups.efficiency": f"evidence-query {identity} --view candidates",
+                "gaps": f"doctor {identity} --full",
+            },
+        )
+
+    @staticmethod
+    def review_schema():
+        """Read the exact review contract, including every optional field."""
+        return {
+            "schema_version": 1,
+            "rubric_version": RUBRIC_VERSION,
+            "required": REVIEW_SCHEMA["required"],
+            "optional": sorted(set(REVIEW_SCHEMA["properties"]) - set(REVIEW_SCHEMA["required"])),
+            "review": REVIEW_SCHEMA,
+        }
+
+    def review_template(self, assessment_id, mode=None, *, full=False):
         if mode not in {None, "fresh", "refresh"}:
             raise ValueError("Review mode must be fresh or refresh")
+        if full and mode is None:
+            mode = "fresh"
         with self._db() as db:
             assessment = self._assessment(db, assessment_id)
         result = {
@@ -2439,6 +2757,35 @@ class AssessmentService:
                 "confidence_standard": "source-estimate-v1",
             }
             result["change_traces"] = []
+        if full:
+            result["plan"] = {
+                "schema_version": 1,
+                "diagnosis": "Not assessed; state the overall diagnosis.",
+                "target_state": "Not assessed; state the intended target state.",
+                "goal_revision": None,
+                "assumed_targets": None,
+                "initiatives": [],
+            }
+            result["challenge"] = {
+                "schema_version": 1,
+                "status": "unavailable",
+                "summary": "Not challenged; replace after the independent challenge, or state why none was possible.",
+                "gaps": ["No independent challenge has run for this draft."],
+            }
+            for rating in result["ratings"].values():
+                rating["burden_support"] = {
+                    "claim": "Not assessed; state the burden claim.",
+                    "scope": "workflow",
+                    "scope_description": "Not assessed; name the workflow or project scope.",
+                    "observation_ids": [],
+                    "change_trace_ids": [],
+                    "representativeness": "Not assessed; explain why this scope is representative.",
+                    "counterevidence": "Not assessed; record contrary evidence.",
+                    "freshness": "Not assessed; state how current the support is.",
+                    "limitations": [],
+                    "corroboration_ids": [],
+                    "counterevidence_ids": [],
+                }
         return result
 
     def _validate_review_document(self, db, assessment, review, *, final=True):
@@ -2455,7 +2802,11 @@ class AssessmentService:
 
         def cites(ids):
             if not ids or not set(ids) <= evidence_ids:
-                raise ValueError("Authored review claims require evidence from this snapshot")
+                unknown = sorted({evidence_label(item) for item in set(ids or ()) - evidence_ids})
+                raise ValueError(
+                    "Authored review claims require evidence from this snapshot"
+                    + (f": {', '.join(unknown[:10])}" if unknown else "")
+                )
 
         for rating in review["ratings"].values():
             if not set(rating["evidence_ids"]) <= evidence_ids:
@@ -2534,10 +2885,18 @@ class AssessmentService:
                 for field in ("corroboration_ids", "counterevidence_ids"):
                     if burden_support.get(field):
                         cites(burden_support[field])
-                if not set(burden_support["change_trace_ids"]) <= {t["id"] for t in traces}:
-                    raise ValueError("Burden support cites unknown change traces")
+                known_traces = {trace["id"] for trace in traces}
+                unknown_traces = [
+                    f"change_trace_ids[{index}]"
+                    for index, identity in enumerate(burden_support["change_trace_ids"])
+                    if identity not in known_traces
+                ]
+                if unknown_traces:
+                    raise ValueError(
+                        "Burden support cites unknown change traces: " + ", ".join(unknown_traces)
+                    )
         challenge = review.get("challenge")
-        if challenge and final:
+        if challenge:
             if challenge["status"] == "completed":
                 required = {"reviewer_id", "independence", "draft_digest", "items", "evidence_ids"}
                 if not required <= challenge.keys():
@@ -2553,7 +2912,7 @@ class AssessmentService:
                     in {"unassigned", method["reviewer_id"].casefold()}
                 ):
                     raise ValueError("Challenge requires distinct declared reviewer identities")
-                if challenge["draft_digest"] != _draft_digest(assessment, review):
+                if final and challenge["draft_digest"] != _draft_digest(assessment, review):
                     raise ConflictError(
                         "Challenge is stale; challenge the current draft and snapshot"
                     )
@@ -2567,46 +2926,95 @@ class AssessmentService:
                 raise ValueError(
                     "Unavailable challenge must state its limitation without a completion receipt"
                 )
+        burden_issues = []
+        for dimension, rating in review["ratings"].items():
+            medium_estimate = (
+                rating.get("burden_basis") == "source_estimate"
+                and rating.get("burden_confidence") == "medium"
+                and (
+                    (method or {}).get("confidence_standard") == "source-estimate-v1"
+                    or any(
+                        key in (rating.get("burden_support") or {})
+                        for key in ("corroboration_ids", "counterevidence_ids")
+                    )
+                )
+            )
+            if rating.get("burden_confidence") == "high" or medium_estimate:
+                support = burden_support_assessment(assessment, review, dimension)
+                gaps = [
+                    gap
+                    for gap in support["gap_details"]
+                    # Before the challenge exists, its binding is the one check that cannot pass.
+                    if final or gap["field"] != CHALLENGE_GAP_FIELD
+                ]
+                if gaps:
+                    burden_issues.append(
+                        {
+                            "dimension": dimension,
+                            "claim": "Medium source-estimate" if medium_estimate else "High burden",
+                            "gaps": gaps,
+                        }
+                    )
+        if burden_issues:
+            raise BurdenSupportError(burden_issues)
         scored = any(
             rating[axis] is not None
             for rating in review["ratings"].values()
             for axis in ("capability", "burden")
         )
         if (
-            final
-            and method
+            method
             and method["mode"] == "fresh"
             and scored
             and review.get("coverage", {}).get("scope") == "whole_project"
         ):
-            if not traces or challenge is None:
+            if not traces or (final and challenge is None):
                 raise ValueError(
                     "Fresh whole-project scores require a change trace and challenge or explicit unavailability"
                 )
-        if final:
-            for dimension, rating in review["ratings"].items():
-                medium_estimate = (
-                    rating.get("burden_basis") == "source_estimate"
-                    and rating.get("burden_confidence") == "medium"
-                    and (
-                        (method or {}).get("confidence_standard") == "source-estimate-v1"
-                        or any(
-                            key in (rating.get("burden_support") or {})
-                            for key in ("corroboration_ids", "counterevidence_ids")
-                        )
-                    )
-                )
-                if rating.get("burden_confidence") == "high" or medium_estimate:
-                    support = burden_support_assessment(assessment, review, dimension)
-                    if support["status"] != "structured_support_present_for_declared_scope":
-                        raise ValueError(
-                            ("Medium source-estimate" if medium_estimate else "High burden")
-                            + " confidence lacks support for "
-                            + dimension
-                            + ": "
-                            + "; ".join(support["gaps"])
-                        )
         return support_verification
+
+    def check_review(self, assessment_id, review):
+        """Run every submit_review check and report the outcome without saving anything."""
+        result = {
+            "schema_version": 1,
+            "assessment_id": assessment_id,
+            "valid": False,
+            "saved": False,
+            "draft_digest": None,
+            "errors": [],
+        }
+        with self._db() as db:
+            assessment = self._assessment(db, assessment_id)
+            try:
+                _validate(review, REVIEW_SCHEMA)
+                result["draft_digest"] = _draft_digest(assessment, review)
+                self._require_current_review_target(db, assessment, review)
+                self._validate_review_document(db, assessment, review)
+                result["valid"] = True
+            except BurdenSupportError as error:
+                result["errors"] = [
+                    {"type": "burden_support", "message": str(error), "issues": error.issues}
+                ]
+            except ConflictError as error:
+                result["errors"] = [{"type": "conflict", "message": str(error)}]
+            except ValueError as error:
+                result["errors"] = [{"type": "validation", "message": str(error)}]
+        return result
+
+    def _require_current_review_target(self, db, assessment, review):
+        if (
+            review["assessment_id"] != assessment["id"]
+            or review["source_digest"] != assessment["source"]["manifest_digest"]
+            or review["rubric_version"] != assessment["rubric_version"]
+        ):
+            raise ConflictError("Review identity does not match the captured assessment")
+        # Backfilled history is reviewable at any time, always as hindsight.
+        if (
+            not _backfilled(assessment)
+            and self._latest(db, assessment["project_id"])["id"] != assessment["id"]
+        ):
+            raise ConflictError("Assessment is stale; review the latest snapshot")
 
     def challenge_template(self, assessment_id, review):
         """Prepare captured context for a source-first, then exact-draft challenge."""
@@ -2622,7 +3030,7 @@ class AssessmentService:
         # Select navigation from captured facts alone instead of trying to redact
         # every possible representation of a grade from the authored review.
         selected_evidence = build_challenge_evidence_index(assessment, [])
-        return {
+        packet = {
             "schema_version": 2,
             "stage": "independent_source_review",
             "assessment_id": assessment_id,
@@ -2651,6 +3059,18 @@ class AssessmentService:
                 "Independence is declared, not authenticated. Any draft score, rationale, plan, trace or source change requires a follow-up challenge bound to the new digest.",
             ],
         }
+        return fit_budget(
+            packet,
+            CHALLENGE_CHARS,
+            {
+                "rubric": "rubric",
+                # These sections hold captured facts only, never the authored draft.
+                "context.collection_gaps": f"report {assessment_id} --section collection_gaps",
+                "context.dimension_inputs": f"report {assessment_id} --section dimension_inputs",
+                "context.system_map": f"evidence-query {assessment_id} --view areas",
+                "context.evidence_index": f"evidence-query {assessment_id} --view index",
+            },
+        )
 
     @staticmethod
     def _replay(db, request_id, operation, payload):
@@ -2688,12 +3108,7 @@ class AssessmentService:
             replay = self._replay(db, request_id, "review", review)
             if replay:
                 return replay
-            # Backfilled history is reviewable at any time, always as hindsight.
-            if (
-                not _backfilled(assessment)
-                and self._latest(db, assessment["project_id"])["id"] != assessment_id
-            ):
-                raise ConflictError("Assessment is stale; review the latest snapshot")
+            self._require_current_review_target(db, assessment, review)
             support_verification = self._validate_review_document(db, assessment, review)
             result = {
                 **review,
@@ -3101,14 +3516,16 @@ class AssessmentService:
             report["details_deferred"] = True
         return report
 
-    def export_report(self, assessment_id):
+    def export_report(self, assessment_id, *, include_evidence=False):
         """Create a private offline report and badge bundle under configured state."""
         from .report_export import export_report
 
         report = self.get_report(assessment_id)
         with self._db() as db:
             roots = [row[0] for row in db.execute("SELECT root FROM projects")]
-        return export_report(report, self.state_dir, forbidden_roots=roots)
+        return export_report(
+            report, self.state_dir, forbidden_roots=roots, include_evidence=include_evidence
+        )
 
     def get_badge(self, assessment_id, dimension="summary", *, format="svg"):
         """Export only public badge fields from the requested authorized snapshot and review."""

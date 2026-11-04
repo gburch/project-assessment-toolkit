@@ -16,7 +16,7 @@ from .generic_analysis import source_area, source_language
 from .source_controls import _inventory, _name
 from .static_analysis import source_role
 
-VERSION = "1"
+VERSION = "2"
 MAX_FILES = 20_000
 MAX_FILE_BYTES = 4 * 1024**2
 MAX_BYTES = 256 * 1024**2
@@ -116,6 +116,20 @@ def is_prompt_asset(path):
             re.search(r"(?:^|[._-])(?:system|developer|user)[._-]prompt(?:[._-]|$)", p.name.lower())
         )
     )
+
+
+def _workflow_root(path):
+    """Group a package's files: a schema in pkg/schemas can validate a call in pkg/llm."""
+    directories = PurePosixPath(path).parts[:-1]
+    start = next(
+        (
+            index + 1
+            for index, part in enumerate(directories)
+            if part in {"src", "lib", "packages", "apps", "services"}
+        ),
+        0,
+    )
+    return "/".join(directories[: start + 1]) or "(root)"
 
 
 def _call_kind(target):
@@ -591,6 +605,7 @@ def analyze_prompting(sources, *, deadline=None, python_facts=None):
     counts, role_counts, file_sets = Counter(), Counter(), defaultdict(set)
     samples, representatives = defaultdict(list), defaultdict(list)
     file_seen, file_representatives, file_counts = set(), {}, Counter()
+    unconfirmed_contracts = []
 
     def keep(collection, lane, signal):
         rank = int(signal["id"][3:], 16)
@@ -703,8 +718,16 @@ def analyze_prompting(sources, *, deadline=None, python_facts=None):
                 record.update(status="unsupported", syntax="unsupported")
             else:
                 hints, gap = [], None
+            schema_only = [
+                hint
+                for hint in hints
+                if hint[0] == "output_contract" and "mechanism" not in hint[2]
+            ]
+            if schema_only:
+                unconfirmed_contracts.append((row, record, schema_only))
             for kind, line, context in hints:
-                emit(row, kind, line, "import_and_call_syntax", context)
+                if not (kind == "output_contract" and "mechanism" not in context):
+                    emit(row, kind, line, "import_and_call_syntax", context)
             if gap:
                 gaps.add(gap)
         except (
@@ -724,6 +747,30 @@ def analyze_prompting(sources, *, deadline=None, python_facts=None):
         for lane, signal in file_representatives.items():
             keep(representatives, lane, signal)
         files.append(record)
+    # General schema validation is an output contract only beside model or prompt use.
+    model_areas = {
+        _workflow_root(path)
+        for kind in (
+            "model_client_setup",
+            "model_invocation",
+            "agent_orchestration",
+            "runtime_prompt_asset",
+        )
+        for path in file_sets[kind]
+    }
+    schema_without_model_context = 0
+    for row, record, hints in unconfirmed_contracts:
+        if _workflow_root(row["path"]) not in model_areas:
+            schema_without_model_context += len(hints)
+            continue
+        file_seen, file_representatives, file_counts = set(), {}, Counter()
+        for kind, line, context in hints:
+            emit(row, kind, line, "import_and_call_syntax", context)
+        record["signal_counts"] = dict(
+            sorted((Counter(record.get("signal_counts", {})) + file_counts).items())
+        )
+        for lane, signal in file_representatives.items():
+            keep(representatives, lane, signal)
     lanes = defaultdict(list)
     for lane in samples:
         # Prefer one location from distinct files before additional locations.
@@ -766,6 +813,7 @@ def analyze_prompting(sources, *, deadline=None, python_facts=None):
             "unsupported_files": statuses["unsupported"],
             "omitted_files": statuses["not_analyzed"],
             "input_bytes": input_bytes,
+            "schema_validation_without_model_context": schema_without_model_context,
             "syntax_languages": ["python", "javascript", "typescript"],
             "files": files,
         },

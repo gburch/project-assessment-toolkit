@@ -39,7 +39,7 @@ def test_review_plan_pages_keep_identity_source_locations_and_exact_source_conte
     )
     assert full["source"] == assessment["source"]
     assert full["scope_digest"] == assessment["scope_digest"]
-    assert full["review_plan_scope"]["version"] == "3"
+    assert full["review_plan_scope"]["version"] == "4"
     assert {row["record_type"] for row in full["items"]} >= {
         "dimension_review_scope",
         "source_task",

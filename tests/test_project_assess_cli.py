@@ -100,7 +100,8 @@ def test_installed_cli_roundtrip_without_source_path_imports(tmp_path):
     assert all(
         row["status"] == "available_not_attested_read" for row in identity["available_instructions"]
     )
-    diagnosis = json.loads(command("doctor", snapshot["id"]))
+    diagnosis = json.loads(command("doctor", snapshot["id"], "--full"))
+    assert "output_budget" in json.loads(command("doctor", snapshot["id"]))
     assert json.loads(command("doctor", snapshot["id"], "--limit", "1"))["selection"]["limit"] == 1
     assert diagnosis["assessment_id"] == snapshot["id"]
     assert diagnosis["source"] == snapshot["source"]

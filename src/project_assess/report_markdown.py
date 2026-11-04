@@ -285,7 +285,13 @@ def _confidence_markdown(assessment, review):
     return lines
 
 
-def _planning_markdown(alignment):
+def report_name(assessment):
+    """Prefer the recorded repository or display name; a checkout directory can be temporary."""
+    source = assessment["source"]
+    return source.get("display_name") or Path(source["root"]).name
+
+
+def _method_markdown(alignment):
     lines = ["", "## Assessment method", ""]
     method = alignment.get("assessment_method", {})
     lines += [
@@ -470,7 +476,11 @@ def _planning_markdown(alignment):
             + str(system["omitted_cross_area_dependencies"])
             + " import pairs."
         )
-    lines += [
+    return lines
+
+
+def _plan_markdown(alignment):
+    lines = [
         "",
         "## Improvement plan",
         "",
@@ -597,21 +607,45 @@ def _prompting_markdown(report):
     return lines
 
 
-def markdown_report(report):
-    assessment = report["assessment"]
+def _verdict_markdown(report):
+    review, plan = report.get("review"), (report.get("goal_alignment") or {}).get("plan")
+    if plan and plan.get("diagnosis"):
+        verdict = _markdown_text(plan["diagnosis"])
+    elif review:
+        verdict = "Reviewed, without an improvement plan. Scores below are the saved judgment."
+    else:
+        verdict = (
+            "**Unreviewed snapshot.** Source facts are captured; no scores are judged and no "
+            "review stands behind this report."
+        )
+    lines = ["", "## Verdict", "", verdict]
+    context = project_context_assessment(
+        report["assessment"], report.get("review"), report.get("goals")
+    )
+    if context["status"] != "unestablished":
+        lines += [
+            "",
+            "Today: "
+            + _markdown_text(context["current"]["milestone_label"])
+            + " · "
+            + _markdown_text(context["current"]["readiness_label"])
+            + ". Intended: "
+            + _markdown_text(context["intended"]["milestone_label"])
+            + ".",
+        ]
+    return lines
+
+
+def _scorecard_markdown(ratings):
     lines = [
-        "# Project assessment: " + _markdown_text(Path(assessment["source"]["root"]).name),
         "",
-        f"Snapshot: `{assessment['id']}`; rubric: {assessment['rubric_version']}",
+        "## Scorecard",
         "",
         "Capability and burden are evidence-backed judgments; missing evidence is unknown.",
-        *_project_context_markdown(report),
-        *_prompting_markdown(report),
         "",
         "| Dimension | Capability | Burden and evidence | Capability confidence |",
         "|---|---:|---:|---|",
     ]
-    ratings = (report["review"] or {}).get("ratings", {})
     for dimension in DIMENSIONS:
         rating = ratings.get(dimension, {})
         burden = rating.get("burden")
@@ -626,7 +660,83 @@ def markdown_report(report):
         lines.append(
             f"| {dimension} | {rating.get('capability') if rating.get('capability') is not None else 'unknown'} | {burden_text} | {rating.get('confidence', 'unknown')} |"
         )
+    return lines
+
+
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def _findings_markdown(report):
+    lines = ["", "## Findings", ""]
+    findings = report["assessment"]["findings"] + (report["review"] or {}).get("findings", [])
+    for finding in sorted(findings, key=lambda row: _SEVERITY_ORDER.get(row.get("severity"), 5)):
+        lines.append(
+            "- "
+            + _markdown_text(finding.get("severity", "unknown"))
+            + ": "
+            + _markdown_text(finding.get("title", finding.get("message", "Finding")))
+        )
+    if not findings:
+        lines.append("No findings are recorded.")
+    decisions = [
+        item for item in report.get("finding_status", {}).get("items", []) if item["event_count"]
+    ]
+    if decisions:
+        lines += [
+            "",
+            "### Finding verification and accepted debt",
+            "",
+            report["finding_status"]["caveat"],
+            "",
+        ]
+        for item in decisions:
+            lines.append(
+                "- "
+                + _markdown_text(
+                    f"{item['finding']['severity']}: {item['finding']['title']} — {item['status']} ({item['verification_label']})"
+                )
+            )
+            if item.get("verification"):
+                lines.append("  " + _markdown_text(item["verification"]["acceptance"]))
+    return lines
+
+
+_APPENDIX_INDEX = (
+    "Dimension rationale, project maturity, prompt reliance, confidence and evidence support, "
+    "assessment method, review coverage, deterministic inputs, production source map, collected "
+    "facts, ecosystem fit, evidence gaps, goals and progress."
+)
+
+
+def markdown_report(report):
+    """Lead with the decisions; supporting detail follows under Appendices."""
+    assessment = report["assessment"]
+    ratings = (report["review"] or {}).get("ratings", {})
+    planning = {
+        **report.get("goal_alignment", {}),
+        "review_coverage": report.get("review_coverage") or _review_coverage(report["review"]),
+    }
+    lines = [
+        "# Project assessment: " + _markdown_text(report_name(assessment)),
+        "",
+        f"Snapshot: `{assessment['id']}`; rubric: {assessment['rubric_version']}",
+        *_verdict_markdown(report),
+        *_scorecard_markdown(ratings),
+        *_findings_markdown(report),
+        *_plan_markdown(planning),
+        "",
+        "## Appendices",
+        "",
+        _APPENDIX_INDEX,
+    ]
+    for dimension, rating in ratings.items():
+        lines += ["", f"## {dimension.capitalize()}", "", _markdown_text(rating["rationale"])]
+        lines += ["- " + _markdown_text(r) for r in rating["recommendations"]]
+        lines += ["", "Evidence: " + ", ".join(rating["evidence_ids"])]
+    lines += _project_context_markdown(report)
+    lines += _prompting_markdown(report)
     lines += _confidence_markdown(assessment, report["review"])
+    lines += _method_markdown(planning)
     facts = assessment["facts"]
     inventory = facts.get("inventory", {})
     lines += [
@@ -710,44 +820,6 @@ def markdown_report(report):
     lines += ["- " + _markdown_text(gap) for gap in assessment["gaps"]] or [
         "- No collector gaps recorded."
     ]
-    for dimension, rating in ratings.items():
-        lines += ["", f"## {dimension.capitalize()}", "", _markdown_text(rating["rationale"])]
-        lines += ["- " + _markdown_text(r) for r in rating["recommendations"]]
-        lines += ["", "Evidence: " + ", ".join(rating["evidence_ids"])]
-    lines += ["", "## Findings", ""]
-    for finding in assessment["findings"] + (report["review"] or {}).get("findings", []):
-        lines.append(
-            "- "
-            + _markdown_text(finding.get("severity", "unknown"))
-            + ": "
-            + _markdown_text(finding.get("title", finding.get("message", "Finding")))
-        )
-    lines += _planning_markdown(
-        {
-            **report.get("goal_alignment", {}),
-            "review_coverage": report.get("review_coverage") or _review_coverage(report["review"]),
-        }
-    )
-    decisions = [
-        item for item in report.get("finding_status", {}).get("items", []) if item["event_count"]
-    ]
-    if decisions:
-        lines += [
-            "",
-            "## Finding verification and accepted debt",
-            "",
-            report["finding_status"]["caveat"],
-            "",
-        ]
-        for item in decisions:
-            lines.append(
-                "- "
-                + _markdown_text(
-                    f"{item['finding']['severity']}: {item['finding']['title']} — {item['status']} ({item['verification_label']})"
-                )
-            )
-            if item.get("verification"):
-                lines.append("  " + _markdown_text(item["verification"]["acceptance"]))
     lines += [
         "",
         "## Goals and progress",
