@@ -401,7 +401,7 @@ def test_qualified_metadata_and_fixed_profiles_do_not_launch_java(qualified, mon
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("metadata launched Java"))
     info = analysis.joern_info()
     assert info["available"] and info["version"] == "4.0.669"
-    assert info["adapter_version"] == "13"
+    assert info["adapter_version"] == "14"
     assert info["query_version"] == "10" and info["dataflow"] == "deep_profile"
     assert qualified["root"] not in json.dumps(info)
     deep = analysis.joern_limits("deep")
@@ -1318,6 +1318,38 @@ def test_failed_query_retains_qualified_phase_receipt_and_process_timing(
     assert all(type(value) is float and value >= 0 for value in batch["timing"].values())
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("private process detail"),
+        subprocess.TimeoutExpired(["private command detail"], 2),
+        KeyError("private output detail"),
+    ],
+)
+def test_outer_query_failure_retains_source_free_operation_diagnostic(
+    qualified, monkeypatch, failure, capsys
+):
+    def run(argv, *, output=None, **kwargs):
+        if output:
+            raise failure
+        return fake_run(argv, output=output, **kwargs)
+
+    monkeypatch.setattr(analysis, "_run", run)
+    result = analysis.analyze_joern([source()], snapshot=qualified, analysis_profile="deep")
+    assert result["status"] == "partial"
+    assert result["provenance"]["failure"] == {
+        "operation": "query_process",
+        "language": "python",
+        "exception_type": type(failure).__name__,
+    }
+    assert all(
+        detail not in json.dumps(result)
+        for detail in ("private process detail", "private command detail", "private output detail")
+    )
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
 def test_staged_source_mutation_invalidates_model_identity(qualified, monkeypatch):
     def run(argv, **kwargs):
         fake_run(argv, **kwargs)
@@ -1368,7 +1400,32 @@ def test_process_runner_enforces_timeout_and_discards_sensitive_logs(tmp_path, c
         limits=limits,
     )
     assert result == "log_limit"
-    assert capsys.readouterr().out == capsys.readouterr().err == ""
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+def test_process_reap_failure_keeps_safe_subphase_and_closes_pipes(tmp_path, monkeypatch):
+    original_stop = analysis._stop_group
+    processes = []
+
+    def fail_after_reap(process):
+        original_stop(process)
+        processes.append(process)
+        raise subprocess.TimeoutExpired(["private reap detail"], 2)
+
+    monkeypatch.setattr(analysis, "_stop_group", fail_after_reap)
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        analysis._run(
+            [sys.executable, "-c", "pass"],
+            workspace=tmp_path,
+            cwd=tmp_path,
+            env={},
+            stop=time.monotonic() + 3,
+            limits=analysis.joern_limits("standard"),
+        )
+    assert raised.value._pat_joern_worker_operation == "process_reap"
+    assert processes[0].poll() is not None
+    assert processes[0].stdout.closed and processes[0].stderr.closed
 
 
 @pytest.mark.parametrize(

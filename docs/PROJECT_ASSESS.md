@@ -477,6 +477,9 @@ contained worker process group. It resumes the existing round-robin plan from a
 digest-checked, per-run saved overlay and committed flow checkpoint, retaining
 completed evidence and marking the timed-out endpoint unknown. It does not reuse
 analysis across snapshots or repeat parsing and overlay construction per endpoint.
+An unexpected outer adapter failure records fixed operation, language and exception-type
+codes in provider provenance; process failures also identify start, monitor or reap.
+These codes contain no exception message, command, source or raw SDK log.
 Restarts are bounded (at most 32) by the existing language and overall time/workspace
 allowances; reaching a limit leaves pending/unselected work explicit. A retention
 cap, process exit or timeout never proves an empty flow. Startup/overlay work has

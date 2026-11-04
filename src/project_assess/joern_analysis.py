@@ -27,7 +27,7 @@ from .joern_bindings import BindingCountercheck
 from .joern_dataflow import normalize_dataflow
 from .static_analysis import _retained_candidates, source_role
 
-VERSION = "13"
+VERSION = "14"
 QUERY_VERSION = "10"
 JOERN_VERSION = "4.0.669"
 QUERY_PATH = Path(__file__).parent / "resources" / "joern.sc"
@@ -683,16 +683,20 @@ def _run(argv, *, workspace, cwd, env, stop, limits, output=None, flow_watch=Non
             model_pruned = True
         tails[stream] = combined[-128:]
 
-    process = subprocess.Popen(
-        argv,
-        cwd=cwd,
-        env=env,
-        shell=False,
-        start_new_session=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=env,
+            shell=False,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        error._pat_joern_worker_operation = "process_start"
+        raise
     try:
         with selectors.DefaultSelector() as selector:
             for stream in (process.stdout, process.stderr):
@@ -752,10 +756,18 @@ def _run(argv, *, workspace, cwd, env, stop, limits, output=None, flow_watch=Non
                 status = "log_limit"
             if status == "complete" and code != 0:
                 status = "tool_failed"
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        error._pat_joern_worker_operation = "process_monitor"
+        raise
     finally:
-        _stop_group(process)
-        process.stdout.close()
-        process.stderr.close()
+        try:
+            _stop_group(process)
+        except (OSError, subprocess.SubprocessError) as error:
+            error._pat_joern_worker_operation = "process_reap"
+            raise
+        finally:
+            process.stdout.close()
+            process.stderr.close()
     if status == "complete" and (
         _workspace_size(workspace) > limits["workspace_bytes"]
         or output
@@ -1704,6 +1716,7 @@ def analyze_joern(
     flow_batches, flow_paths = [], []
     staged = {}
     clean = redact or (lambda value: value)
+    operation, active_language = "setup", None
     try:
         home, java, paths, _, hashes = _tools()
         if hashes != identity.get("component_hashes"):
@@ -1740,6 +1753,7 @@ def analyze_joern(
             env = _environment(paths, java, workspace, limits)
             query = workspace / "query.sc"
             query.write_bytes(paths["query"].read_bytes())
+            operation = "source_staging"
             staged = {}
             for source in selected:
                 if source["language"] not in _FRONTENDS:
@@ -1779,6 +1793,7 @@ def analyze_joern(
                 if any(source["language"] == language for source in staged.values())
             ]
             for language_index, language in enumerate(languages):
+                active_language = language
                 batch = {
                     path: source
                     for path, source in staged.items()
@@ -1817,6 +1832,7 @@ def analyze_joern(
                     parser.append("--no-tsTypes")
                 compatibility = None
                 parse_began = time.perf_counter()
+                operation = "parser_process"
                 status = _run(
                     _contained_command(parser, workspace, original, containment, binary, cwd),
                     workspace=workspace,
@@ -1867,6 +1883,7 @@ def analyze_joern(
                     query_model_pruned = False
                     overlay_digest = None
                     while True:
+                        operation = "query_process"
                         attempt_token = uuid.uuid4().hex
                         attempt_command = [*command, "--param", "attemptToken=" + attempt_token]
                         if query_attempts:
@@ -1912,6 +1929,7 @@ def analyze_joern(
                         )
                         if status != "endpoint_timeout":
                             break
+                        operation = "resume_checkpoint"
                         try:
                             base_path = output.with_name(output.name + ".base.json")
                             overlay_path = output.with_name(output.name + ".overlay.bin")
@@ -1993,6 +2011,7 @@ def analyze_joern(
                         endpoint_id=getattr(status, "endpoint_id", None),
                     )
                 process_status = status
+                operation = "model_normalization"
                 producer_diagnostics = {
                     "terminal_status": getattr(status, "terminal_status", str(status)),
                     "engine_failed": getattr(
@@ -2282,6 +2301,7 @@ def analyze_joern(
                     gaps.add(
                         f"Joern {language} analysis did not complete: {status}; missing results remain unknown"
                     )
+                operation = "batch_summary"
                 batches.append(
                     {
                         "language": language,
@@ -2327,6 +2347,7 @@ def analyze_joern(
                     }
                 )
                 shutil.rmtree(cwd)
+            operation, active_language = "module_summary", None
             if unqualified:
                 batches.append(
                     {
@@ -2371,7 +2392,15 @@ def analyze_joern(
         RecursionError,
         json.JSONDecodeError,
         subprocess.SubprocessError,
-    ):
+    ) as error:
+        result["provenance"]["failure"] = {
+            "operation": operation,
+            "language": active_language,
+            "exception_type": type(error).__name__,
+        }
+        worker_operation = getattr(error, "_pat_joern_worker_operation", None)
+        if worker_operation in {"process_start", "process_monitor", "process_reap"}:
+            result["provenance"]["failure"]["worker_operation"] = worker_operation
         gaps.add(
             "Joern setup or output could not be validated safely; raw diagnostics are not retained"
         )
